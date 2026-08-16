@@ -98,9 +98,23 @@ struct Config {
     std::uint32_t idleTimeoutSeconds = 60;
 
     // --- Cache -------------------------------------------------------------
-    CacheBackend  cacheBackend  = CacheBackend::Memory;
+    CacheBackend cacheBackend = CacheBackend::Memory;
+
+    /// Total budget for the cache, counted as stored bytes plus per-entry
+    /// overhead. Zero disables caching entirely.
     std::uint64_t cacheMaxBytes = 128ull * 1024 * 1024;
+
+    /// Default lifetime for cached entries. Zero means "until evicted", which
+    /// is safe for a single instance and not for a shared Redis.
+    std::uint32_t cacheTtlSeconds = 300;
+
+    /// Ceiling on how long the local tier may hold a copy of a shared value.
+    /// Only meaningful with the Redis backend, where another instance can
+    /// change a value this process has already copied.
+    std::uint32_t cacheLocalTtlSeconds = 5;
+
     std::string   redisUrl;
+    std::uint32_t redisPoolSize = 4;
 
     // --- Observability -----------------------------------------------------
     std::string logLevel = "info";

@@ -5,11 +5,13 @@
 namespace monobucket {
 
 struct Config;
+class CacheProvider;
 class IoExecutor;
 class StorageEngine;
 
 /// /healthz, /readyz, /metrics and /_mb/version — registered on every listener.
-void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io);
+void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io,
+                          CacheProvider& cache);
 
 /// Serves the embedded SvelteKit dashboard on the console listener. A no-op
 /// when the binary was built without MONOBUCKET_EMBED_FRONTEND.

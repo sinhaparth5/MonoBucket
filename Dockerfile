@@ -41,6 +41,11 @@ RUN test -f frontend/build/index.html
 # --- Stage 2: engine -------------------------------------------------------
 FROM alpine:3.21 AS backend
 
+# Off by default: the in-memory cache is the right answer for a single
+# container, and a shared cache nobody asked for is dependency for its own sake.
+#   docker build --build-arg MONOBUCKET_ENABLE_REDIS=ON .
+ARG MONOBUCKET_ENABLE_REDIS=OFF
+
 RUN apk add --no-cache \
         build-base \
         cmake \
@@ -53,7 +58,8 @@ RUN apk add --no-cache \
         jsoncpp-dev \
         util-linux-dev \
         c-ares-dev \
-        rocksdb-dev
+        rocksdb-dev \
+ && if [ "$MONOBUCKET_ENABLE_REDIS" = "ON" ]; then apk add --no-cache hiredis-dev; fi
 
 WORKDIR /src
 COPY . .
@@ -65,6 +71,7 @@ RUN cmake -S . -B build -G Ninja \
         -DMONOBUCKET_EMBED_FRONTEND=ON \
         -DMONOBUCKET_ENABLE_LTO=ON \
         -DMONOBUCKET_STATIC_LINK=ON \
+        -DMONOBUCKET_ENABLE_REDIS="${MONOBUCKET_ENABLE_REDIS}" \
  && cmake --build build --parallel "$(nproc)" \
  && strip --strip-all build/bin/monobucket \
  && build/bin/monobucket --version
@@ -75,6 +82,7 @@ FROM alpine:3.21 AS runtime
 ARG MONOBUCKET_VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
+ARG MONOBUCKET_ENABLE_REDIS=OFF
 
 LABEL org.opencontainers.image.title="MonoBucket" \
       org.opencontainers.image.description="Single-binary S3-compatible object storage with an embedded admin dashboard" \
@@ -92,6 +100,7 @@ RUN apk add --no-cache \
         c-ares \
         libuuid \
         rocksdb \
+ && if [ "$MONOBUCKET_ENABLE_REDIS" = "ON" ]; then apk add --no-cache hiredis; fi \
  && addgroup -S -g 1000 monobucket \
  && adduser  -S -u 1000 -G monobucket -H -h /data monobucket \
  && mkdir -p /data \

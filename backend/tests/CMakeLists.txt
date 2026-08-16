@@ -3,11 +3,16 @@ add_executable(monobucket_tests
     config_test.cpp
     asset_store_test.cpp
     blob_store_test.cpp
+    cache_factory_test.cpp
     codec_test.cpp
     digest_test.cpp
+    fallback_cache_test.cpp
     io_executor_test.cpp
     keyspace_test.cpp
+    memory_cache_test.cpp
     metadata_store_test.cpp
+    redis_cache_test.cpp
+    redis_url_test.cpp
     storage_engine_test.cpp
 )
 

@@ -22,8 +22,12 @@ services:
       # Counts against the 256M cap below, so it is set explicitly rather than
       # left to the default.
       MONOBUCKET_METADATA_MEMORY_BYTES: ${MONOBUCKET_METADATA_MEMORY_BYTES:-32MiB}
+      # 'redis' needs an image built with -DMONOBUCKET_ENABLE_REDIS=ON and the
+      # redis profile below; otherwise the setting is ignored with a warning.
       MONOBUCKET_CACHE_BACKEND: ${MONOBUCKET_CACHE_BACKEND:-memory}
       MONOBUCKET_CACHE_MAX_BYTES: ${MONOBUCKET_CACHE_MAX_BYTES:-128MiB}
+      MONOBUCKET_CACHE_TTL_SECONDS: ${MONOBUCKET_CACHE_TTL_SECONDS:-300}
+      MONOBUCKET_REDIS_URL: ${MONOBUCKET_REDIS_URL:-redis://redis:6379}
       MONOBUCKET_LOG_LEVEL: ${MONOBUCKET_LOG_LEVEL:-info}
     volumes:
       - monobucket-data:/data

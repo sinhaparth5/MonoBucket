@@ -7,6 +7,7 @@
 
 #include <drogon/drogon.h>
 
+#include "cache/cache_factory.hpp"
 #include "core/lifecycle.hpp"
 #include "core/logging.hpp"
 #include "monobucket/version.hpp"
@@ -20,6 +21,11 @@ const std::chrono::steady_clock::time_point kStartedAt = std::chrono::steady_clo
 /// Bounded so one sweep cannot monopolise an I/O thread; the next tick picks up
 /// whatever is left.
 constexpr std::size_t kReclaimBatch = 512;
+
+/// How often expired cache entries are swept. Not configurable: the budget is
+/// held on insert regardless, so this only decides how long an entry nobody
+/// reads again keeps occupying space it is no longer entitled to.
+constexpr double kCacheSweepSeconds = 30.0;
 
 trantor::Logger::LogLevel toTrantorLevel(const std::string& level) {
     if (level == "trace") return trantor::Logger::kTrace;
@@ -87,6 +93,15 @@ void Server::openStorage() {
     Lifecycle::instance().onShutdown("io-executor", [this] { io_->stop(); });
 }
 
+void Server::openCache() {
+    cache_ = makeCache(config_);
+
+    // Dropped before the storage engine flushes. Nothing in the cache is
+    // authoritative — every entry is a copy of something already durable — so
+    // shutdown discards it rather than trying to persist it.
+    Lifecycle::instance().onShutdown("cache", [this] { cache_->clear(); });
+}
+
 void Server::configureFramework() {
     auto& app = drogon::app();
 
@@ -116,7 +131,7 @@ void Server::configureFramework() {
 }
 
 void Server::registerRoutes() {
-    registerSystemRoutes(config_, *storage_, *io_);
+    registerSystemRoutes(config_, *storage_, *io_, *cache_);
 
     if (config_.consoleEnabled) {
         registerConsoleRoutes(config_);
@@ -126,6 +141,15 @@ void Server::registerRoutes() {
 }
 
 void Server::scheduleMaintenance() {
+    // The cache holds its own budget on every insert, so this pass exists only
+    // to collect entries that expired without anyone asking for them again.
+    // It runs on the event loop rather than the I/O pool: it touches no file
+    // descriptors, and it must not queue behind a slow disk.
+    drogon::app().getLoop()->runEvery(kCacheSweepSeconds, [this] {
+        const std::size_t dropped = cache_->evict(config_.cacheMaxBytes);
+        if (dropped > 0) log::debug("cache: swept ", dropped, " expired entries");
+    });
+
     if (config_.reclaimIntervalSeconds == 0) {
         log::info("background reclamation disabled");
         return;
@@ -161,6 +185,7 @@ void Server::watchForShutdown() {
 int Server::run() {
     prepareDataDirectory();
     openStorage();
+    openCache();
     configureFramework();
     registerRoutes();
     scheduleMaintenance();

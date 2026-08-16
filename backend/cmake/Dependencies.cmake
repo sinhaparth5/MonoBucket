@@ -153,6 +153,18 @@ if(MONOBUCKET_ENABLE_REDIS)
             GIT_TAG        v1.2.0
             GIT_SHALLOW    TRUE)
         FetchContent_MakeAvailable(hiredis)
+
+        # An installed hiredis puts its headers under include/hiredis/; the
+        # build tree leaves them flat at the source root. Rather than guess,
+        # the source asks.
+        set(MONOBUCKET_HIREDIS_FLAT_HEADERS ON)
+    endif()
+
+    # sds.h uses C flexible array members, which -Wpedantic rejects in C++.
+    # Same treatment as Drogon: not our warning to fix, and burying our own
+    # under it would be worse.
+    if(TARGET hiredis)
+        set_target_properties(hiredis PROPERTIES SYSTEM ON)
     endif()
 endif()
 

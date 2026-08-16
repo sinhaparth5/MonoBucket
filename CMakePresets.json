@@ -32,6 +32,14 @@
       }
     },
     {
+      "name": "dev-redis",
+      "inherits": "dev",
+      "displayName": "Debug + tests + the Redis backend (integration tests)",
+      "cacheVariables": {
+        "MONOBUCKET_ENABLE_REDIS": "ON"
+      }
+    },
+    {
       "name": "release",
       "inherits": "base",
       "displayName": "Optimised build with the dashboard embedded",
@@ -53,6 +61,7 @@
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
+    { "name": "dev-redis", "configurePreset": "dev-redis" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "release", "configurePreset": "release" },
     { "name": "release-redis", "configurePreset": "release-redis" }
@@ -61,6 +70,12 @@
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "dev-redis",
+      "configurePreset": "dev-redis",
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error", "stopOnFailure": false }
     },

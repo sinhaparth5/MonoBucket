@@ -6,7 +6,7 @@ dashboard.
 
 **Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Current phase:** Phase 3 — Abstraction & Cache Layer
+**Current phase:** Phase 4 — S3 REST API Protocol
 **Last updated:** 2026-08-16
 
 ---
@@ -105,22 +105,47 @@ is measured in Phase 7.*
 *Goal: a pluggable cache that never becomes the reason memory grows.*
 
 ### Abstract interface
-- [ ] `CacheProvider`: `get`, `set`, `del`, `evict`, plus stats for `/metrics`
+- [x] `CacheProvider`: `get`, `set`, `del`, `evict`, `clear`, plus stats for
+      `/metrics`. Values are handed out as `shared_ptr<const string>` so a
+      reader is not racing eviction for the bytes it is still writing
 
 ### In-memory LRU backend (default)
-- [ ] `std::unordered_map` + intrusive doubly linked list, guarded by
-      `std::shared_mutex` for concurrent reads
-- [ ] Byte-size budget with background eviction, not per-entry counts
-- [ ] Hit/miss/eviction counters exported to Prometheus
+- [x] `std::unordered_map` + intrusive doubly linked list, guarded by
+      `std::shared_mutex` — **sharded**, because one lock over a cache this hot
+      serialises the whole server
+- [x] Reads take the shared lock and do not reorder the list. Promoting on
+      every read would make `get()` a writer and reduce the `shared_mutex` to
+      decoration; a hit sets an atomic flag and eviction gives a flagged entry
+      one reprieve (CLOCK). Recency is approximate, concurrency is real
+- [x] Byte-size budget, not per-entry counts, and charged per-entry overhead as
+      well as payload — a million eight-byte values are not eight megabytes
+- [x] The budget is held **on insert**; the periodic pass collects expired
+      entries rather than enforcing the ceiling. A budget only checked on a
+      timer is a target
+- [x] Hit/miss/eviction/expiration/rejection counters exported to Prometheus
 
 ### Redis backend (optional)
-- [ ] `hiredis` wrapper conforming to `CacheProvider`
-- [ ] Connection pooling
-- [ ] Reconnect with backoff, transparent fallback to in-memory when Redis is
+- [x] `hiredis` wrapper conforming to `CacheProvider`, over `redisCommandArgv`
+      so an object key containing `%` is data rather than syntax
+- [x] Bounded connection pool with lazy connect — a Redis that is down at
+      startup must not stop the container from starting
+- [x] Reconnect with backoff, transparent fallback to in-memory when Redis is
       unreachable — a cache outage must never become a storage outage
+- [x] Arranged as two tiers rather than an either/or, so the fallback is warm
+      when it is needed instead of empty. `MONOBUCKET_CACHE_LOCAL_TTL_SECONDS`
+      bounds how long the local copy of a shared value can go unnoticed
+- [x] `clear()` scans our own key prefix; never `FLUSHDB`, since the database
+      may not be ours alone
+- [ ] TLS (`rediss://`) — refused at startup with the reason rather than left
+      to fail as a connection timeout
 
 **Exit criteria:** cache backend is swappable by environment variable alone, and
 the in-memory backend holds its configured byte budget under stress.
+*Both met and covered by tests. The budget is asserted on every insert across
+500 inserts and under eight concurrent threads, and backend selection is
+verified through `Config::fromEnvironment()`. What is not yet demonstrated is a
+hit ratio under real traffic: nothing calls the cache until the S3 handlers land
+in Phase 4, so `monobucket_cache_hits_total` is legitimately 0 today.*
 
 ---
 

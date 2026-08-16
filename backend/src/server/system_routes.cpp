@@ -11,6 +11,7 @@
 #include <unistd.h>
 #endif
 
+#include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
 #include "monobucket/version.hpp"
@@ -48,7 +49,8 @@ bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
     return req->getLocalAddr().toPort() == config.consolePort;
 }
 
-std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecutor& io) {
+std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecutor& io,
+                          CacheProvider& cache) {
     std::ostringstream os;
 
     os << "# HELP monobucket_build_info Build metadata; always 1.\n"
@@ -67,10 +69,6 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
     os << "# HELP monobucket_worker_threads Configured event-loop worker threads.\n"
        << "# TYPE monobucket_worker_threads gauge\n"
        << "monobucket_worker_threads " << config.workerThreads << '\n';
-
-    os << "# HELP monobucket_cache_limit_bytes Configured cache budget.\n"
-       << "# TYPE monobucket_cache_limit_bytes gauge\n"
-       << "monobucket_cache_limit_bytes " << config.cacheMaxBytes << '\n';
 
     os << "# HELP monobucket_embedded_asset_bytes Size of the dashboard baked into the binary.\n"
        << "# TYPE monobucket_embedded_asset_bytes gauge\n"
@@ -135,7 +133,72 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
        << "# TYPE monobucket_io_rejected_total counter\n"
        << "monobucket_io_rejected_total " << ioStats.rejected << '\n';
 
-    // Phase 3/4 append cache hit-ratio and request counters here.
+    const auto cacheStats = cache.stats();
+    const std::string backend(cache.name());
+
+    // The budget this process holds, which is not always MONOBUCKET_CACHE_MAX_
+    // BYTES: with a shared backend most of the budget lives in Redis and this
+    // reports the local tier, which is the part that counts against our RSS.
+    os << "# HELP monobucket_cache_limit_bytes Cache budget held in this process.\n"
+       << "# TYPE monobucket_cache_limit_bytes gauge\n"
+       << "monobucket_cache_limit_bytes{backend=\"" << backend << "\"} "
+       << cacheStats.limitBytes << '\n';
+
+    os << "# HELP monobucket_cache_bytes Bytes currently held, including per-entry overhead.\n"
+       << "# TYPE monobucket_cache_bytes gauge\n"
+       << "monobucket_cache_bytes{backend=\"" << backend << "\"} " << cacheStats.bytes << '\n';
+
+    os << "# HELP monobucket_cache_entries Entries currently held.\n"
+       << "# TYPE monobucket_cache_entries gauge\n"
+       << "monobucket_cache_entries{backend=\"" << backend << "\"} " << cacheStats.entries << '\n';
+
+    os << "# HELP monobucket_cache_hits_total Lookups answered from the cache.\n"
+       << "# TYPE monobucket_cache_hits_total counter\n"
+       << "monobucket_cache_hits_total{backend=\"" << backend << "\"} " << cacheStats.hits << '\n';
+
+    os << "# HELP monobucket_cache_misses_total Lookups that had to go to storage.\n"
+       << "# TYPE monobucket_cache_misses_total counter\n"
+       << "monobucket_cache_misses_total{backend=\"" << backend << "\"} " << cacheStats.misses
+       << '\n';
+
+    // Derived here as well as being derivable by the scraper: it is the first
+    // number anyone looks at, and a dashboard should not have to compute it.
+    os << "# HELP monobucket_cache_hit_ratio Hits over lookups since startup.\n"
+       << "# TYPE monobucket_cache_hit_ratio gauge\n"
+       << "monobucket_cache_hit_ratio{backend=\"" << backend << "\"} " << cacheStats.hitRatio()
+       << '\n';
+
+    // Rising steadily means the budget is too small for the working set.
+    os << "# HELP monobucket_cache_evictions_total Entries dropped to stay inside the budget.\n"
+       << "# TYPE monobucket_cache_evictions_total counter\n"
+       << "monobucket_cache_evictions_total{backend=\"" << backend << "\"} "
+       << cacheStats.evictions << '\n';
+
+    os << "# HELP monobucket_cache_expirations_total Entries dropped because their TTL passed.\n"
+       << "# TYPE monobucket_cache_expirations_total counter\n"
+       << "monobucket_cache_expirations_total{backend=\"" << backend << "\"} "
+       << cacheStats.expirations << '\n';
+
+    // Non-zero means single values are larger than a whole shard's budget, so
+    // the cache is silently doing nothing for them.
+    os << "# HELP monobucket_cache_rejections_total Values refused for exceeding the budget.\n"
+       << "# TYPE monobucket_cache_rejections_total counter\n"
+       << "monobucket_cache_rejections_total{backend=\"" << backend << "\"} "
+       << cacheStats.rejections << '\n';
+
+    os << "# HELP monobucket_cache_errors_total Failures talking to a remote cache backend.\n"
+       << "# TYPE monobucket_cache_errors_total counter\n"
+       << "monobucket_cache_errors_total{backend=\"" << backend << "\"} " << cacheStats.errors
+       << '\n';
+
+    // 0 while a remote backend is being bypassed. Requests still succeed; they
+    // are just being served by the local tier, which is worth alerting on.
+    os << "# HELP monobucket_cache_healthy Whether the cache backend is fully available.\n"
+       << "# TYPE monobucket_cache_healthy gauge\n"
+       << "monobucket_cache_healthy{backend=\"" << backend << "\"} "
+       << (cacheStats.healthy ? 1 : 0) << '\n';
+
+    // Phase 4 appends the S3 request counters here.
     return os.str();
 }
 
@@ -158,7 +221,8 @@ std::size_t residentBytes() noexcept {
 #endif
 }
 
-void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io) {
+void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io,
+                          CacheProvider& cache) {
     auto& app = drogon::app();
 
     // Liveness: answers as long as the event loop is turning.
@@ -174,9 +238,10 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
     // silently failing every request.
     app.registerHandler(
         "/readyz",
-        [&config, &storage](const HttpRequestPtr&, ResponseCallback&& callback) {
+        [&config, &storage, &cache](const HttpRequestPtr&, ResponseCallback&& callback) {
             try {
-                const auto stats = storage.stats();
+                const auto stats      = storage.stats();
+                const auto cacheStats = cache.stats();
                 callback(jsonResponse({
                     {"status", "ready"},
                     {"dataDir", config.dataDir},
@@ -185,6 +250,13 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
                     {"buckets", stats.usage.buckets},
                     {"objects", stats.usage.objects},
                     {"diskAvailableBytes", stats.space.availableBytes},
+                    // Reported, but never a reason to answer 503: a degraded
+                    // cache is not a reason to take the container out of
+                    // rotation, which is the whole point of the fallback.
+                    {"cache", nlohmann::json{{"backend", std::string(cache.name())},
+                                             {"healthy", cacheStats.healthy},
+                                             {"entries", cacheStats.entries},
+                                             {"bytes", cacheStats.bytes}}},
                 }));
             } catch (const std::exception& ex) {
                 callback(jsonResponse({{"status", "unavailable"}, {"error", ex.what()}},
@@ -210,8 +282,8 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
     if (config.metricsEnabled) {
         app.registerHandler(
             "/metrics",
-            [&config, &storage, &io](const HttpRequestPtr&, ResponseCallback&& callback) {
-                callback(textResponse(renderMetrics(config, storage, io),
+            [&config, &storage, &io, &cache](const HttpRequestPtr&, ResponseCallback&& callback) {
+                callback(textResponse(renderMetrics(config, storage, io, cache),
                                       "text/plain; version=0.0.4"));
             },
             {drogon::Get});

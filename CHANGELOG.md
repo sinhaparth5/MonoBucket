@@ -75,6 +75,64 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Added
 
+<!-- Phase 3 — Abstraction & Cache Layer -->
+
+- **`CacheProvider` interface.** `get` / `set` / `del` / `evict` / `clear` plus
+  stats, with three backends behind it: the in-memory LRU, an optional Redis
+  tier, and a null backend for `MONOBUCKET_CACHE_MAX_BYTES=0`. Values are handed
+  out as `shared_ptr<const std::string>`, which is what lets a reader take a
+  value under a shared lock without copying its bytes and keep it valid if
+  eviction removes the entry while the response is still being written.
+- **Sharded in-memory LRU.** Independent map, intrusive list and `shared_mutex`
+  per shard, each holding `maxBytes / shards`. Shard count is derived from the
+  worker count rather than exposed as a knob, and is reduced automatically when
+  the budget is too small to give each shard useful room — fewer, larger shards
+  beat many that cannot hold anything.
+- **Reads that do not write.** A textbook LRU promotes on every read, which
+  makes `get()` a writer and reduces the `shared_mutex` to decoration. A hit
+  instead sets an atomic flag, and eviction gives a flagged entry exactly one
+  reprieve before taking it. Recency becomes approximate; concurrency becomes
+  real, which is the trade a read cache wants.
+- **A budget that is actually a budget.** The ceiling is enforced on every
+  insert, not by the sweeper, and per-entry overhead is charged alongside the
+  payload — otherwise a million eight-byte values would report themselves as
+  eight megabytes while occupying well over a hundred. A value larger than its
+  shard's whole budget is refused rather than accepted and then evicted, which
+  would empty the cache to make room for something that could never fit.
+- **Redis backend (optional, `-DMONOBUCKET_ENABLE_REDIS=ON`).** A bounded,
+  lazily-connected pool over hiredis. Commands go through `redisCommandArgv`, so
+  an object key containing `%` is data rather than syntax. `clear()` scans our
+  own key prefix and never issues `FLUSHDB`: the database may not be ours alone.
+- **Fallback with a circuit breaker.** After a few consecutive failures the
+  shared tier stops being called at all, with exponential backoff and a single
+  probe per window. Retrying a dead socket on every request would satisfy "the
+  cache never fails" on paper while still stalling every request.
+- **Two tiers rather than an either/or.** The local cache sits in front of Redis
+  and is written on every `set`, so it is already warm when the shared tier
+  disappears instead of starting empty at the worst possible moment. The cost is
+  coherence, and `MONOBUCKET_CACHE_LOCAL_TTL_SECONDS` (default 5) bounds it: a
+  local copy of a shared value expires even when it was stored with no TTL,
+  because another instance can change a value this process has no other way to
+  learn is stale.
+- **Redis URL parsing** for `redis://[user[:password]@]host[:port][/db]`, with
+  percent-decoded credentials (a generated password containing `@` or `:` is
+  otherwise unrepresentable), bracketed IPv6 literals, and `rediss://` refused
+  at startup with the reason rather than left to fail as a connection timeout.
+  Validated in `Config::validate()`, so `--print-config` rejects a typo instead
+  of the container starting and quietly running without the cache.
+- **Cache metrics.** `monobucket_cache_{hits,misses,evictions,expirations,
+  rejections,errors}_total`, plus `_hit_ratio`, `_entries`, `_bytes`,
+  `_limit_bytes` and `_healthy`, all labelled by backend. `/readyz` reports the
+  backend and its health but never answers 503 for a degraded cache — that is
+  the entire point of the fallback.
+- **Settings.** `MONOBUCKET_CACHE_TTL_SECONDS`,
+  `MONOBUCKET_CACHE_LOCAL_TTL_SECONDS`, `MONOBUCKET_REDIS_POOL_SIZE`, and
+  `MONOBUCKET_CACHE_MAX_BYTES=0` to disable caching outright.
+- **`dev-redis` preset** and an opt-in integration suite that runs against a
+  real server when `MONOBUCKET_TEST_REDIS_URL` is set, and skips otherwise.
+  Mocking hiredis would test the mock; what is in question is whether a real
+  connection fails the way `FallbackCache` assumes.
+
 <!-- Phase 2 — Storage Layer & POSIX I/O Engine -->
 
 - **Metadata store.** RocksDB behind a `MetadataStore` interface, holding
@@ -219,6 +277,26 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Notes
 
+- **The cache is not yet exercised by traffic.** Nothing calls it until the S3
+  handlers land in Phase 4, so `monobucket_cache_hits_total` is legitimately 0
+  on a running server and `monobucket_cache_healthy` stays 1 even after Redis is
+  stopped — the breaker cannot trip on calls nobody makes. The Phase 3 exit
+  criteria are met and tested (the budget is asserted on every insert across 500
+  inserts and under eight concurrent threads; backend selection goes through
+  `Config::fromEnvironment()`), but the hit ratio under load belongs to Phase 7.
+- **Redis is optional and off by default.** A binary built without it warns and
+  uses the in-memory backend when `MONOBUCKET_CACHE_BACKEND=redis`, rather than
+  refusing to start. When it is compiled in, hiredis comes from the system if
+  installed and is otherwise fetched at a pinned tag; the two lay their headers
+  out differently (`<hiredis/hiredis.h>` versus flat), which the build resolves
+  explicitly rather than by guessing.
+- **Measured cost of the cache layer:** idle RSS 22.6 MB → 23.5 MB with the
+  Redis backend active and the cache empty. The configured budget is on top of
+  that and is only occupied once something is cached.
+- **`monobucket_cache_limit_bytes` is the budget held in this process**, not
+  `MONOBUCKET_CACHE_MAX_BYTES`. With the Redis backend most of the budget lives
+  in Redis and the gauge reports the local tier — the part that counts against
+  container memory.
 - **RocksDB is a required system dependency**, not vendored: it is a ~40 MB
   static archive pulling in gflags, snappy, lz4, zstd and bz2, and building it
   from source would dominate the image build. The build prefers the shared

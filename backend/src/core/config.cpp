@@ -6,6 +6,11 @@
 #include <sstream>
 #include <thread>
 
+// A leaf parser with no dependency of its own beyond ConfigError. Validating
+// the Redis URL here rather than where the connection is made is what lets
+// `--print-config` reject a typo, instead of the container starting and then
+// quietly running without the cache the operator asked for.
+#include "cache/redis_url.hpp"
 #include "core/env.hpp"
 #include "monobucket/constants.hpp"
 
@@ -21,6 +26,10 @@ constexpr unsigned kMaxIoThreads     = 256;
 /// RocksDB needs room for a write buffer and a block cache; below this it
 /// thrashes rather than saving memory.
 constexpr std::uint64_t kMinMetadataMemoryBytes = 4ull * 1024 * 1024;
+
+/// Below this the per-entry bookkeeping dominates the budget, so the cache
+/// would hold almost nothing while still costing what a cache costs.
+constexpr std::uint64_t kMinCacheBytes = 1ull * 1024 * 1024;
 
 std::string redact(const std::string& secret) {
     if (secret.empty()) return "<unset>";
@@ -102,7 +111,13 @@ Config Config::fromEnvironment() {
                           "'");
     }
     cfg.cacheMaxBytes = env::bytes("MONOBUCKET_CACHE_MAX_BYTES", cfg.cacheMaxBytes);
+    cfg.cacheTtlSeconds = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_CACHE_TTL_SECONDS", cfg.cacheTtlSeconds));
+    cfg.cacheLocalTtlSeconds = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_CACHE_LOCAL_TTL_SECONDS", cfg.cacheLocalTtlSeconds));
     cfg.redisUrl      = env::string("MONOBUCKET_REDIS_URL", "");
+    cfg.redisPoolSize = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_REDIS_POOL_SIZE", cfg.redisPoolSize));
 
     cfg.logLevel       = env::string("MONOBUCKET_LOG_LEVEL", "info");
     cfg.metricsEnabled = env::boolean("MONOBUCKET_METRICS_ENABLED", true);
@@ -163,8 +178,32 @@ void Config::validate() const {
             "MONOBUCKET_MAX_MEMORY_BODY_BYTES must not exceed MONOBUCKET_MAX_BODY_BYTES");
     }
 
-    if (cacheBackend == CacheBackend::Redis && redisUrl.empty()) {
-        throw ConfigError("MONOBUCKET_REDIS_URL is required when the cache backend is 'redis'");
+    if (cacheBackend == CacheBackend::Redis) {
+        if (redisUrl.empty()) {
+            throw ConfigError("MONOBUCKET_REDIS_URL is required when the cache backend is 'redis'");
+        }
+        parseRedisUrl(redisUrl);  // throws ConfigError with the reason
+        if (redisPoolSize == 0) {
+            throw ConfigError("MONOBUCKET_REDIS_POOL_SIZE must be at least 1");
+        }
+        if (redisPoolSize > 256) {
+            throw ConfigError("MONOBUCKET_REDIS_POOL_SIZE must not exceed 256");
+        }
+    }
+
+    // Zero is a valid budget — it turns the cache off. Anything between zero
+    // and a megabyte is not: per-entry overhead would dominate it, and an
+    // operator who wrote `1024` meaning a kilobyte should be told so rather
+    // than handed a cache that rejects every value.
+    if (cacheMaxBytes != 0 && cacheMaxBytes < kMinCacheBytes) {
+        throw ConfigError("MONOBUCKET_CACHE_MAX_BYTES must be 0 (disabled) or at least " +
+                          env::formatBytes(kMinCacheBytes));
+    }
+
+    if (cacheLocalTtlSeconds == 0 && cacheBackend == CacheBackend::Redis) {
+        throw ConfigError(
+            "MONOBUCKET_CACHE_LOCAL_TTL_SECONDS must be at least 1; an unbounded local copy of a "
+            "value held in a shared Redis can never be found to be stale");
     }
 
     if (metadataMemoryBytes < kMinMetadataMemoryBytes) {
@@ -200,6 +239,19 @@ bool Config::usingDefaultCredentials() const noexcept {
 }
 
 std::string Config::summary() const {
+    // The URL can carry a password, so only its shape is logged. Parsed
+    // defensively: a summary that can throw would turn a bad setting into a
+    // crash at exactly the moment the operator needs to read the setting.
+    std::string redisSummary = "<unused>";
+    if (cacheBackend == CacheBackend::Redis) {
+        try {
+            redisSummary = describe(parseRedisUrl(redisUrl)) + " pool " +
+                           std::to_string(redisPoolSize);
+        } catch (const ConfigError&) {
+            redisSummary = "<unparseable>";
+        }
+    }
+
     std::ostringstream os;
     os << "configuration:\n"
        << "  s3 listener      : " << host << ':' << s3Port << '\n'
@@ -216,8 +268,11 @@ std::string Config::summary() const {
        << "  in-memory body   : " << env::formatBytes(maxMemoryBodyBytes) << '\n'
        << "  stream chunk     : " << env::formatBytes(streamChunkBytes) << '\n'
        << "  cache backend    : " << toString(cacheBackend) << '\n'
-       << "  cache budget     : " << env::formatBytes(cacheMaxBytes) << '\n'
-       << "  redis url        : " << (redisUrl.empty() ? "<unset>" : redisUrl) << '\n'
+       << "  cache budget     : "
+       << (cacheMaxBytes == 0 ? std::string("disabled") : env::formatBytes(cacheMaxBytes)) << '\n'
+       << "  cache ttl        : " << cacheTtlSeconds << "s (local " << cacheLocalTtlSeconds
+       << "s)\n"
+       << "  redis            : " << redisSummary << '\n'
        << "  root access key  : " << rootAccessKey << '\n'
        << "  root secret key  : " << redact(rootSecretKey) << '\n'
        << "  log level        : " << logLevel;
@@ -248,7 +303,10 @@ nlohmann::json Config::toJson() const {
         {"idleTimeoutSeconds", idleTimeoutSeconds},
         {"cacheBackend", std::string(toString(cacheBackend))},
         {"cacheMaxBytes", cacheMaxBytes},
+        {"cacheTtlSeconds", cacheTtlSeconds},
+        {"cacheLocalTtlSeconds", cacheLocalTtlSeconds},
         {"redisConfigured", !redisUrl.empty()},
+        {"redisPoolSize", redisPoolSize},
         {"logLevel", logLevel},
         {"metricsEnabled", metricsEnabled},
     };

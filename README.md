@@ -5,10 +5,11 @@ SvelteKit administration dashboard compiled into the executable.
 
 One binary. One container. No sidecars, no external database.
 
-> **Status: pre-alpha.** Phase 1 (scaffolding, event loop, configuration,
-> lifecycle) and the Phase 5 embedding pipeline are in place. The storage
-> engine and the S3 protocol layer are not implemented yet — see
-> [ROADMAP.md](ROADMAP.md). Do not put data in it.
+> **Status: pre-alpha.** Phases 1–3 (scaffolding and lifecycle, the storage
+> engine, the cache layer) and the Phase 5 embedding pipeline are in place. The
+> S3 protocol layer is not — there is no HTTP path to an object yet, so the
+> engine is reachable only from tests. See [ROADMAP.md](ROADMAP.md). Do not put
+> data in it.
 
 ---
 
@@ -21,8 +22,8 @@ MonoBucket/
 │   ├── src/
 │   │   ├── core/       config, env parsing, logging, lifecycle
 │   │   ├── server/     event loop, listeners, system routes, asset store
-│   │   ├── storage/    Phase 2 — metadata store + POSIX I/O engine
-│   │   ├── cache/      Phase 3 — CacheProvider, LRU, Redis
+│   │   ├── storage/    metadata store + POSIX I/O engine
+│   │   ├── cache/      CacheProvider, sharded LRU, optional Redis
 │   │   └── s3/         Phase 4 — SigV4, routing, XML responses
 │   └── tests/          Catch2 suite
 ├── common/include/     version + protocol constants shared across layers
@@ -74,7 +75,15 @@ ctest --preset dev
 ```
 
 Other presets: `asan` (AddressSanitizer + UBSan), `release` (LTO, dashboard
-embedded), `release-redis` (adds the Redis cache backend).
+embedded), `release-redis` (adds the Redis cache backend), `dev-redis` (debug
+build with the Redis backend, for the integration suite).
+
+The Redis integration tests need a real server and are skipped without one:
+
+```bash
+docker run -d --rm -p 63790:6379 redis:7-alpine
+MONOBUCKET_TEST_REDIS_URL=redis://127.0.0.1:63790/0 ctest --preset dev-redis
+```
 
 ### Run
 
@@ -195,6 +204,38 @@ The settings that govern memory behaviour:
 - `MONOBUCKET_IO_QUEUE_LIMIT` — how much storage work may queue before requests
   are refused. Bounded deliberately; an unbounded queue turns a slow disk into
   unbounded memory.
+- `MONOBUCKET_CACHE_MAX_BYTES` — the cache budget, counted as stored bytes plus
+  per-entry overhead and enforced on every insert rather than trimmed on a
+  timer. `0` disables caching.
+
+---
+
+## Cache
+
+One `CacheProvider` interface, selected by `MONOBUCKET_CACHE_BACKEND`.
+
+**`memory`** (default) is a sharded LRU. Each shard has its own map, intrusive
+list and `shared_mutex`, and holds an equal slice of the budget. Reads take the
+shared lock and deliberately do *not* reorder the list — promoting on every read
+would make `get()` a writer and reduce the `shared_mutex` to decoration. A hit
+sets an atomic flag instead, and eviction gives a flagged entry one reprieve
+before taking it. Recency is approximate; concurrency is real.
+
+**`redis`** (optional, `-DMONOBUCKET_ENABLE_REDIS=ON`) is a shared tier for
+several instances, and is arranged as two tiers rather than an either/or: the
+local cache sits in front of it and is written on every `set`, so it is already
+warm if Redis goes away. After a few consecutive failures a circuit breaker
+stops calling Redis entirely, backing off exponentially and letting a single
+probe through per window — retrying a dead socket on every request would satisfy
+"the cache never fails" while still stalling every request.
+
+The cost of the local tier is coherence: another instance can change a value
+this process has already copied. `MONOBUCKET_CACHE_LOCAL_TTL_SECONDS` (default
+5) caps how long that can go unnoticed, and applies even to entries stored with
+no expiry.
+
+A cache outage is never a storage outage. `/readyz` reports the backend and its
+health, but a degraded cache does not take the container out of rotation.
 
 ---
 

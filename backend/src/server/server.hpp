@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
 #include "storage/storage_engine.hpp"
@@ -25,10 +26,12 @@ public:
     /// Valid once run() has opened the data directory.
     StorageEngine& storage() noexcept { return *storage_; }
     IoExecutor&    io() noexcept { return *io_; }
+    CacheProvider& cache() noexcept { return *cache_; }
 
 private:
     void prepareDataDirectory();
     void openStorage();
+    void openCache();
     void configureFramework();
     void registerRoutes();
     void scheduleMaintenance();
@@ -37,6 +40,7 @@ private:
     Config                         config_;
     std::unique_ptr<StorageEngine> storage_;
     std::unique_ptr<IoExecutor>    io_;
+    std::unique_ptr<CacheProvider> cache_;
 };
 
 /// Seconds since the process started serving. Used by /metrics.

@@ -5,6 +5,11 @@ include(Dependencies)
 # monobucket_core — everything except main(), so the test binary can link it.
 # ---------------------------------------------------------------------------
 set(MONOBUCKET_CORE_SOURCES
+    src/cache/cache_factory.cpp
+    src/cache/cache_provider.cpp
+    src/cache/fallback_cache.cpp
+    src/cache/memory_cache.cpp
+    src/cache/redis_url.cpp
     src/core/config.cpp
     src/core/env.cpp
     src/core/io_executor.cpp
@@ -42,8 +47,15 @@ target_link_libraries(monobucket_core
 )
 
 if(MONOBUCKET_ENABLE_REDIS)
+    # The definition is PUBLIC because redis_cache.hpp compiles to nothing
+    # without it, so every consumer must agree on whether the class exists.
     target_compile_definitions(monobucket_core PUBLIC MONOBUCKET_WITH_REDIS=1)
+    target_sources(monobucket_core PRIVATE src/cache/redis_cache.cpp)
     target_link_libraries(monobucket_core PRIVATE hiredis::hiredis)
+    if(MONOBUCKET_HIREDIS_FLAT_HEADERS)
+        set_source_files_properties(src/cache/redis_cache.cpp PROPERTIES
+            COMPILE_DEFINITIONS MONOBUCKET_HIREDIS_FLAT_HEADERS=1)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

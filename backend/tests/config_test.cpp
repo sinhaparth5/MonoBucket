@@ -127,6 +127,67 @@ TEST_CASE("selecting redis implies a connection URL", "[config]") {
     CHECK_NOTHROW(cfg.validate());
 }
 
+TEST_CASE("io threads default to the worker count", "[config]") {
+    Config cfg;
+    cfg.workerThreads = 6;
+    cfg.ioThreads     = 0;
+    cfg.resolveDerivedValues();
+    CHECK(cfg.ioThreads == 6);
+
+    Config explicitCount;
+    explicitCount.ioThreads = 2;
+    explicitCount.resolveDerivedValues();
+    CHECK(explicitCount.ioThreads == 2);
+}
+
+TEST_CASE("the durability setting round-trips through its name", "[config]") {
+    using monobucket::Durability;
+    using monobucket::durabilityFromString;
+
+    CHECK(durabilityFromString("none") == Durability::None);
+    CHECK(durabilityFromString("relaxed") == Durability::Relaxed);
+    CHECK(durabilityFromString("strict") == Durability::Strict);
+
+    // A misspelling must not quietly weaken durability.
+    CHECK_FALSE(durabilityFromString("Strict").has_value());
+    CHECK_FALSE(durabilityFromString("fsync").has_value());
+
+    for (auto level : {Durability::None, Durability::Relaxed, Durability::Strict}) {
+        CHECK(durabilityFromString(monobucket::toString(level)) == level);
+    }
+}
+
+TEST_CASE("storage limits are checked for sanity", "[config]") {
+    Config cfg = validConfig();
+    cfg.metadataMemoryBytes = 1024;  // below RocksDB's usable floor
+    CHECK_THROWS_AS(cfg.validate(), ConfigError);
+
+    Config files = validConfig();
+    files.metadataMaxOpenFiles = 4;
+    CHECK_THROWS_AS(files.validate(), ConfigError);
+
+    Config queue = validConfig();
+    queue.ioQueueLimit = 0;
+    CHECK_THROWS_AS(queue.validate(), ConfigError);
+}
+
+TEST_CASE("a too-short reclaim grace is rejected", "[config]") {
+    // A grace shorter than an upload can reclaim the payload that upload is
+    // still writing to, which loses data rather than merely wasting space.
+    Config cfg = validConfig();
+    cfg.reclaimGraceSeconds = 5;
+    CHECK_THROWS_AS(cfg.validate(), ConfigError);
+
+    cfg.reclaimGraceSeconds = 3600;
+    CHECK_NOTHROW(cfg.validate());
+}
+
+TEST_CASE("an unknown durability setting aborts startup", "[config]") {
+    ::setenv("MONOBUCKET_DURABILITY", "fsync-please", 1);
+    CHECK_THROWS_AS(Config::fromEnvironment(), ConfigError);
+    ::unsetenv("MONOBUCKET_DURABILITY");
+}
+
 TEST_CASE("an unknown log level is rejected", "[config]") {
     Config cfg = validConfig();
     cfg.logLevel = "verbose";

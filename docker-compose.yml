@@ -16,6 +16,12 @@ services:
       MONOBUCKET_ROOT_ACCESS_KEY: ${MONOBUCKET_ROOT_ACCESS_KEY:-monobucket}
       MONOBUCKET_ROOT_SECRET_KEY: ${MONOBUCKET_ROOT_SECRET_KEY:-monobucket-dev-secret}
       MONOBUCKET_REGION: ${MONOBUCKET_REGION:-us-east-1}
+      # relaxed survives a process crash; use strict on a volume you care about,
+      # at the cost of an fsync per commit.
+      MONOBUCKET_DURABILITY: ${MONOBUCKET_DURABILITY:-relaxed}
+      # Counts against the 256M cap below, so it is set explicitly rather than
+      # left to the default.
+      MONOBUCKET_METADATA_MEMORY_BYTES: ${MONOBUCKET_METADATA_MEMORY_BYTES:-32MiB}
       MONOBUCKET_CACHE_BACKEND: ${MONOBUCKET_CACHE_BACKEND:-memory}
       MONOBUCKET_CACHE_MAX_BYTES: ${MONOBUCKET_CACHE_MAX_BYTES:-128MiB}
       MONOBUCKET_LOG_LEVEL: ${MONOBUCKET_LOG_LEVEL:-info}

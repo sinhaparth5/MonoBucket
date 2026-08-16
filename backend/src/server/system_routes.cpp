@@ -12,9 +12,11 @@
 #endif
 
 #include "core/config.hpp"
+#include "core/io_executor.hpp"
 #include "monobucket/version.hpp"
 #include "server/asset_store.hpp"
 #include "server/server.hpp"
+#include "storage/storage_engine.hpp"
 
 namespace monobucket {
 namespace {
@@ -208,8 +210,9 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
     if (config.metricsEnabled) {
         app.registerHandler(
             "/metrics",
-            [&config](const HttpRequestPtr&, ResponseCallback&& callback) {
-                callback(textResponse(renderMetrics(config), "text/plain; version=0.0.4"));
+            [&config, &storage, &io](const HttpRequestPtr&, ResponseCallback&& callback) {
+                callback(textResponse(renderMetrics(config, storage, io),
+                                      "text/plain; version=0.0.4"));
             },
             {drogon::Get});
     }

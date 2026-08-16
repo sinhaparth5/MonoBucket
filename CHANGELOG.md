@@ -75,6 +75,53 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Added
 
+<!-- Phase 2 — Storage Layer & POSIX I/O Engine -->
+
+- **Metadata store.** RocksDB behind a `MetadataStore` interface, holding
+  buckets, objects, multipart uploads and their parts. Everything lives in one
+  column family under a type-tagged keyspace: a family per record type would
+  give each its own memtable and multiply the write-buffer floor, and RocksDB's
+  keyspace is already ordered. Records use a small varint codec rather than
+  JSON, because a `ListObjectsV2` page decodes up to 1000 of them per request.
+- **Bounded metadata memory.** The block cache and the `WriteBufferManager`
+  share one budget (`MONOBUCKET_METADATA_MEMORY_BYTES`), and index and filter
+  blocks are charged to the cache instead of growing outside it. Left to its
+  defaults RocksDB sizes these independently, and the container only ever sees
+  the sum.
+- **Payload store.** A sharded tree at `objects/<aa>/<bb>/<blobId>` — 65 536
+  leaf directories, so a million objects sit at roughly fifteen entries each.
+  Payloads are written to `tmp/`, flushed, then linked into place by `rename`,
+  which is what makes a partially written object invisible rather than corrupt.
+- **Streaming I/O.** Fixed-size chunks over `pread`/`pwrite`, so memory per
+  transfer is constant regardless of object size. Range reads are served from
+  the same path, and an over-long range is clamped rather than rejected, as S3
+  specifies.
+- **Integrity.** MD5 (the ETag) and SHA-256 computed in one pass as bytes stream
+  through the write path — never by re-reading the object. Multipart ETags use
+  the real algorithm: MD5 over the concatenated raw part digests, suffixed with
+  the part count.
+- **Durability policy.** `MONOBUCKET_DURABILITY` selects `none`, `relaxed` or
+  `strict`, controlling payload `fsync`, directory `fsync` and whether the
+  metadata log is synced per commit.
+- **Crash recovery.** Startup sweeps interrupted writes out of `tmp/` and
+  reclaims payloads nothing references. Reclamation is driven by a log rather
+  than a tree walk, so recovery costs what was leaked, not what is stored.
+- **Blob reclamation.** Every mutation that drops a reference to a payload
+  returns the released blob id from the same call that committed the metadata,
+  so a leak requires ignoring a return value rather than forgetting a step.
+  Payloads are registered *before* they are written, which is what makes a crash
+  mid-upload recoverable at all.
+- **Bounded I/O pool.** `IoExecutor` keeps blocking filesystem work off the
+  event loop. Its queue is bounded on purpose: an unbounded one converts a disk
+  that cannot keep up into unbounded memory growth. A full queue refuses work,
+  which Phase 4 will surface as `503 SlowDown`.
+- **Listing.** Prefix, delimiter and pagination in the exact binary order S3
+  specifies. A delimiter group is skipped with one seek rather than iterated, so
+  a prefix with a million keys under it costs the same as one with ten.
+- **Storage metrics.** Bucket, object, byte, upload and pending-reclaim counts,
+  filesystem capacity, RocksDB's own memory gauges, and I/O queue depth,
+  throughput and rejections. `/readyz` now touches the engine, so a data
+  directory that has become unreadable takes the container out of rotation.
 - **Build system.** CMake 3.25+ / C++20 project split into `backend/` (C++
   engine), `frontend/` (SvelteKit dashboard) and `common/` (shared definitions).
   Dependencies resolve through `find_package` first and fall back to
@@ -132,6 +179,13 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Fixed
 
+- `StorageEngine::recover()` documented itself as reclaiming every unreferenced
+  payload regardless of age, but ran through the ordinary sweep and so honoured
+  the one-hour grace period. Startup therefore left abandoned payloads on disk
+  until the first periodic sweep an hour later. Recovery now passes its own
+  cutoff, and the two paths are separate functions rather than one with an
+  implied caveat. Caught by a test asserting the documented behaviour.
+
 - `Config`'s byte limits defaulted to `0` while their real defaults lived only
   inside `fromEnvironment()`, so a default-constructed `Config` could never pass
   `validate()`. Defaults now live once, as in-class initialisers, and
@@ -165,6 +219,23 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Notes
 
+- **RocksDB is a required system dependency**, not vendored: it is a ~40 MB
+  static archive pulling in gflags, snappy, lz4, zstd and bz2, and building it
+  from source would dominate the image build. The build prefers the shared
+  target (`RocksDB::rocksdb-shared`), whose transitive compression dependencies
+  are already resolved, and falls back to a plain header/library search for
+  distributions that ship no CMake config package. Install
+  `librocksdb-dev` / `rocksdb-dev` / `rocksdb-devel`.
+- Choosing RocksDB costs about 18 MB of image and roughly 11 MB of resident
+  memory over the Phase 1 baseline — the image is 43.5 MB and idle RSS 22.6 MB,
+  against 25.1 MB and 11.2 MB before. The `MetadataStore` interface is what
+  keeps that a reversible decision.
+- **The storage format carries its own version**, independent of the CalVer
+  release version, and a mismatch refuses to open the data directory rather than
+  misreading it. It is currently `1`.
+- The Phase 2 exit criterion — a multi-gigabyte object round-tripping with flat
+  memory — is not yet demonstrated end to end, because no HTTP path reaches an
+  object until Phase 4. The engine-level round trip is covered by tests.
 - Drogon does not vendor jsoncpp or libuuid. The build now fails early with the
   per-distribution install command instead of a `FindJsoncpp` stack trace.
 - CMake 4.x rejects the `cmake_minimum_required(3.5)` that Drogon and Trantor

@@ -52,7 +52,8 @@ RUN apk add --no-cache \
         brotli-dev \
         jsoncpp-dev \
         util-linux-dev \
-        c-ares-dev
+        c-ares-dev \
+        rocksdb-dev
 
 WORKDIR /src
 COPY . .
@@ -90,6 +91,7 @@ RUN apk add --no-cache \
         brotli-libs \
         c-ares \
         libuuid \
+        rocksdb \
  && addgroup -S -g 1000 monobucket \
  && adduser  -S -u 1000 -G monobucket -H -h /data monobucket \
  && mkdir -p /data \

@@ -37,25 +37,30 @@ MonoBucket/
 
 ### Prerequisites
 
-Drogon links against jsoncpp and libuuid from the system; everything else is
-fetched and pinned by CMake.
+Three things come from the system: jsoncpp and libuuid, which Drogon links
+against, and RocksDB, which holds the metadata. Everything else is fetched and
+pinned by CMake.
+
+RocksDB is not vendored deliberately — it is a ~40 MB static archive that pulls
+in gflags, snappy, lz4, zstd and bz2, and building it from source would dominate
+both the image build and the toolchain surface.
 
 ```bash
 # Debian / Ubuntu
 sudo apt install -y build-essential cmake ninja-build git \
                     libjsoncpp-dev uuid-dev libssl-dev zlib1g-dev \
-                    libbrotli-dev libc-ares-dev
+                    libbrotli-dev libc-ares-dev librocksdb-dev
 
 # Alpine
 apk add build-base cmake ninja git jsoncpp-dev util-linux-dev \
-        openssl-dev zlib-dev brotli-dev c-ares-dev
+        openssl-dev zlib-dev brotli-dev c-ares-dev rocksdb-dev
 
 # Fedora / RHEL
 sudo dnf install gcc-c++ cmake ninja-build git jsoncpp-devel libuuid-devel \
-                 openssl-devel zlib-devel brotli-devel c-ares-devel
+                 openssl-devel zlib-devel brotli-devel c-ares-devel rocksdb-devel
 
 # macOS
-brew install cmake ninja jsoncpp ossp-uuid openssl brotli c-ares
+brew install cmake ninja jsoncpp ossp-uuid openssl brotli c-ares rocksdb
 ```
 
 CMake 3.25+ and a compiler with C++20 support (GCC 12+, Clang 15+) are required.
@@ -177,13 +182,47 @@ Size values accept unit suffixes. Binary units (`K`, `Ki`, `KiB`, `M`, `MiB`,
 `G`, `GiB`) are powers of 1024; SI units (`KB`, `MB`, `GB`) are powers of 1000.
 A bare number is bytes.
 
-The two settings that govern memory behaviour:
+The settings that govern memory behaviour:
 
 - `MONOBUCKET_MAX_MEMORY_BODY_BYTES` — request bodies larger than this spill to
   disk instead of being buffered in RAM.
 - `MONOBUCKET_STREAM_CHUNK_BYTES` — the fixed chunk size used by the streaming
   I/O engine, which is what keeps resident memory flat during multi-gigabyte
   transfers.
+- `MONOBUCKET_METADATA_MEMORY_BYTES` — one budget covering RocksDB's block
+  cache, its write buffers and its index/filter blocks together. Sized
+  separately, as RocksDB does by default, the sum is what the container sees.
+- `MONOBUCKET_IO_QUEUE_LIMIT` — how much storage work may queue before requests
+  are refused. Bounded deliberately; an unbounded queue turns a slow disk into
+  unbounded memory.
+
+---
+
+## Storage layout
+
+Everything lives under `MONOBUCKET_DATA_DIR`:
+
+```
+/data
+├── meta/      RocksDB: buckets, objects, multipart uploads, reclamation log
+├── objects/   payloads, sharded as <aa>/<bb>/<blobId>
+└── tmp/       in-flight writes, linked into objects/ only once durable
+```
+
+Two rules make the pair recoverable. A payload is written and flushed **before**
+the metadata naming it is committed, and unlinked only **after** that metadata
+is gone — so an interruption leaves either the old state or the new one. And a
+payload is registered in the reclamation log before it is written, so a crash at
+any point leaves a trace that startup can collect in time proportional to what
+leaked rather than to what is stored.
+
+`MONOBUCKET_DURABILITY` decides how hard the first of those rules pushes:
+`relaxed` (the default) survives a process crash, `strict` survives a power cut
+and costs an fsync per commit, `none` is for CI.
+
+The on-disk format carries its own version, independent of the release version.
+A binary that does not recognise it refuses to open the directory rather than
+misreading it.
 
 ---
 

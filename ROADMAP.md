@@ -6,7 +6,7 @@ dashboard.
 
 **Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Current phase:** Phase 1 — Project Scaffolding & Core Architecture
+**Current phase:** Phase 3 — Abstraction & Cache Layer
 **Last updated:** 2026-08-16
 
 ---
@@ -62,27 +62,41 @@ cleanly on `SIGTERM`.
 *Goal: durable objects on disk with transactional metadata.*
 
 ### Metadata management
-- [ ] Embedded key-value store (RocksDB or SQLite) behind a `MetadataStore`
-      interface — benchmark both before committing
-- [ ] Schema: buckets, object keys, ETags, content types, custom tags, ACL
-      policies, multipart upload state
-- [ ] Atomic metadata updates — an object becomes visible only once its payload
-      is fully durable
-- [ ] Crash recovery: reconcile orphaned payloads and abandoned multipart parts
-      on startup
+- [x] Embedded key-value store behind a `MetadataStore` interface — **RocksDB**,
+      tuned so its block cache and memtables share one budget
+      (`MONOBUCKET_METADATA_MEMORY_BYTES`) rather than being sized separately
+- [x] Schema: buckets, object keys, ETags, SHA-256, content types, user
+      metadata, public-read flag, multipart upload state. One column family
+      with a type-tagged keyspace, because a family per record type multiplies
+      the memtable floor for no ordering benefit
+- [x] Atomic metadata updates — every mutation is one `WriteBatch`, and an
+      object becomes visible only once its payload is fully durable
+- [x] Crash recovery: temporaries swept and unreferenced payloads reclaimed on
+      startup, in time proportional to the leak rather than the object count
+- [ ] Full `fsck` mode that walks the payload tree to catch damage the
+      reclamation log cannot see
 
 ### Disk storage engine
-- [ ] Directory hashing / sharded tree so no single directory accumulates
-      millions of entries
-- [ ] Non-blocking chunked streaming (`io_uring` on Linux, thread-pooled
-      `std::fstream` fallback) with fixed memory per transfer
-- [ ] Integrity layer: MD5 (ETag) and SHA-256 computed during the stream, never
+- [x] Directory hashing / sharded tree — `objects/<aa>/<bb>/<id>`, 65 536 leaf
+      directories
+- [x] Chunked streaming with fixed memory per transfer, on `pread`/`pwrite`
+- [x] Blocking I/O moved off the event loop onto a bounded pool (`IoExecutor`);
+      a full queue sheds load rather than growing
+- [ ] `io_uring` backend on Linux — the thread-pooled path above is the
+      sanctioned fallback; revisit once there is a benchmark that justifies the
+      second I/O path
+- [x] Integrity layer: MD5 (ETag) and SHA-256 computed during the stream, never
       by re-reading the object
-- [ ] `fsync` / durability policy, configurable per bucket
-- [ ] Free-space accounting for the dashboard's capacity metrics
+- [~] `fsync` / durability policy — global (`MONOBUCKET_DURABILITY`), not yet
+      per bucket. Per-bucket overrides land with bucket policies in Phase 4,
+      where there is somewhere to put them
+- [x] Free-space accounting for the dashboard's capacity metrics
 
 **Exit criteria:** a multi-gigabyte object round-trips byte-identically with
 resident memory flat to within a few MiB.
+*Not yet demonstrated end to end — there is no HTTP path to an object until
+Phase 4. The engine-level round trip is covered by tests, and the memory claim
+is measured in Phase 7.*
 
 ---
 

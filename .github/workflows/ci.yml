@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libjsoncpp-dev uuid-dev libssl-dev zlib1g-dev \
-            libbrotli-dev libc-ares-dev
+            libbrotli-dev libc-ares-dev librocksdb-dev
 
       # Drogon is fetched and built from source; caching it turns a multi-minute
       # step into seconds on every run after the first.

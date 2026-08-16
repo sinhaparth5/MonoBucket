@@ -124,6 +124,19 @@ void StorageEngine::setBucketPublicRead(std::string_view name, bool publicRead) 
     metadata_->updateBucket(*bucket);
 }
 
+void StorageEngine::setBucketPolicy(std::string_view name, std::string policy, bool publicRead) {
+    auto bucket = metadata_->getBucket(name);
+    if (!bucket) {
+        throw StorageError(StorageErrorCode::NoSuchBucket, "no such bucket: " + std::string(name));
+    }
+    // The document and the flag derived from it are committed together. Stored
+    // separately they could disagree, and the flag is what the read path
+    // actually consults.
+    bucket->policy     = std::move(policy);
+    bucket->publicRead = publicRead;
+    metadata_->updateBucket(*bucket);
+}
+
 // --- Objects ---------------------------------------------------------------
 
 BlobWriter StorageEngine::beginWrite() {

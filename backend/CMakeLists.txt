@@ -15,6 +15,20 @@ set(MONOBUCKET_CORE_SOURCES
     src/core/io_executor.cpp
     src/core/logging.cpp
     src/core/lifecycle.cpp
+    src/s3/base64.cpp
+    src/s3/bucket_handlers.cpp
+    src/s3/chunked.cpp
+    src/s3/handlers.cpp
+    src/s3/multipart_handlers.cpp
+    src/s3/object_handlers.cpp
+    src/s3/operation.cpp
+    src/s3/request.cpp
+    src/s3/response.cpp
+    src/s3/router.cpp
+    src/s3/s3_error.cpp
+    src/s3/sigv4.cpp
+    src/s3/uri.cpp
+    src/s3/xml.cpp
     src/storage/blob_store.cpp
     src/storage/codec.cpp
     src/storage/digest.cpp

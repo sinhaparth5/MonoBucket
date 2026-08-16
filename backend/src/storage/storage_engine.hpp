@@ -63,6 +63,10 @@ public:
     void                        deleteBucket(std::string_view name);
     void setBucketPublicRead(std::string_view name, bool publicRead);
 
+    /// Stores a bucket policy document together with the anonymous-read flag
+    /// derived from it. An empty document removes the policy.
+    void setBucketPolicy(std::string_view name, std::string policy, bool publicRead);
+
     // --- Objects -----------------------------------------------------------
 
     /// Opens a payload for streaming and registers it for reclamation first, so

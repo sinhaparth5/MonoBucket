@@ -5,14 +5,15 @@
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
+#include "s3/metrics.hpp"
 #include "storage/storage_engine.hpp"
 
 namespace monobucket {
 
-/// Owns the process' event loop, listeners and storage engine.
+/// Owns the process' event loop, listeners, storage engine and cache.
 ///
-/// The S3 protocol handlers (Phase 4) attach to the same framework instance
-/// from registerRoutes() and reach storage through storage().
+/// The S3 protocol handlers attach to the same framework instance from
+/// registerRoutes() and reach storage through storage().
 class Server {
 public:
     explicit Server(Config config);
@@ -41,6 +42,10 @@ private:
     std::unique_ptr<StorageEngine> storage_;
     std::unique_ptr<IoExecutor>    io_;
     std::unique_ptr<CacheProvider> cache_;
+
+    /// Lives as long as the server: the S3 router holds a reference to it and
+    /// /metrics reads it from another thread.
+    s3::S3Metrics                  s3Metrics_;
 };
 
 /// Seconds since the process started serving. Used by /metrics.

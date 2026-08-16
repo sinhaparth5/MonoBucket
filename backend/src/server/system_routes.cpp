@@ -15,6 +15,8 @@
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
 #include "monobucket/version.hpp"
+#include "s3/metrics.hpp"
+#include "s3/router.hpp"
 #include "server/asset_store.hpp"
 #include "server/server.hpp"
 #include "storage/storage_engine.hpp"
@@ -50,7 +52,7 @@ bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
 }
 
 std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecutor& io,
-                          CacheProvider& cache) {
+                          CacheProvider& cache, const s3::S3Metrics& s3Metrics) {
     std::ostringstream os;
 
     os << "# HELP monobucket_build_info Build metadata; always 1.\n"
@@ -198,7 +200,7 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
        << "monobucket_cache_healthy{backend=\"" << backend << "\"} "
        << (cacheStats.healthy ? 1 : 0) << '\n';
 
-    // Phase 4 appends the S3 request counters here.
+    os << s3::renderS3Metrics(s3Metrics);
     return os.str();
 }
 
@@ -222,7 +224,7 @@ std::size_t residentBytes() noexcept {
 }
 
 void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io,
-                          CacheProvider& cache) {
+                          CacheProvider& cache, const s3::S3Metrics& s3Metrics) {
     auto& app = drogon::app();
 
     // Liveness: answers as long as the event loop is turning.
@@ -282,8 +284,9 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
     if (config.metricsEnabled) {
         app.registerHandler(
             "/metrics",
-            [&config, &storage, &io, &cache](const HttpRequestPtr&, ResponseCallback&& callback) {
-                callback(textResponse(renderMetrics(config, storage, io, cache),
+            [&config, &storage, &io, &cache, &s3Metrics](const HttpRequestPtr&,
+                                                         ResponseCallback&& callback) {
+                callback(textResponse(renderMetrics(config, storage, io, cache, s3Metrics),
                                       "text/plain; version=0.0.4"));
             },
             {drogon::Get});
@@ -302,52 +305,29 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
         {drogon::Get});
 }
 
-void registerConsoleRoutes(const Config& config) {
-    if (!assets::embedded()) {
-        // Built without the dashboard: leave the routes unregistered so the
-        // console port answers 404 instead of a blank page.
-        return;
+drogon::HttpResponsePtr consoleAssetResponse(const std::string& path) {
+    if (!assets::embedded()) return nullptr;
+
+    const assets::Asset* asset = assets::find(path);
+    if (asset == nullptr && (path == "/" || path.find('.') == std::string::npos)) {
+        // Client-side routing: unknown extension-less paths get the SPA shell
+        // and let SvelteKit resolve the route.
+        asset = assets::indexDocument();
     }
+    if (asset == nullptr) return nullptr;
 
-    drogon::app().registerHandlerViaRegex(
-        "^/.*$",
-        [&config](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            if (!onConsoleListener(req, config)) {
-                auto resp = HttpResponse::newHttpResponse();
-                resp->setStatusCode(drogon::k404NotFound);
-                callback(resp);
-                return;
-            }
+    auto resp = HttpResponse::newHttpResponse();
+    resp->setStatusCode(drogon::k200OK);
+    resp->setContentTypeString(std::string(asset->mime));
+    resp->setBody(std::string(reinterpret_cast<const char*>(asset->data), asset->size));
 
-            const std::string path = req->path();
-            const assets::Asset* asset = assets::find(path);
-            if (asset == nullptr && (path == "/" || path.find('.') == std::string::npos)) {
-                // Client-side routing: unknown extension-less paths get the SPA
-                // shell and let SvelteKit resolve the route.
-                asset = assets::indexDocument();
-            }
-
-            if (asset == nullptr) {
-                auto resp = HttpResponse::newHttpResponse();
-                resp->setStatusCode(drogon::k404NotFound);
-                callback(resp);
-                return;
-            }
-
-            auto resp = HttpResponse::newHttpResponse();
-            resp->setStatusCode(drogon::k200OK);
-            resp->setContentTypeString(std::string(asset->mime));
-            resp->setBody(std::string(reinterpret_cast<const char*>(asset->data), asset->size));
-
-            // SvelteKit fingerprints everything under /_app/immutable/.
-            if (path.rfind("/_app/immutable/", 0) == 0) {
-                resp->addHeader("Cache-Control", "public, max-age=31536000, immutable");
-            } else {
-                resp->addHeader("Cache-Control", "no-cache");
-            }
-            callback(resp);
-        },
-        {drogon::Get, drogon::Head});
+    // SvelteKit fingerprints everything under /_app/immutable/.
+    if (path.rfind("/_app/immutable/", 0) == 0) {
+        resp->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+        resp->addHeader("Cache-Control", "no-cache");
+    }
+    return resp;
 }
 
 }  // namespace monobucket

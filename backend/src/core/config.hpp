@@ -43,6 +43,14 @@ struct Config {
     std::string dataDir  = "/data";      ///< Object payloads + metadata store
     std::string region   = "us-east-1";  ///< Reported in S3 responses
 
+    /// The endpoint domain, when there is one — `s3.example.com`. Setting it
+    /// enables virtual-host style addressing, where `bucket.s3.example.com`
+    /// names the bucket. Empty means path style only: without a configured
+    /// domain there is no way to tell `bucket.example.com` from a host that
+    /// simply is not us, and guessing would make `Host: localhost` address a
+    /// bucket called "localhost".
+    std::string s3Domain;
+
     /// How much of a write must reach stable storage before it is acknowledged.
     /// `relaxed` survives a process crash; `strict` survives a power cut and
     /// costs an fsync per commit.

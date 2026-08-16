@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
+
+#include <drogon/HttpResponse.h>
 
 namespace monobucket {
 
@@ -9,13 +12,28 @@ class CacheProvider;
 class IoExecutor;
 class StorageEngine;
 
-/// /healthz, /readyz, /metrics and /_mb/version — registered on every listener.
-void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io,
-                          CacheProvider& cache);
+namespace s3 {
+struct S3Metrics;
+}
 
-/// Serves the embedded SvelteKit dashboard on the console listener. A no-op
-/// when the binary was built without MONOBUCKET_EMBED_FRONTEND.
-void registerConsoleRoutes(const Config& config);
+/// /healthz, /readyz, /metrics and /_mb/version — registered on every listener.
+///
+/// These are exact-path handlers, which Drogon matches before the catch-all
+/// regex the S3 API is registered on. That is what makes them reachable at all,
+/// and it is also why `healthz`, `readyz`, `metrics` and `_mb` are refused as
+/// bucket names: a bucket with one of those names would exist and be
+/// unaddressable.
+void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io,
+                          CacheProvider& cache, const s3::S3Metrics& metrics);
+
+/// The embedded dashboard asset for a console path, or nullptr when the binary
+/// carries no dashboard or the path does not resolve to one.
+///
+/// Returned rather than registered on its own route: Drogon takes the first
+/// matching regex handler, so the console and the S3 API cannot each own a
+/// catch-all. The S3 router calls this for requests arriving on the console
+/// listener.
+drogon::HttpResponsePtr consoleAssetResponse(const std::string& path);
 
 /// Resident set size of this process in bytes, or 0 where it cannot be read.
 std::size_t residentBytes() noexcept;

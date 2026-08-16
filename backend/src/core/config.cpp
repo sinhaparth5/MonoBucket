@@ -67,6 +67,7 @@ Config Config::fromEnvironment() {
 
     cfg.dataDir = env::string("MONOBUCKET_DATA_DIR", cfg.dataDir);
     cfg.region  = env::string("MONOBUCKET_REGION", cfg.region);
+    cfg.s3Domain = env::string("MONOBUCKET_S3_DOMAIN", cfg.s3Domain);
 
     const std::string durability =
         env::string("MONOBUCKET_DURABILITY", std::string(toString(cfg.durability)));
@@ -156,6 +157,19 @@ void Config::validate() const {
         throw ConfigError(
             "MONOBUCKET_CONSOLE_PORT must differ from MONOBUCKET_PORT; the dashboard cannot share "
             "a listener with the S3 API because bucket names would shadow console routes");
+    }
+
+    if (region.empty()) throw ConfigError("MONOBUCKET_REGION must not be empty");
+
+    // A domain with a scheme or a path in it would never match a Host header,
+    // and the failure would look like virtual-host addressing quietly not
+    // working rather than like a typo.
+    if (!s3Domain.empty() &&
+        (s3Domain.find('/') != std::string::npos || s3Domain.find(':') != std::string::npos ||
+         s3Domain.front() == '.')) {
+        throw ConfigError(
+            "MONOBUCKET_S3_DOMAIN must be a bare host name such as 's3.example.com', got '" +
+            s3Domain + "'");
     }
 
     if (dataDir.empty()) throw ConfigError("MONOBUCKET_DATA_DIR must not be empty");
@@ -260,6 +274,8 @@ std::string Config::summary() const {
        << '\n'
        << "  data dir         : " << dataDir << '\n'
        << "  region           : " << region << '\n'
+       << "  s3 domain        : "
+       << (s3Domain.empty() ? std::string("path style only") : s3Domain) << '\n'
        << "  durability       : " << toString(durability) << '\n'
        << "  metadata memory  : " << env::formatBytes(metadataMemoryBytes) << '\n'
        << "  worker threads   : " << workerThreads << '\n'
@@ -287,6 +303,7 @@ nlohmann::json Config::toJson() const {
         {"consoleEnabled", consoleEnabled},
         {"dataDir", dataDir},
         {"region", region},
+        {"s3Domain", s3Domain},
         {"durability", std::string(toString(durability))},
         {"metadataMemoryBytes", metadataMemoryBytes},
         {"metadataMaxOpenFiles", metadataMaxOpenFiles},

@@ -13,6 +13,13 @@ add_executable(monobucket_tests
     metadata_store_test.cpp
     redis_cache_test.cpp
     redis_url_test.cpp
+    s3_chunked_test.cpp
+    s3_error_test.cpp
+    s3_operation_test.cpp
+    s3_request_test.cpp
+    s3_uri_test.cpp
+    s3_xml_test.cpp
+    sigv4_test.cpp
     storage_engine_test.cpp
 )
 

@@ -11,6 +11,7 @@
 #include "core/lifecycle.hpp"
 #include "core/logging.hpp"
 #include "monobucket/version.hpp"
+#include "s3/router.hpp"
 #include "server/system_routes.hpp"
 
 namespace monobucket {
@@ -114,6 +115,14 @@ void Server::configureFramework() {
         .enableDateHeader(true)
         .disableSession();
 
+    // Response compression is off on purpose. Drogon would gzip a small object
+    // body whose content type looks textual, which changes the bytes a client
+    // receives from the bytes it stored — S3 never does that, and an SDK that
+    // checks Content-Length or a checksum against the object would be right to
+    // complain. Pre-compressed dashboard assets are the Phase 5 answer for the
+    // console side.
+    app.enableGzip(false).enableBrotli(false);
+
     // The two limits below are what keep resident memory flat: bodies larger
     // than maxMemoryBodyBytes are spooled to disk instead of buffered, and
     // anything past maxBodyBytes is rejected outright.
@@ -131,13 +140,13 @@ void Server::configureFramework() {
 }
 
 void Server::registerRoutes() {
-    registerSystemRoutes(config_, *storage_, *io_, *cache_);
+    // Exact-path handlers first: Drogon matches those before any regex route,
+    // so these stay reachable underneath the S3 catch-all below.
+    registerSystemRoutes(config_, *storage_, *io_, *cache_, s3Metrics_);
 
-    if (config_.consoleEnabled) {
-        registerConsoleRoutes(config_);
-    }
-
-    // Phase 4 registers the S3 service/bucket/object routes here.
+    // One catch-all serves both listeners — the console assets included. Two
+    // regex routes would shadow each other by registration order.
+    s3::registerS3Routes(config_, *storage_, *io_, *cache_, s3Metrics_);
 }
 
 void Server::scheduleMaintenance() {

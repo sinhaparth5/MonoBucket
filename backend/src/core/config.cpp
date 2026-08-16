@@ -16,6 +16,11 @@ namespace {
 // default-constructed Config is already valid; fromEnvironment() overrides
 // them rather than re-declaring them.
 constexpr unsigned kMaxWorkerThreads = 256;
+constexpr unsigned kMaxIoThreads     = 256;
+
+/// RocksDB needs room for a write buffer and a block cache; below this it
+/// thrashes rather than saving memory.
+constexpr std::uint64_t kMinMetadataMemoryBytes = 4ull * 1024 * 1024;
 
 std::string redact(const std::string& secret) {
     if (secret.empty()) return "<unset>";
@@ -53,6 +58,28 @@ Config Config::fromEnvironment() {
 
     cfg.dataDir = env::string("MONOBUCKET_DATA_DIR", cfg.dataDir);
     cfg.region  = env::string("MONOBUCKET_REGION", cfg.region);
+
+    const std::string durability =
+        env::string("MONOBUCKET_DURABILITY", std::string(toString(cfg.durability)));
+    if (const auto parsed = durabilityFromString(durability)) {
+        cfg.durability = *parsed;
+    } else {
+        throw ConfigError("MONOBUCKET_DURABILITY must be one of none/relaxed/strict, got '" +
+                          durability + "'");
+    }
+
+    cfg.metadataMemoryBytes =
+        env::bytes("MONOBUCKET_METADATA_MEMORY_BYTES", cfg.metadataMemoryBytes);
+    cfg.metadataMaxOpenFiles = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_METADATA_MAX_OPEN_FILES", cfg.metadataMaxOpenFiles));
+    cfg.reclaimGraceSeconds = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_RECLAIM_GRACE_SECONDS", cfg.reclaimGraceSeconds));
+    cfg.reclaimIntervalSeconds = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_RECLAIM_INTERVAL_SECONDS", cfg.reclaimIntervalSeconds));
+
+    cfg.ioThreads    = static_cast<unsigned>(env::number("MONOBUCKET_IO_THREADS", cfg.ioThreads));
+    cfg.ioQueueLimit = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_IO_QUEUE_LIMIT", cfg.ioQueueLimit));
 
     cfg.rootAccessKey = env::string("MONOBUCKET_ROOT_ACCESS_KEY", "");
     cfg.rootSecretKey = env::string("MONOBUCKET_ROOT_SECRET_KEY", "");
@@ -92,6 +119,12 @@ void Config::resolveDerivedValues() {
         workerThreads = detected == 0 ? 4u : detected;
     }
     workerThreads = std::min(workerThreads, kMaxWorkerThreads);
+
+    // Storage work is blocking, so the pool is sized like the event loop rather
+    // than from a fixed guess — a machine with more cores has more requests in
+    // flight and therefore more concurrent reads to satisfy.
+    if (ioThreads == 0) ioThreads = workerThreads;
+    ioThreads = std::min(ioThreads, kMaxIoThreads);
 
     if (rootAccessKey.empty()) rootAccessKey = kDefaultAccessKey;
     if (rootSecretKey.empty()) rootSecretKey = kDefaultSecretKey;
@@ -134,6 +167,27 @@ void Config::validate() const {
         throw ConfigError("MONOBUCKET_REDIS_URL is required when the cache backend is 'redis'");
     }
 
+    if (metadataMemoryBytes < kMinMetadataMemoryBytes) {
+        throw ConfigError("MONOBUCKET_METADATA_MEMORY_BYTES must be at least " +
+                          env::formatBytes(kMinMetadataMemoryBytes));
+    }
+    if (metadataMaxOpenFiles < 16) {
+        throw ConfigError("MONOBUCKET_METADATA_MAX_OPEN_FILES must be at least 16");
+    }
+    if (ioQueueLimit == 0) {
+        throw ConfigError("MONOBUCKET_IO_QUEUE_LIMIT must be at least 1");
+    }
+
+    // A grace shorter than the time a large upload takes would let the sweeper
+    // reclaim a payload that is still being written to. See
+    // MetadataStore::listOrphans for why that is unrecoverable rather than
+    // merely wasteful.
+    if (reclaimGraceSeconds < 60) {
+        throw ConfigError(
+            "MONOBUCKET_RECLAIM_GRACE_SECONDS must be at least 60; a shorter grace can reclaim a "
+            "payload that an upload is still writing to");
+    }
+
     static constexpr std::string_view kLevels[] = {"trace", "debug", "info", "warn", "error"};
     if (std::find(std::begin(kLevels), std::end(kLevels), logLevel) == std::end(kLevels)) {
         throw ConfigError("MONOBUCKET_LOG_LEVEL must be one of trace/debug/info/warn/error, got '" +
@@ -154,7 +208,10 @@ std::string Config::summary() const {
        << '\n'
        << "  data dir         : " << dataDir << '\n'
        << "  region           : " << region << '\n'
+       << "  durability       : " << toString(durability) << '\n'
+       << "  metadata memory  : " << env::formatBytes(metadataMemoryBytes) << '\n'
        << "  worker threads   : " << workerThreads << '\n'
+       << "  io threads       : " << ioThreads << " (queue " << ioQueueLimit << ")\n"
        << "  max body         : " << env::formatBytes(maxBodyBytes) << '\n'
        << "  in-memory body   : " << env::formatBytes(maxMemoryBodyBytes) << '\n'
        << "  stream chunk     : " << env::formatBytes(streamChunkBytes) << '\n'
@@ -175,6 +232,13 @@ nlohmann::json Config::toJson() const {
         {"consoleEnabled", consoleEnabled},
         {"dataDir", dataDir},
         {"region", region},
+        {"durability", std::string(toString(durability))},
+        {"metadataMemoryBytes", metadataMemoryBytes},
+        {"metadataMaxOpenFiles", metadataMaxOpenFiles},
+        {"reclaimGraceSeconds", reclaimGraceSeconds},
+        {"reclaimIntervalSeconds", reclaimIntervalSeconds},
+        {"ioThreads", ioThreads},
+        {"ioQueueLimit", ioQueueLimit},
         {"rootAccessKey", rootAccessKey},
         {"rootSecretKey", redact(rootSecretKey)},
         {"workerThreads", workerThreads},

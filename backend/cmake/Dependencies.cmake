@@ -97,6 +97,51 @@ if(NOT Drogon_FOUND)
     endif()
 endif()
 
+# --- RocksDB (embedded metadata store) -------------------------------------
+#
+# Not vendored. RocksDB is a ~40 MB static archive that pulls in gflags,
+# snappy, lz4, zstd and bz2; building it from source would dominate both the
+# image build time and the toolchain surface. Distributions ship it, so we
+# require it the same way we require jsoncpp.
+find_package(RocksDB CONFIG QUIET)
+
+if(RocksDB_FOUND)
+    # Prefer the shared target. The static one carries an INTERFACE_LINK_LIBRARIES
+    # list of compression-library config packages (Snappy::snappy, lz4::lz4,
+    # zstd::zstd, gflags) that must then all be findable; the shared library has
+    # already resolved them internally.
+    if(TARGET RocksDB::rocksdb-shared)
+        set(MONOBUCKET_ROCKSDB_TARGET RocksDB::rocksdb-shared)
+    elseif(TARGET RocksDB::rocksdb)
+        set(MONOBUCKET_ROCKSDB_TARGET RocksDB::rocksdb)
+    endif()
+endif()
+
+if(NOT MONOBUCKET_ROCKSDB_TARGET)
+    # Alpine's rocksdb-dev installs no CMake config package, only the library
+    # and headers. Fall back to a plain search before giving up.
+    find_path(MONOBUCKET_ROCKSDB_INCLUDE_DIR rocksdb/db.h)
+    find_library(MONOBUCKET_ROCKSDB_LIBRARY NAMES rocksdb)
+
+    if(MONOBUCKET_ROCKSDB_INCLUDE_DIR AND MONOBUCKET_ROCKSDB_LIBRARY)
+        add_library(MonoBucket::RocksDB UNKNOWN IMPORTED)
+        set_target_properties(MonoBucket::RocksDB PROPERTIES
+            IMPORTED_LOCATION "${MONOBUCKET_ROCKSDB_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${MONOBUCKET_ROCKSDB_INCLUDE_DIR}")
+        set(MONOBUCKET_ROCKSDB_TARGET MonoBucket::RocksDB)
+    else()
+        message(FATAL_ERROR
+            "RocksDB was not found. MonoBucket stores object metadata in it.\n"
+            "  Debian/Ubuntu : sudo apt install -y librocksdb-dev\n"
+            "  Alpine        : apk add rocksdb-dev\n"
+            "  Fedora/RHEL   : sudo dnf install rocksdb-devel\n"
+            "  macOS         : brew install rocksdb\n"
+            "Set -DCMAKE_PREFIX_PATH=<prefix> if it is installed somewhere unusual.")
+    endif()
+endif()
+
+message(STATUS "RocksDB: ${MONOBUCKET_ROCKSDB_TARGET}")
+
 # --- hiredis (optional Redis cache backend) --------------------------------
 if(MONOBUCKET_ENABLE_REDIS)
     find_package(hiredis QUIET)

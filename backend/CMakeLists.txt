@@ -7,8 +7,17 @@ include(Dependencies)
 set(MONOBUCKET_CORE_SOURCES
     src/core/config.cpp
     src/core/env.cpp
+    src/core/io_executor.cpp
     src/core/logging.cpp
     src/core/lifecycle.cpp
+    src/storage/blob_store.cpp
+    src/storage/codec.cpp
+    src/storage/digest.cpp
+    src/storage/durability.cpp
+    src/storage/keyspace.cpp
+    src/storage/records.cpp
+    src/storage/rocksdb_metadata_store.cpp
+    src/storage/storage_engine.cpp
     src/server/server.cpp
     src/server/system_routes.cpp
 )
@@ -29,6 +38,7 @@ target_link_libraries(monobucket_core
         OpenSSL::SSL
         OpenSSL::Crypto
         ZLIB::ZLIB
+        ${MONOBUCKET_ROCKSDB_TARGET}
 )
 
 if(MONOBUCKET_ENABLE_REDIS)

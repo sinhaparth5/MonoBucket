@@ -46,7 +46,7 @@ bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
     return req->getLocalAddr().toPort() == config.consolePort;
 }
 
-std::string renderMetrics(const Config& config) {
+std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecutor& io) {
     std::ostringstream os;
 
     os << "# HELP monobucket_build_info Build metadata; always 1.\n"
@@ -74,7 +74,66 @@ std::string renderMetrics(const Config& config) {
        << "# TYPE monobucket_embedded_asset_bytes gauge\n"
        << "monobucket_embedded_asset_bytes " << assets::totalBytes() << '\n';
 
-    // Phase 3/4 append cache hit-ratio, request and object counters here.
+    const auto stats = storage.stats();
+
+    os << "# HELP monobucket_buckets Buckets currently defined.\n"
+       << "# TYPE monobucket_buckets gauge\n"
+       << "monobucket_buckets " << stats.usage.buckets << '\n';
+
+    os << "# HELP monobucket_objects Objects currently stored.\n"
+       << "# TYPE monobucket_objects gauge\n"
+       << "monobucket_objects " << stats.usage.objects << '\n';
+
+    os << "# HELP monobucket_object_bytes Total size of stored object payloads.\n"
+       << "# TYPE monobucket_object_bytes gauge\n"
+       << "monobucket_object_bytes " << stats.usage.bytes << '\n';
+
+    os << "# HELP monobucket_multipart_uploads Multipart uploads in progress.\n"
+       << "# TYPE monobucket_multipart_uploads gauge\n"
+       << "monobucket_multipart_uploads " << stats.usage.uploads << '\n';
+
+    // A number that only ever climbs means reclamation has stalled, which is
+    // the difference between "the disk is full" and "we are leaking".
+    os << "# HELP monobucket_orphan_payloads Payloads awaiting reclamation.\n"
+       << "# TYPE monobucket_orphan_payloads gauge\n"
+       << "monobucket_orphan_payloads " << stats.usage.orphanBlobs << '\n';
+
+    os << "# HELP monobucket_disk_total_bytes Capacity of the filesystem holding the data directory.\n"
+       << "# TYPE monobucket_disk_total_bytes gauge\n"
+       << "monobucket_disk_total_bytes " << stats.space.totalBytes << '\n';
+
+    os << "# HELP monobucket_disk_available_bytes Space available to the server on that filesystem.\n"
+       << "# TYPE monobucket_disk_available_bytes gauge\n"
+       << "monobucket_disk_available_bytes " << stats.space.availableBytes << '\n';
+
+    // The metadata engine's own memory, which is the part of RSS that is not
+    // ours to shrink directly — only to budget.
+    for (const auto& [name, value] : stats.engineGauges) {
+        os << "# TYPE monobucket_metadata_" << name << " gauge\n"
+           << "monobucket_metadata_" << name << "{engine=\"" << stats.engine << "\"} " << value
+           << '\n';
+    }
+
+    const auto ioStats = io.stats();
+
+    os << "# HELP monobucket_io_queue_depth Storage operations waiting for an I/O thread.\n"
+       << "# TYPE monobucket_io_queue_depth gauge\n"
+       << "monobucket_io_queue_depth " << ioStats.queued << '\n';
+
+    os << "# HELP monobucket_io_active Storage operations executing right now.\n"
+       << "# TYPE monobucket_io_active gauge\n"
+       << "monobucket_io_active " << ioStats.active << '\n';
+
+    os << "# HELP monobucket_io_completed_total Storage operations completed.\n"
+       << "# TYPE monobucket_io_completed_total counter\n"
+       << "monobucket_io_completed_total " << ioStats.completed << '\n';
+
+    // Non-zero means load was shed because the disk could not keep up.
+    os << "# HELP monobucket_io_rejected_total Storage operations refused because the queue was full.\n"
+       << "# TYPE monobucket_io_rejected_total counter\n"
+       << "monobucket_io_rejected_total " << ioStats.rejected << '\n';
+
+    // Phase 3/4 append cache hit-ratio and request counters here.
     return os.str();
 }
 
@@ -97,7 +156,7 @@ std::size_t residentBytes() noexcept {
 #endif
 }
 
-void registerSystemRoutes(const Config& config) {
+void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecutor& io) {
     auto& app = drogon::app();
 
     // Liveness: answers as long as the event loop is turning.
@@ -108,15 +167,27 @@ void registerSystemRoutes(const Config& config) {
         },
         {drogon::Get, drogon::Head});
 
-    // Readiness: Phase 2 extends this with a metadata-store probe.
+    // Readiness: actually touches the storage engine, so a data directory that
+    // has become unreadable takes the container out of rotation instead of
+    // silently failing every request.
     app.registerHandler(
         "/readyz",
-        [&config](const HttpRequestPtr&, ResponseCallback&& callback) {
-            callback(jsonResponse({
-                {"status", "ready"},
-                {"dataDir", config.dataDir},
-                {"workerThreads", config.workerThreads},
-            }));
+        [&config, &storage](const HttpRequestPtr&, ResponseCallback&& callback) {
+            try {
+                const auto stats = storage.stats();
+                callback(jsonResponse({
+                    {"status", "ready"},
+                    {"dataDir", config.dataDir},
+                    {"workerThreads", config.workerThreads},
+                    {"engine", stats.engine},
+                    {"buckets", stats.usage.buckets},
+                    {"objects", stats.usage.objects},
+                    {"diskAvailableBytes", stats.space.availableBytes},
+                }));
+            } catch (const std::exception& ex) {
+                callback(jsonResponse({{"status", "unavailable"}, {"error", ex.what()}},
+                                      drogon::k503ServiceUnavailable));
+            }
         },
         {drogon::Get, drogon::Head});
 

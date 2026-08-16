@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "monobucket/constants.hpp"
+#include "storage/durability.hpp"
 
 namespace monobucket {
 
@@ -41,6 +42,38 @@ struct Config {
     // --- Storage -----------------------------------------------------------
     std::string dataDir  = "/data";      ///< Object payloads + metadata store
     std::string region   = "us-east-1";  ///< Reported in S3 responses
+
+    /// How much of a write must reach stable storage before it is acknowledged.
+    /// `relaxed` survives a process crash; `strict` survives a power cut and
+    /// costs an fsync per commit.
+    Durability durability = Durability::Relaxed;
+
+    /// Combined ceiling for the metadata store's block cache and its write
+    /// buffers. RocksDB sizes those independently by default and the container
+    /// only sees the sum, so this is charged against both.
+    std::uint64_t metadataMemoryBytes = 32ull * 1024 * 1024;
+
+    /// Bounds the table-reader memory that open SST files pin. Unbounded, this
+    /// grows with the object count for the lifetime of the process.
+    std::uint32_t metadataMaxOpenFiles = 256;
+
+    /// How long an unreferenced payload is left alone before the sweeper may
+    /// reclaim it. Must exceed the longest upload still in flight — see
+    /// MetadataStore::listOrphans.
+    std::uint32_t reclaimGraceSeconds = 3600;
+
+    /// How often the background sweeper runs. Zero disables it, leaving
+    /// reclamation to the deletion path and to startup recovery.
+    std::uint32_t reclaimIntervalSeconds = 300;
+
+    // --- I/O ---------------------------------------------------------------
+    /// 0 means "match the worker thread count". Blocking filesystem work runs
+    /// here so it never occupies an event loop thread.
+    unsigned ioThreads = 0;
+
+    /// Queue depth before storage work is rejected outright. Bounded on
+    /// purpose: an unbounded queue turns a slow disk into unbounded memory.
+    std::uint32_t ioQueueLimit = 1024;
 
     // --- Identity ----------------------------------------------------------
     /// Empty means "use kDefaultAccessKey/kDefaultSecretKey"; resolveDerived-

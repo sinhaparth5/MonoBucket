@@ -17,6 +17,10 @@ namespace {
 
 const std::chrono::steady_clock::time_point kStartedAt = std::chrono::steady_clock::now();
 
+/// Bounded so one sweep cannot monopolise an I/O thread; the next tick picks up
+/// whatever is left.
+constexpr std::size_t kReclaimBatch = 512;
+
 trantor::Logger::LogLevel toTrantorLevel(const std::string& level) {
     if (level == "trace") return trantor::Logger::kTrace;
     if (level == "debug") return trantor::Logger::kDebug;
@@ -33,6 +37,8 @@ double uptimeSeconds() noexcept {
 }
 
 Server::Server(Config config) : config_(std::move(config)) {}
+
+Server::~Server() = default;
 
 void Server::prepareDataDirectory() {
     namespace fs = std::filesystem;
@@ -51,7 +57,9 @@ void Server::prepareDataDirectory() {
     }
     fs::remove(probe, ec);
 
-    // Phase 2 adds the sharded object tree and the metadata store underneath.
+    // The storage engine creates objects/ and tmp/ itself and RocksDB owns
+    // meta/, but creating them here keeps the permission failure at startup
+    // rather than on the first PUT.
     for (const char* sub : {"objects", "meta", "tmp"}) {
         fs::create_directories(fs::path(config_.dataDir) / sub, ec);
         if (ec) {
@@ -59,6 +67,24 @@ void Server::prepareDataDirectory() {
                               ec.message());
         }
     }
+}
+
+void Server::openStorage() {
+    storage_ = std::make_unique<StorageEngine>(StorageEngine::optionsFrom(config_));
+
+    // Reconcile before the listeners open, so no request can observe a tree
+    // that still contains the residue of an unclean stop.
+    storage_->recover();
+
+    io_ = std::make_unique<IoExecutor>(config_.ioThreads, config_.ioQueueLimit);
+
+    // Reverse registration order: the executor stops first so no task is still
+    // touching the engine when it flushes.
+    Lifecycle::instance().onShutdown("storage", [this] {
+        storage_->flush();
+        log::debug("metadata flushed");
+    });
+    Lifecycle::instance().onShutdown("io-executor", [this] { io_->stop(); });
 }
 
 void Server::configureFramework() {
@@ -90,13 +116,30 @@ void Server::configureFramework() {
 }
 
 void Server::registerRoutes() {
-    registerSystemRoutes(config_);
+    registerSystemRoutes(config_, *storage_, *io_);
 
     if (config_.consoleEnabled) {
         registerConsoleRoutes(config_);
     }
 
     // Phase 4 registers the S3 service/bucket/object routes here.
+}
+
+void Server::scheduleMaintenance() {
+    if (config_.reclaimIntervalSeconds == 0) {
+        log::info("background reclamation disabled");
+        return;
+    }
+
+    // Deletions reclaim their own payload inline, so this only picks up what a
+    // crash left behind. It runs on the I/O pool rather than the loop because
+    // unlinking files blocks.
+    drogon::app().getLoop()->runEvery(
+        static_cast<double>(config_.reclaimIntervalSeconds), [this] {
+            if (!io_->post([this] { storage_->reclaim(kReclaimBatch); })) {
+                log::debug("skipped a reclamation pass: the io queue is saturated");
+            }
+        });
 }
 
 void Server::watchForShutdown() {
@@ -117,8 +160,10 @@ void Server::watchForShutdown() {
 
 int Server::run() {
     prepareDataDirectory();
+    openStorage();
     configureFramework();
     registerRoutes();
+    scheduleMaintenance();
     watchForShutdown();
 
     Lifecycle::instance().onShutdown("event-loop", [] {

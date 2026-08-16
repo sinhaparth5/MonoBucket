@@ -1,3 +1,4 @@
+# --- CMake -----------------------------------------------------------------
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles
@@ -10,6 +11,36 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
+
+# Build trees
+build/
+cmake-build-*/
+out/
+install/
+
+# --- Node / SvelteKit ------------------------------------------------------
+node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vite/
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+*.tsbuildinfo
+.npm/
+
+# --- Local runtime state ---------------------------------------------------
+.env
+.env.local
+data/
+*.log
+
+# --- Editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
 
 # CLion
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

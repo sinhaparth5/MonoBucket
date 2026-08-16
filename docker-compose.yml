@@ -1,0 +1,46 @@
+name: monobucket
+
+services:
+  monobucket:
+    build:
+      context: .
+      args:
+        MONOBUCKET_VERSION: ${MONOBUCKET_VERSION:-dev}
+    image: monobucket:${MONOBUCKET_VERSION:-dev}
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Admin dashboard
+    environment:
+      MONOBUCKET_DATA_DIR: /data
+      MONOBUCKET_ROOT_ACCESS_KEY: ${MONOBUCKET_ROOT_ACCESS_KEY:-monobucket}
+      MONOBUCKET_ROOT_SECRET_KEY: ${MONOBUCKET_ROOT_SECRET_KEY:-monobucket-dev-secret}
+      MONOBUCKET_REGION: ${MONOBUCKET_REGION:-us-east-1}
+      MONOBUCKET_CACHE_BACKEND: ${MONOBUCKET_CACHE_BACKEND:-memory}
+      MONOBUCKET_CACHE_MAX_BYTES: ${MONOBUCKET_CACHE_MAX_BYTES:-128MiB}
+      MONOBUCKET_LOG_LEVEL: ${MONOBUCKET_LOG_LEVEL:-info}
+    volumes:
+      - monobucket-data:/data
+    # The container runs as uid 1000 and only ever writes under /data.
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          # Memory stays flat by design; a hard cap makes a regression obvious.
+          memory: 256M
+
+  # Optional Redis cache backend (Phase 3). Start with:
+  #   docker compose --profile redis up
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - monobucket-redis:/data
+
+volumes:
+  monobucket-data:
+  monobucket-redis:

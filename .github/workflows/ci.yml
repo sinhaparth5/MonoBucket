@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (${{ matrix.preset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [dev, asan]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libjsoncpp-dev uuid-dev libssl-dev zlib1g-dev \
+            libbrotli-dev libc-ares-dev
+
+      # Drogon is fetched and built from source; caching it turns a multi-minute
+      # step into seconds on every run after the first.
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.preset }}/_deps
+          key: deps-${{ matrix.preset }}-${{ runner.os }}-${{ hashFiles('backend/cmake/Dependencies.cmake') }}
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether the dashboard exists yet
+        id: check
+        run: |
+          if [ -f frontend/package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::frontend/ has not been scaffolded yet — skipping"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.check.outputs.exists == 'true'
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install and build
+        if: steps.check.outputs.exists == 'true'
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run check
+          pnpm run lint
+          pnpm run build
+          # The embedding step is meaningless without an SPA entry point.
+          test -f build/index.html
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only — publication happens in release.yml on a tag.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: monobucket:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm monobucket:ci --version
+          docker run -d --name mb -p 9000:9000 \
+            -e MONOBUCKET_ROOT_SECRET_KEY=ci-secret-value monobucket:ci
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:9000/healthz; then break; fi
+            sleep 1
+          done
+          curl -fsS localhost:9000/healthz
+          curl -fsS localhost:9000/metrics | head -20
+          # SIGTERM must produce a clean exit, not a timeout kill.
+          docker stop --timeout 10 mb
+          test "$(docker inspect -f '{{.State.ExitCode}}' mb)" = "0"
+          docker rm mb

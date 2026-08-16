@@ -1,0 +1,73 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Debug, tests on, no embedded dashboard",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MONOBUCKET_BUILD_TESTS": "ON",
+        "MONOBUCKET_EMBED_FRONTEND": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "displayName": "Debug + AddressSanitizer/UBSan (Phase 7 leak checks)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MONOBUCKET_BUILD_TESTS": "ON",
+        "MONOBUCKET_ENABLE_ASAN": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Optimised build with the dashboard embedded",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MONOBUCKET_BUILD_TESTS": "OFF",
+        "MONOBUCKET_EMBED_FRONTEND": "ON",
+        "MONOBUCKET_ENABLE_LTO": "ON"
+      }
+    },
+    {
+      "name": "release-redis",
+      "inherits": "release",
+      "displayName": "Release with the optional Redis cache backend",
+      "cacheVariables": {
+        "MONOBUCKET_ENABLE_REDIS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "release-redis", "configurePreset": "release-redis" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

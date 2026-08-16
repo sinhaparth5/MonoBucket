@@ -1,0 +1,25 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortCaseLabelsOnASingleLine: true
+
+AlignConsecutiveAssignments: Consecutive
+AlignTrailingComments: true
+
+# Project headers resolve against backend/src and common/include; keep the
+# grouping stable so diffs stay small.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+SpaceAfterTemplateKeyword: false
+NamespaceIndentation: None
+FixNamespaceComments: true

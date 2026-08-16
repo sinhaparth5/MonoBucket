@@ -1,0 +1,28 @@
+# Build artefacts
+build/
+cmake-build-*/
+out/
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+frontend/.vite/
+
+# VCS & tooling
+.git/
+.github/
+.vscode/
+.idea/
+*.swp
+
+# Local state
+data/
+.env
+.env.*
+!.env.example
+
+# Docs that do not affect the build
+*.md
+!README.md
+LICENSE

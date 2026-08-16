@@ -1,0 +1,237 @@
+# MonoBucket Roadmap
+
+A phased blueprint for **MonoBucket**: a single-binary, ultra-low-memory, C++
+S3-compatible object storage server with an embedded SvelteKit administration
+dashboard.
+
+**Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
+
+**Current phase:** Phase 1 — Project Scaffolding & Core Architecture
+**Last updated:** 2026-08-16
+
+---
+
+## Guiding constraints
+
+These hold across every phase. A change that violates one is a bug, not a
+trade-off.
+
+| Constraint | What it means in practice |
+| --- | --- |
+| **Single binary** | The dashboard, the S3 API and the storage engine ship as one executable. No sidecars, no external database. |
+| **Bounded memory** | Resident memory stays flat regardless of object size or concurrency. Everything above `MONOBUCKET_MAX_MEMORY_BODY_BYTES` streams through fixed-size chunks. |
+| **Configuration is environment** | No config file format to maintain. Every knob is a `MONOBUCKET_*` variable, parsed once at startup, validated before the first listener opens. |
+| **Fail fast, fail loud** | A malformed setting aborts startup with an actionable message rather than falling back to a default nobody asked for. |
+| **S3 fidelity over convenience** | Where the specification and ergonomics disagree, match the specification — clients depend on the wire format, not on our taste. |
+
+---
+
+## Phase 1 — Project Scaffolding & Core Architecture
+
+*Goal: a repository that configures, builds, tests and runs an empty server.*
+
+### Build system setup
+- [x] CMake 3.25+ with C++20, warnings-as-signal, Release/Debug/ASan presets
+- [x] Dependency acquisition via `find_package` first, `FetchContent` fallback
+      (Drogon, nlohmann_json, Catch2, optional hiredis)
+- [x] Directory layout: `/backend` (C++ engine), `/frontend` (SvelteKit UI),
+      `/common` (shared definitions)
+- [x] `CMakePresets.json` for dev / asan / release / release-redis
+- [x] CalVer version header generated from CMake into `common/`
+- [ ] CI workflow: configure, build, test, and publish the image
+
+### Threading & core loop strategy
+- [x] Asynchronous event loop on Drogon (Trantor / epoll)
+- [x] Worker pool sized from `std::thread::hardware_concurrency()`, overridable
+      and capped
+- [x] Global configuration management: environment parsing, byte-size units,
+      cross-field validation, redacted summary and JSON views
+- [x] Graceful shutdown: `SIGTERM`/`SIGINT` set a `sig_atomic_t`, the loop polls
+      it, ordered shutdown hooks run afterwards
+- [x] Structured stderr logger, independent of the HTTP stack so core code stays
+      unit-testable
+
+**Exit criteria:** `ctest` is green, `monobucket --print-config` renders the
+resolved configuration, and the process answers `/healthz` and shuts down
+cleanly on `SIGTERM`.
+
+---
+
+## Phase 2 — Storage Layer & POSIX I/O Engine
+
+*Goal: durable objects on disk with transactional metadata.*
+
+### Metadata management
+- [ ] Embedded key-value store (RocksDB or SQLite) behind a `MetadataStore`
+      interface — benchmark both before committing
+- [ ] Schema: buckets, object keys, ETags, content types, custom tags, ACL
+      policies, multipart upload state
+- [ ] Atomic metadata updates — an object becomes visible only once its payload
+      is fully durable
+- [ ] Crash recovery: reconcile orphaned payloads and abandoned multipart parts
+      on startup
+
+### Disk storage engine
+- [ ] Directory hashing / sharded tree so no single directory accumulates
+      millions of entries
+- [ ] Non-blocking chunked streaming (`io_uring` on Linux, thread-pooled
+      `std::fstream` fallback) with fixed memory per transfer
+- [ ] Integrity layer: MD5 (ETag) and SHA-256 computed during the stream, never
+      by re-reading the object
+- [ ] `fsync` / durability policy, configurable per bucket
+- [ ] Free-space accounting for the dashboard's capacity metrics
+
+**Exit criteria:** a multi-gigabyte object round-trips byte-identically with
+resident memory flat to within a few MiB.
+
+---
+
+## Phase 3 — Abstraction & Cache Layer
+
+*Goal: a pluggable cache that never becomes the reason memory grows.*
+
+### Abstract interface
+- [ ] `CacheProvider`: `get`, `set`, `del`, `evict`, plus stats for `/metrics`
+
+### In-memory LRU backend (default)
+- [ ] `std::unordered_map` + intrusive doubly linked list, guarded by
+      `std::shared_mutex` for concurrent reads
+- [ ] Byte-size budget with background eviction, not per-entry counts
+- [ ] Hit/miss/eviction counters exported to Prometheus
+
+### Redis backend (optional)
+- [ ] `hiredis` wrapper conforming to `CacheProvider`
+- [ ] Connection pooling
+- [ ] Reconnect with backoff, transparent fallback to in-memory when Redis is
+      unreachable — a cache outage must never become a storage outage
+
+**Exit criteria:** cache backend is swappable by environment variable alone, and
+the in-memory backend holds its configured byte budget under stress.
+
+---
+
+## Phase 4 — S3 REST API Protocol
+
+*Goal: real S3 clients work unmodified.*
+
+### Router & signature engine
+- [ ] AWS Signature Version 4 validator on OpenSSL: canonical request, signed
+      headers, query-string signing, chunked payload signing
+- [ ] Clock-skew rejection window
+- [ ] Presigned URL verification
+- [ ] Anonymous read paths for public buckets
+- [ ] S3-shaped XML error responses with request IDs
+
+### Endpoints
+- [ ] **Service:** `GET /` (ListBuckets)
+- [ ] **Bucket:** `PUT /{bucket}`, `DELETE /{bucket}`, `HEAD /{bucket}`,
+      `GET /{bucket}` (ListObjects + ListObjectsV2, prefix/delimiter/pagination)
+- [ ] **Object:** `GET` (incl. `Range`), `PUT`, `DELETE`, `HEAD`,
+      `POST ?delete` (DeleteObjects)
+- [ ] **Multipart:** `CreateMultipartUpload`, `UploadPart`, `ListParts`,
+      `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListMultipartUploads`
+- [ ] Bucket policy / public-access endpoints backing the link generator
+
+**Exit criteria:** `aws s3 cp/sync`, `boto3` and `rclone` all pass a functional
+smoke suite against a live instance.
+
+---
+
+## Phase 5 — SvelteKit Frontend & Asset Embedding
+
+*Goal: an admin dashboard that ships inside the binary.*
+
+### Dashboard
+- [ ] Overview: storage capacity, active connections, request rate, cache
+      hit/miss graphs
+- [ ] Bucket tree with create / delete / policy editing
+- [ ] File browser: listing with pagination, drag-and-drop chunked uploader with
+      progress, object metadata viewer, presigned link generator
+- [ ] Settings panel: cache backend selection, RAM thresholds, API key
+      management
+- [ ] Auth for the console, separate from S3 credentials
+
+### Embedding pipeline
+- [x] SvelteKit 2 / Svelte 5 project on pnpm, scaffolded with `sv create`
+- [x] `@sveltejs/adapter-static` with SPA fallback, SSR and prerendering off
+      (configured in `vite.config.ts` — this SvelteKit version has no
+      `svelte.config.js`)
+- [x] CMake pre-build step converting `frontend/build/` into a generated C++
+      translation unit (`backend/cmake/EmbedFrontend.cmake`)
+- [x] Sorted asset table with binary-search lookup and MIME detection
+- [x] SPA fallback routing on the console listener; the S3 listener never serves
+      console assets
+- [x] Long-lived cache headers for fingerprinted `/_app/immutable/` assets
+- [ ] Pre-compressed `gzip`/`brotli` variants selected by `Accept-Encoding`
+- [ ] Migrate the generator to C++23 `#embed` once the toolchain floor allows
+
+**Exit criteria:** `docker run` serves the dashboard on the console port with no
+external assets and no network fetches.
+
+---
+
+## Phase 6 — Single-Container Build & Packaging
+
+*Goal: one small image, correct lifecycle behaviour.*
+
+- [x] Multi-stage Dockerfile: Node → Alpine toolchain → minimal runtime
+- [x] Release flags: `-O3`, `--gc-sections`, `-ffunction-sections`, stripped
+      symbols
+- [~] LTO — enabled on glibc, automatically disabled on musl because Alpine's
+      `fortify-headers` and LTO cannot coexist (see `CMakeLists.txt`). Revisit
+      if the size/throughput gain justifies a glibc build stage.
+- [x] Non-root runtime user, `/data` volume, read-only root filesystem
+- [x] `docker-compose.yml` with an optional Redis profile and a memory cap
+- [x] `/healthz`, `/readyz`, container `HEALTHCHECK`
+- [x] `/metrics` in Prometheus text format
+- [x] Graceful shutdown flushing state and closing descriptors
+- [ ] Multi-architecture images (`linux/amd64`, `linux/arm64`)
+- [ ] Automated CalVer tagging and publication to GHCR
+- [ ] SBOM and image signing
+
+**Exit criteria:** a tagged commit produces a published, signed, multi-arch
+image whose runtime footprint is documented.
+
+---
+
+## Phase 7 — Testing, Profiling & Benchmarking
+
+*Goal: evidence, not assertions.*
+
+### Conformance
+- [ ] `boto3` and AWS CLI compatibility suite in CI
+- [ ] `rclone` and Go SDK cross-checks
+- [ ] `s3-tests`-style edge cases: unicode keys, deep prefixes, empty objects,
+      zero-byte multipart parts
+
+### Performance & memory
+- [ ] Valgrind and ASan/UBSan clean on the full test suite
+- [ ] `wrk` and `k6` scenarios: concurrent small-object reads, large uploads,
+      mixed workloads
+- [ ] Published baseline: RSS under load vs. the configured budget
+- [ ] Regression gate in CI on both throughput and peak RSS
+
+**Exit criteria:** documented numbers for RAM, throughput and latency, with CI
+failing on regression.
+
+---
+
+## Beyond 1.0 — under consideration
+
+Not committed. Listed so they are not accidentally designed out.
+
+- Object versioning and lifecycle rules
+- Server-side encryption (SSE-S3, SSE-C)
+- Bucket replication between MonoBucket instances
+- Erasure coding / multi-disk backends
+- Event notifications (webhook, NATS)
+- IAM-style policy documents beyond the root credential
+
+---
+
+## How progress is recorded
+
+1. Tick the checkbox in this file as part of the same commit that lands the work.
+2. Add a line to `CHANGELOG.md` under `[Unreleased]`.
+3. On release, move the `[Unreleased]` block under a new CalVer heading and tag
+   the commit. See [CHANGELOG.md](CHANGELOG.md) for the versioning scheme.

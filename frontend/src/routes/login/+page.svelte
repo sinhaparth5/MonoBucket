@@ -12,6 +12,7 @@
 	import { fly } from 'svelte/transition';
 	import { api, ApiError } from '$lib/api';
 	import Icon from '$lib/components/Icon.svelte';
+	import logo from '$lib/assets/monobucket-logo.svg';
 
 	let accessKey = $state('');
 	let secretKey = $state('');
@@ -54,11 +55,7 @@
 
 	<div class="relative w-full max-w-sm" in:fly={{ y: 12, duration: 300 }}>
 		<div class="mb-6 flex items-center gap-3">
-			<span
-				class="from-primary to-secondary text-primary-content grid size-11 place-items-center rounded-xl bg-gradient-to-br shadow-md"
-			>
-				<Icon name="bucket" class="size-6" />
-			</span>
+			<img src={logo} alt="" class="size-12" />
 			<div class="flex flex-col leading-tight">
 				<span class="text-xl font-semibold tracking-tight">MonoBucket</span>
 				<span class="text-base-content/55 text-sm">Sign in to the console.</span>

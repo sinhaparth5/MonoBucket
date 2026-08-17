@@ -6,6 +6,7 @@
 	import { api } from '$lib/api';
 	import { theme, type ThemeChoice } from '$lib/theme.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
+	import logo from '$lib/assets/monobucket-logo.svg';
 
 	let { data, children } = $props();
 
@@ -67,7 +68,10 @@
 				<Icon name="menu" />
 			</label>
 
-			<span class="font-semibold lg:hidden">MonoBucket</span>
+			<span class="flex items-center gap-2 font-semibold lg:hidden">
+				<img src={logo} alt="" class="size-6" />
+				MonoBucket
+			</span>
 
 			<div class="ml-auto flex items-center gap-1 sm:gap-2">
 				<!-- Three states, not two: someone who has never touched this should
@@ -137,13 +141,7 @@
 
 		<div class="bg-base-100 border-base-300 flex min-h-full w-64 flex-col border-r">
 			<div class="border-base-300 surface-raised flex items-center gap-2.5 border-b px-4 py-3.5">
-				<!-- The product mark: three stacked bands for the three layers the
-				     binary actually is — API, metadata, payloads. -->
-				<span
-					class="from-primary to-secondary text-primary-content grid size-8 place-items-center rounded-lg bg-gradient-to-br shadow-sm"
-				>
-					<Icon name="bucket" class="size-4.5" />
-				</span>
+				<img src={logo} alt="" class="size-9" />
 				<span class="flex flex-col leading-tight">
 					<span class="font-semibold tracking-tight">MonoBucket</span>
 					<span class="text-base-content/50 text-[0.6875rem]">Object storage console</span>

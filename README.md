@@ -1,422 +1,53 @@
-# MonoBucket
+<p align="center">
+  <img src="frontend/src/lib/assets/monobucket-logo.svg" width="176" alt="MonoBucket logo">
+</p>
 
-Single-binary, low-memory, S3-compatible object storage written in C++20, with a
-SvelteKit administration dashboard compiled into the executable.
+<h1 align="center">MonoBucket</h1>
 
-One binary. One container. No sidecars, no external database.
+<p align="center">
+  Small S3-compatible object storage with a built-in admin dashboard.
+</p>
 
-> **Status: pre-alpha.** Phases 1–6 are in place: scaffolding and lifecycle, the
-> storage engine, the cache layer, the S3 REST API, the dashboard with its
-> embedding pipeline, and signed multi-architecture container images. `aws s3`,
-> `boto3` and `rclone` all work against it, and the console port serves a
-> working admin UI with overview graphs, a bucket list, a file browser with
-> drag-and-drop upload, presigned links, and bucket policy and CORS editors. See
-> [ROADMAP.md](ROADMAP.md) for what is still open, notably `io_uring`, `fsck`,
-> and the Phase 7 conformance and benchmark suites — which is why the numbers
-> that matter most, throughput and RSS under load, are not published yet.
-> Do not put data you cannot lose in it.
+MonoBucket packages a C++20 storage server and a Svelte dashboard into one
+binary. It runs without sidecars or an external database.
 
----
+> [!WARNING]
+> MonoBucket is pre-alpha software. Do not store the only copy of important
+> data in it. See the [roadmap](ROADMAP.md) before using it outside a test setup.
 
-## Layout
+## What you get
 
-```
-MonoBucket/
-├── backend/            C++ engine
-│   ├── cmake/          dependency resolution + frontend embedding
-│   ├── src/
-│   │   ├── core/       config, env parsing, logging, lifecycle
-│   │   ├── server/     event loop, listeners, system routes, asset store
-│   │   ├── storage/    metadata store + POSIX I/O engine
-│   │   ├── cache/      CacheProvider, sharded LRU, optional Redis
-│   │   └── s3/         Phase 4: SigV4, routing, XML responses
-│   └── tests/          Catch2 suite
-├── common/include/     version + protocol constants shared across layers
-├── frontend/           SvelteKit dashboard (static build, embedded at compile time)
-├── Dockerfile          Node → Alpine toolchain → minimal runtime
-└── docker-compose.yml
-```
+- An S3 API that works with AWS CLI, boto3, and rclone
+- Multipart uploads, presigned URLs, bucket policies, CORS, and SigV4
+- A browser dashboard for buckets, objects, uploads, metrics, and settings
+- One container for `linux/amd64` and `linux/arm64`
 
----
-
-## Build from source
-
-### Prerequisites
-
-Three things come from the system: jsoncpp and libuuid, which Drogon links
-against, and RocksDB, which holds the metadata. Everything else is fetched and
-pinned by CMake.
-
-Drogon is always built from source, even when one is installed. It is the one
-dependency we patch because its request parser refuses the zero-length body that
-every S3 client sends when writing an empty object. An unpatched build cannot
-store one (`backend/cmake/patches/`).
-`-DMONOBUCKET_ALLOW_SYSTEM_DROGON=ON` uses an installed copy instead and warns
-about what that costs.
-
-RocksDB is deliberately not vendored. Its ~40 MB static archive pulls in gflags,
-snappy, lz4, zstd and bz2, and building it from source would dominate both the
-image build and the toolchain surface.
+## Run it
 
 ```bash
-# Debian / Ubuntu
-sudo apt install -y build-essential cmake ninja-build git \
-                    libjsoncpp-dev uuid-dev libssl-dev zlib1g-dev \
-                    libbrotli-dev libc-ares-dev librocksdb-dev
-
-# Alpine
-apk add build-base cmake ninja git jsoncpp-dev util-linux-dev \
-        openssl-dev zlib-dev brotli-dev c-ares-dev rocksdb-dev
-
-# Fedora / RHEL
-sudo dnf install gcc-c++ cmake ninja-build git jsoncpp-devel libuuid-devel \
-                 openssl-devel zlib-devel brotli-devel c-ares-devel rocksdb-devel
-
-# macOS
-brew install cmake ninja jsoncpp ossp-uuid openssl brotli c-ares rocksdb
-```
-
-CMake 3.25+ and a compiler with C++20 support (GCC 12+, Clang 15+) are required.
-
-### Configure, build, test
-
-```bash
-cmake --preset dev          # first run also fetches Drogon; expect a few minutes
-cmake --build --preset dev
-ctest --preset dev
-```
-
-Other presets: `asan` (AddressSanitizer + UBSan), `release` (LTO, dashboard
-embedded), `release-redis` (adds the Redis cache backend), `dev-redis` (debug
-build with the Redis backend, for the integration suite).
-
-The Redis integration tests need a real server and are skipped without one:
-
-```bash
-docker run -d --rm -p 63790:6379 redis:7-alpine
-MONOBUCKET_TEST_REDIS_URL=redis://127.0.0.1:63790/0 ctest --preset dev-redis
-```
-
-### Run
-
-```bash
-export MONOBUCKET_DATA_DIR=$PWD/data
-export MONOBUCKET_ROOT_SECRET_KEY=local-dev-secret
-./build/dev/bin/monobucket
-```
-
-```bash
-./build/dev/bin/monobucket --help           # every setting, with defaults
-./build/dev/bin/monobucket --print-config   # the resolved configuration as JSON
-curl -s localhost:9000/healthz
-curl -s localhost:9000/metrics
-```
-
----
-
-## Frontend
-
-The dashboard lives in `frontend/` (SvelteKit 2 + Svelte 5, TypeScript, pnpm)
-and is compiled into the binary as a static asset table.
-
-```bash
-cd frontend
-pnpm install
-pnpm dev                      # dev server on :5173, proxying to the C++ API
-pnpm run build                # static output in frontend/build/
-```
-
-Building the backend with the dashboard embedded:
-
-```bash
-cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd ..
-cmake --preset release
-cmake --build --preset release
-```
-
-Without `MONOBUCKET_EMBED_FRONTEND=ON` the binary compiles with an empty asset
-table and the console port returns 404. This is useful while working on the
-engine.
-
-The embedder also pre-compresses every text asset with `gzip` and `brotli` and
-bakes the variants in beside the original, so the console negotiates on
-`Accept-Encoding` without compressing anything per request. Both compressors are
-optional: if neither is on `PATH` the table carries no variants and every
-response is the original. A variant is kept only where it saves at least a
-tenth, so fonts and images have none.
-
-### How it was scaffolded
-
-```bash
-npx sv create frontend        # SvelteKit, TypeScript
-cd frontend
-pnpm add -D @sveltejs/adapter-static
-```
-
-This SvelteKit version carries its Kit config in `vite.config.ts` rather than a
-separate `svelte.config.js`. The adapter is configured for SPA fallback:
-
-```ts
-adapter: adapter({
-  pages: 'build',
-  assets: 'build',
-  fallback: 'index.html',
-  precompress: false
-})
-```
-
-and `src/routes/+layout.ts` turns off SSR and prerendering, because the binary
-has no Node runtime beside it:
-
-```ts
-export const ssr = false;
-export const prerender = false;
-```
-
----
-
-## Docker
-
-Released images are published to GHCR for `linux/amd64` and `linux/arm64`:
-
-```bash
-docker run --rm -p 9000:9000 -p 9001:9001 \
+docker run --rm \
+  -p 9000:9000 \
+  -p 9001:9001 \
   -e MONOBUCKET_ROOT_ACCESS_KEY=monobucket \
   -e MONOBUCKET_ROOT_SECRET_KEY=change-me-please \
   -v monobucket-data:/data \
   ghcr.io/sinhaparth5/monobucket:2026.08.0
 ```
 
-| Tag | Points at |
-| --- | --- |
-| `2026.08.0` | One exact, immutable release. Use this in production. |
-| `2026.08` | The newest release within that month. |
-| `2026` | The newest release within that year. |
-| `latest` | The newest stable release overall. |
-| `edge` | The head of `master`. Built and smoke-tested, but unsigned and not for production. |
-
-Or build it yourself — the Dockerfile is self-contained and needs nothing from
-the host but Docker:
+The S3 API listens on [localhost:9000](http://localhost:9000). The dashboard is
+at [localhost:9001](http://localhost:9001).
 
 ```bash
-docker build -t monobucket:dev .
+AWS_ACCESS_KEY_ID=monobucket \
+AWS_SECRET_ACCESS_KEY=change-me-please \
+aws --endpoint-url http://localhost:9000 s3 ls
 ```
 
-Or with compose:
+Change both credentials before exposing the server. The full list of settings
+is in [.env.example](.env.example).
 
-```bash
-cp .env.example .env      # edit the root credentials first
-docker compose up --build
-docker compose --profile redis up --build    # with the Redis cache backend
-```
+## Project links
 
-| Port | Purpose |
-| --- | --- |
-| 9000 | S3 REST API |
-| 9001 | Admin dashboard |
+[Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 
-### Verifying an image
-
-Releases are signed with [cosign](https://docs.sigstore.dev/) using GitHub's
-OIDC identity — keyless, so there is no public key to distribute and no private
-one to leak. The signature says which workflow, in which repository, at which
-commit produced the image, and it is recorded in the public Rekor transparency
-log:
-
-```bash
-cosign verify \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/sinhaparth5/MonoBucket/\.github/workflows/release\.yml@' \
-  ghcr.io/sinhaparth5/monobucket:2026.08.0
-```
-
-Each release also carries an SPDX software bill of materials, attached to the
-image as an attestation and to the GitHub release as a plain file:
-
-```bash
-cosign download attestation --platform linux/amd64 \
-  ghcr.io/sinhaparth5/monobucket:2026.08.0 \
-  | jq -r .payload | base64 -d | jq .predicate
-```
-
-`edge` is deliberately unsigned. A signature is what marks a release; signing
-every push to `master` would reduce it to a note that CI ran.
-
-### Runtime footprint
-
-Measured on the `2026.08.0` `linux/amd64` image, idle, with the default
-in-memory cache:
-
-| | |
-| --- | --- |
-| Image download (compressed) | ~14 MB |
-| Unpacked on disk | ~33 MB — Alpine 8.5 MB, shared libraries 18.1 MB, MonoBucket 6.6 MB |
-| Stripped binary, dashboard included | 6.6 MB |
-| Resident memory, idle | 23.7 MB (`monobucket_process_resident_bytes`) |
-| Container working set, idle | 6.5 MiB — most of the RSS above is the binary's own file-backed pages |
-| Cold start to `/readyz` | < 0.5 s, including container create and start |
-
-The cache budget and RocksDB's `MONOBUCKET_METADATA_MEMORY_BYTES` sit on top of
-that figure and are only occupied once something is stored.
-`docker-compose.yml` caps the container at 256 MB so a regression in any of it
-shows up as a kill rather than as a slow leak nobody notices.
-
-`docker images` may report a larger number than the unpacked size above — with
-the containerd image store it counts the compressed blobs and the unpacked
-snapshot together.
-
----
-
-## Configuration
-
-Everything is read from the environment at startup; nothing is hot-reloaded.
-See [.env.example](.env.example) for the annotated list, or run
-`monobucket --help`.
-
-Size values accept unit suffixes. Binary units (`K`, `Ki`, `KiB`, `M`, `MiB`,
-`G`, `GiB`) are powers of 1024; SI units (`KB`, `MB`, `GB`) are powers of 1000.
-A bare number is bytes.
-
-The settings that govern memory behaviour:
-
-- `MONOBUCKET_MAX_MEMORY_BODY_BYTES`: request bodies larger than this spill to
-  disk instead of being buffered in RAM.
-- `MONOBUCKET_STREAM_CHUNK_BYTES`: the fixed chunk size used by the streaming
-  I/O engine, which is what keeps resident memory flat during multi-gigabyte
-  transfers.
-- `MONOBUCKET_METADATA_MEMORY_BYTES`: one budget covering RocksDB's block
-  cache, its write buffers and its index/filter blocks together. Sized
-  separately, as RocksDB does by default, the sum is what the container sees.
-- `MONOBUCKET_IO_QUEUE_LIMIT`: how much storage work may queue before requests
-  are refused. Bounded deliberately; an unbounded queue turns a slow disk into
-  unbounded memory.
-- `MONOBUCKET_CACHE_MAX_BYTES`: the cache budget, counted as stored bytes plus
-  per-entry overhead and enforced on every insert rather than trimmed on a
-  timer. `0` disables caching.
-
----
-
-## Cache
-
-One `CacheProvider` interface, selected by `MONOBUCKET_CACHE_BACKEND`.
-
-`memory` (default) is a sharded LRU. Each shard has its own map, intrusive
-list and `shared_mutex`, and holds an equal slice of the budget. Reads take the
-shared lock and deliberately do *not* reorder the list. Promoting on every read
-would make `get()` a writer and reduce the `shared_mutex` to decoration. A hit
-sets an atomic flag instead, and eviction gives a flagged entry one reprieve
-before taking it. This trades exact recency for concurrent reads.
-
-`redis` (optional, `-DMONOBUCKET_ENABLE_REDIS=ON`) is a shared tier for
-several instances, and is arranged as two tiers rather than an either/or: the
-local cache sits in front of it and is written on every `set`, so it is already
-warm if Redis goes away. After a few consecutive failures a circuit breaker
-stops calling Redis entirely, backing off exponentially and letting a single
-probe through per window. Retrying a dead socket on every request would satisfy
-"the cache never fails" while still stalling every request.
-
-The cost of the local tier is coherence: another instance can change a value
-this process has already copied. `MONOBUCKET_CACHE_LOCAL_TTL_SECONDS` (default
-5) caps how long that can go unnoticed, and applies even to entries stored with
-no expiry.
-
-A cache outage is never a storage outage. `/readyz` reports the backend and its
-health, but a degraded cache does not take the container out of rotation.
-
----
-
-## Storage layout
-
-Everything lives under `MONOBUCKET_DATA_DIR`:
-
-```
-/data
-├── meta/      RocksDB: buckets, objects, multipart uploads, reclamation log
-├── objects/   payloads, sharded as <aa>/<bb>/<blobId>
-└── tmp/       in-flight writes, linked into objects/ only once durable
-```
-
-Two rules make the pair recoverable. A payload is written and flushed before
-the metadata naming it is committed, and unlinked only after that metadata
-is gone. An interruption therefore leaves either the old state or the new one. A
-payload is registered in the reclamation log before it is written, so a crash at
-any point leaves a trace that startup can collect in time proportional to what
-leaked rather than to what is stored.
-
-`MONOBUCKET_DURABILITY` decides how hard the first of those rules pushes:
-`relaxed` (the default) survives a process crash, `strict` survives a power cut
-and costs an fsync per commit, `none` is for CI.
-
-The on-disk format carries its own version, independent of the release version.
-A binary that does not recognise it refuses to open the directory rather than
-misreading it.
-
----
-
-## Endpoints available today
-
-System routes, on both listeners unless noted:
-
-| Endpoint | Listener | Purpose |
-| --- | --- | --- |
-| `GET /healthz` | both | Liveness |
-| `GET /readyz` | both | Readiness |
-| `GET /metrics` | both | Prometheus text format |
-| `GET /_mb/version` | both | Version and build info |
-
-The console API lives under `/_mb/api/*` on the console listener only. It uses
-session authentication: the root key pair is exchanged for an HttpOnly cookie,
-so the browser never holds an S3 secret. It covers the dashboard's needs:
-`/session`, `/login`, `/logout`, `/overview`, `/series`, `/config`, `/buckets`
-and its `/access`, `/policy` and `/cors` subresources, `/objects`, `/object`,
-`/upload` and `/presign`. This API is separate from the S3 API and may change;
-use the S3 port for anything programmatic.
-
-The S3 API, on port 9000:
-
-| Operation | Request |
-| --- | --- |
-| ListBuckets | `GET /` |
-| CreateBucket / DeleteBucket / HeadBucket | `PUT` / `DELETE` / `HEAD` `/{bucket}` |
-| ListObjects, ListObjectsV2 | `GET /{bucket}[?list-type=2]`, with `prefix`, `delimiter`, `max-keys`, `continuation-token` |
-| GetObject, HeadObject | `GET` / `HEAD` `/{bucket}/{key}`, with `Range` and conditional headers |
-| PutObject | `PUT /{bucket}/{key}` |
-| DeleteObject, DeleteObjects | `DELETE /{bucket}/{key}`, `POST /{bucket}?delete` |
-| Multipart | `?uploads`, `?uploadId=`, `?partNumber=`: create, upload, list, complete, abort |
-| Bucket policy / ACL / location / versioning | `GET`, `PUT`, `DELETE` on `/{bucket}?policy`, `?acl`, `?location`, `?versioning` |
-| Bucket CORS | `GET`, `PUT`, `DELETE` on `/{bucket}?cors`, plus `OPTIONS` preflights on any path |
-
-Authentication is SigV4, in both header and presigned-query form, including
-`aws-chunked` streaming signatures. Path-style addressing always works;
-virtual-host style (`bucket.s3.example.com`) requires `MONOBUCKET_S3_DOMAIN`.
-Anonymous reads are served only for a bucket whose policy grants them.
-Preflights are answered without a signature, because a browser never attaches
-credentials to one; a bucket with no CORS rules refuses every preflight, and so
-does a bucket that does not exist, so a preflight cannot be used to find out
-which buckets are there.
-
-`CopyObject` and object versioning are not implemented and answer `501`.
-
----
-
-## Versioning
-
-CalVer, `YYYY.0M.MICRO`. See [CHANGELOG.md](CHANGELOG.md) for the full scheme
-and the Docker tag set.
-
-Cutting one is `scripts/cut-release.sh` — it derives the next version (MICRO
-restarts when the month does), rewrites `CMakeLists.txt`, promotes the
-`[Unreleased]` changelog block under a dated heading, commits and tags. Pushing
-the tag is what publishes: `release.yml` refuses to go on unless the tag, the
-source and the changelog agree, then builds both architectures, smoke-tests each
-on its own hardware, signs the manifest and creates the GitHub release from the
-changelog section.
-
-## Contributing
-
-Tick the box in `ROADMAP.md` and add a `CHANGELOG.md` entry in the same commit
-as the work. Run `ctest --preset dev` before pushing.
-
-## Licence
-
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+MonoBucket is licensed under [GPL-3.0-or-later](LICENSE).

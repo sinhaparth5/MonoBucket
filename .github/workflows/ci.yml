@@ -92,11 +92,17 @@ jobs:
     name: Container image
     runs-on: ubuntu-latest
     needs: [backend]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      # Build only — publication happens in release.yml on a tag.
+      # amd64 only, and loaded rather than pushed: this is the fast feedback
+      # loop, and a build that cannot be run cannot be smoke-tested. The
+      # cross-architecture matrix lives in release.yml, where arm64 is built and
+      # exercised on an arm64 runner.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -104,21 +110,48 @@ jobs:
           push: false
           load: true
           tags: monobucket:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
 
       - name: Smoke test
         run: |
+          set -euo pipefail
           docker run --rm monobucket:ci --version
-          docker run -d --name mb -p 9000:9000 \
+          docker run -d --name mb -p 9000:9000 -p 9001:9001 \
             -e MONOBUCKET_ROOT_SECRET_KEY=ci-secret-value monobucket:ci
-          for i in $(seq 1 30); do
-            if curl -fsS localhost:9000/healthz; then break; fi
+          for _ in $(seq 1 60); do
+            curl -fsS localhost:9000/healthz >/dev/null 2>&1 && break
             sleep 1
           done
           curl -fsS localhost:9000/healthz
-          curl -fsS localhost:9000/metrics | head -20
+          curl -fsS localhost:9000/readyz
+          curl -fsS localhost:9000/metrics | grep -q '^monobucket_'
+
+          # The dashboard has to come out of the binary, not out of a build
+          # directory that happens to be lying around — this is the only place
+          # the embedded console is checked in its shipping form.
+          curl -fsS localhost:9001/ | grep -q 'data-sveltekit-preload-data'
+          curl -fsS -H 'Accept-Encoding: gzip' -o /dev/null -D - localhost:9001/ \
+            | grep -qi 'content-encoding: gzip'
+          # The S3 listener must never serve console assets.
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:9000/)" != "200"
+
           # SIGTERM must produce a clean exit, not a timeout kill.
           docker stop --timeout 10 mb
           test "$(docker inspect -f '{{.State.ExitCode}}' mb)" = "0"
           docker rm mb
+
+      # `edge` is the head of master, for people who want to try what is coming.
+      # It is deliberately unsigned: a signature is what marks a release, and
+      # signing every push would reduce it to a note that CI ran. Pushed from
+      # the image that just passed the smoke test rather than rebuilt, so the
+      # tag names the artefact that was actually exercised.
+      - name: Publish edge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          docker tag monobucket:ci "$IMAGE:edge"
+          docker push "$IMAGE:edge"

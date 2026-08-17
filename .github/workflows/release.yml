@@ -12,40 +12,118 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
 
 jobs:
-  publish:
+  # ---------------------------------------------------------------------------
+  # Everything that can refuse the release before an image is built, so a
+  # disagreement between the tag, the source and the changelog costs seconds
+  # rather than two cross-architecture compiles.
+  # ---------------------------------------------------------------------------
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      month:   ${{ steps.v.outputs.month }}
+      year:    ${{ steps.v.outputs.year }}
+      stable:  ${{ steps.v.outputs.stable }}
+      image:   ${{ steps.v.outputs.image }}
+      date:    ${{ steps.v.outputs.date }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version
-        id: version
+      - name: Resolve and verify version
+        id: v
         run: |
+          set -euo pipefail
+
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # The tag is the source of truth; CMakeLists.txt must agree with it.
+          # The pre-release suffix (-alpha.1) is part of the exact tag but never
+          # of the rolling ones: 2026.08 must not start pointing at a beta.
+          BASE="${VERSION%%-*}"
+          case "$BASE" in
+            [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]*) ;;
+            *) echo "::error::'$VERSION' is not CalVer YYYY.0M.MICRO"; exit 1 ;;
+          esac
+
+          # The tag is the source of truth; CMakeLists.txt must agree with it,
+          # or the image would report a version nobody can find a tag for.
           CMAKE_VERSION="$(sed -n 's/^set(MONOBUCKET_VERSION_YEAR *\([0-9]*\))/\1/p'  CMakeLists.txt)"
           CMAKE_VERSION="$CMAKE_VERSION.$(sed -n 's/^set(MONOBUCKET_VERSION_MONTH *\([0-9]*\))/\1/p' CMakeLists.txt)"
           CMAKE_VERSION="$CMAKE_VERSION.$(sed -n 's/^set(MONOBUCKET_VERSION_MICRO *\([0-9]*\))/\1/p' CMakeLists.txt)"
-          BASE="${VERSION%%-*}"
           if [ "$CMAKE_VERSION" != "$BASE" ]; then
             echo "::error::tag says $BASE but CMakeLists.txt says $CMAKE_VERSION"
             exit 1
           fi
 
-      - uses: docker/setup-qemu-action@v3
+          # A release with no changelog section publishes an image nobody can
+          # read the diff of. Cheaper to fail here than to explain it later.
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section"
+            exit 1
+          fi
+
+          # GHCR rejects an uppercase path component, and this repository has
+          # one in its name.
+          IMAGE="$(echo "${{ env.REGISTRY }}/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+
+          STABLE=true
+          case "$VERSION" in *-*) STABLE=false ;; esac
+
+          {
+            echo "version=$VERSION"
+            echo "month=${BASE%.*}"
+            echo "year=${BASE%%.*}"
+            echo "stable=$STABLE"
+            echo "image=$IMAGE"
+            # Resolved once and shared, so both architectures carry the same
+            # org.opencontainers.image.created rather than two build times.
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          echo "Publishing **${{ steps.v.outputs.version }}** as \`${{ steps.v.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # One job per architecture on a runner of that architecture — not one job
+  # building both under QEMU. Emulated compilation of Drogon and the engine runs
+  # an order of magnitude slower and would put the arm64 leg within reach of the
+  # job timeout; more importantly, a native runner can actually *execute* the
+  # image it just built, so the arm64 artefact is smoke-tested on arm64 rather
+  # than assumed to work because the amd64 one did.
+  #
+  # Each leg pushes by digest and tags nothing. The manifest list below is what
+  # binds digests to names, so a failed smoke test leaves an unreferenced blob
+  # rather than a broken `latest`.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -54,52 +132,201 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=match,pattern=v(\d{4}\.\d{2}),group=1,enable=${{ !contains(steps.version.outputs.version, '-') }}
-            type=match,pattern=v(\d{4})\.,group=1,enable=${{ !contains(steps.version.outputs.version, '-') }}
-            type=raw,value=latest,enable=${{ !contains(steps.version.outputs.version, '-') }}
-
-      - name: Build and push
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
           provenance: mode=max
           sbom: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            MONOBUCKET_VERSION=${{ steps.version.outputs.version }}
+            MONOBUCKET_VERSION=${{ needs.prepare.outputs.version }}
             VCS_REF=${{ github.sha }}
-            BUILD_DATE=${{ github.event.repository.updated_at }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            BUILD_DATE=${{ needs.prepare.outputs.date }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Smoke test the ${{ matrix.arch }} image
+        env:
+          REF: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$REF" --version | tee /dev/stderr \
+            | grep -Fq "${{ needs.prepare.outputs.version }}"
+
+          docker run -d --name mb -p 9000:9000 -p 9001:9001 \
+            -e MONOBUCKET_ROOT_SECRET_KEY=release-smoke-secret "$REF"
+
+          for _ in $(seq 1 60); do
+            curl -fsS localhost:9000/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS localhost:9000/healthz
+          curl -fsS localhost:9000/readyz
+          curl -fsS localhost:9000/metrics | grep -q '^monobucket_'
+
+          # Phase 5's exit criterion, checked against the artefact that ships
+          # rather than a local build: the console is served *from the binary*.
+          curl -fsS localhost:9001/ | grep -q 'data-sveltekit-preload-data'
+          curl -fsS -H 'Accept-Encoding: gzip' -o /dev/null -D - localhost:9001/ \
+            | grep -qi 'content-encoding: gzip'
+
+          docker stop --timeout 10 mb
+          test "$(docker inspect -f '{{.State.ExitCode}}' mb)" = "0"
+          docker rm mb
+
+      # The digest is carried as a file *name*, which is what lets the merge job
+      # collect both architectures with one glob no matter how many there are.
+      - name: Record digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Bind the per-architecture digests to the CalVer tag set, sign the manifest,
+  # and publish the release.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # push the manifest list
+      id-token: write   # keyless signing via the Actions OIDC token
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.prepare.outputs.image }}
+          # Derived from the resolved version rather than from the ref, so a
+          # manual run produces exactly the tag set a tag push would.
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.month }},enable=${{ needs.prepare.outputs.stable == 'true' }}
+            type=raw,value=${{ needs.prepare.outputs.year }},enable=${{ needs.prepare.outputs.stable == 'true' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.stable == 'true' }}
+
+      - name: Create the manifest list
+        id: manifest
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          # Both expansions below are argument *lists* — one -t per tag, one
+          # source reference per architecture — so the splitting is the point.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            $(printf '${{ needs.prepare.outputs.image }}@sha256:%s ' *)
+
+          DIGEST="$(docker buildx imagetools inspect \
+            '${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}' \
+            --format '{{ .Manifest.Digest }}')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+          docker buildx imagetools inspect \
+            '${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}'
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Keyless: the signature is bound to this workflow's OIDC identity and
+      # recorded in the public Rekor log, so there is no private key to store,
+      # rotate or leak. Signing the manifest list covers every architecture
+      # under it.
+      - name: Sign the image
+        run: |
+          cosign sign --yes \
+            '${{ needs.prepare.outputs.image }}@${{ steps.manifest.outputs.digest }}'
+
+      # Verified in the same run, because a signature nobody checks is a file.
+      - name: Verify the signature
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@' \
+            '${{ needs.prepare.outputs.image }}@${{ steps.manifest.outputs.digest }}' \
+            > /dev/null
+          echo "Signature verified for ${{ steps.manifest.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # BuildKit already attached a per-architecture SPDX attestation to each
+      # image (`sbom: true` above). This produces the same bill of materials as
+      # a plain file for people who want to read or diff one without a registry
+      # client in the way.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ needs.prepare.outputs.image }}@${{ steps.manifest.outputs.digest }}
+          format: spdx-json
+          output-file: monobucket-${{ needs.prepare.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the SBOM
+        run: |
+          cosign attest --yes --type spdxjson \
+            --predicate 'monobucket-${{ needs.prepare.outputs.version }}.spdx.json' \
+            '${{ needs.prepare.outputs.image }}@${{ steps.manifest.outputs.digest }}'
 
       - name: Extract release notes
-        id: notes
         run: |
+          set -euo pipefail
           # Everything between this version's heading and the next one.
-          awk -v ver="${{ steps.version.outputs.version }}" '
+          awk -v ver="${{ needs.prepare.outputs.version }}" '
             $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
             capture && /^## \[/       { exit }
             capture                   { print }
           ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "::warning::no CHANGELOG.md section found for ${{ steps.version.outputs.version }}"
-            echo "See CHANGELOG.md." > release-notes.md
-          fi
+
+          cat >> release-notes.md <<EOF
+
+          ---
+
+          ### Container image
+
+          \`\`\`
+          docker pull ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}
+          \`\`\`
+
+          \`linux/amd64\` and \`linux/arm64\`, digest \`${{ steps.manifest.outputs.digest }}\`.
+
+          Verify the signature before running it:
+
+          \`\`\`
+          cosign verify \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            --certificate-identity-regexp '^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@' \\
+            ${{ needs.prepare.outputs.image }}@${{ steps.manifest.outputs.digest }}
+          \`\`\`
+          EOF
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
-          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
-          generate_release_notes: true
+          prerelease: ${{ needs.prepare.outputs.stable != 'true' }}
+          files: monobucket-${{ needs.prepare.outputs.version }}.spdx.json

@@ -63,7 +63,11 @@ pnpm run build      # static output in frontend/build/, consumed by the embed st
 ```
 
 CI (`.github/workflows/ci.yml`) runs backend presets `dev` and `asan`, the frontend
-check/lint/build, and a Docker image smoke test (healthz + clean SIGTERM exit code 0).
+check/lint/build, and an amd64 image smoke test that also fetches the console out of the running
+container — the one place the embedded dashboard is exercised in its shipping form. On `master` it
+publishes that same image as `edge`. Releases are `release.yml`: two native runners (amd64 and
+`ubuntu-24.04-arm`), push by digest, merge into a manifest list, cosign it keylessly, publish. Never
+build the arm64 leg under QEMU — it is a tenth the speed and cannot run its own smoke test.
 
 C++ formatting is `.clang-format` (Google base, 100 cols, 4-space indent, `SortIncludes` on but
 `IncludeBlocks: Preserve` — keep the existing include grouping).
@@ -173,15 +177,18 @@ icon package and no emoji.
 - **Comments explain the decision, not the code.** The existing comments justify why an alternative
   was rejected (see `keyspace.hpp`, `io_executor.hpp`, `metadata_store.hpp`). Match that register;
   don't add narration.
-- **Versioning is CalVer** `YYYY.0M.MICRO`, set in the top-level `CMakeLists.txt`. The release
-  workflow fails if a tag disagrees with it.
+- **Versioning is CalVer** `YYYY.0M.MICRO`, set in the top-level `CMakeLists.txt` in two places (the
+  three `set()` lines and `project(VERSION)`). Don't edit them by hand: `scripts/cut-release.sh`
+  bumps the version, promotes the `[Unreleased]` changelog block and tags. `release.yml` refuses to
+  publish unless the tag, `CMakeLists.txt` and `CHANGELOG.md` all agree.
 - **Every change ticks its `ROADMAP.md` checkbox and adds a `CHANGELOG.md` entry under
-  `[Unreleased]`, in the same commit.** Note that Phase 4's boxes are currently unticked despite the
-  S3 layer having landed — reconcile rather than assume. Run `ctest --preset dev` before pushing.
+  `[Unreleased]`, in the same commit.** Run `ctest --preset dev` before pushing.
 
 ## Status vs. docs
 
-Phases 1–5 are complete: the S3 protocol layer (`backend/src/s3/`) and the dashboard both exist and
-work. `ROADMAP.md` is the source of truth for what is *not* yet done — notably `io_uring`, `fsck`,
-per-bucket durability, `rediss://` TLS, C++23 `#embed`, and the conformance/benchmark suites of
-Phase 7. Where a doc and the source disagree, trust the source and fix the doc in the same commit.
+Phases 1–6 are complete: the S3 protocol layer (`backend/src/s3/`), the dashboard and the signed
+multi-arch image pipeline all exist and work. `ROADMAP.md` is the source of truth for what is *not*
+yet done — notably `io_uring`, `fsck`, per-bucket durability, `rediss://` TLS, C++23 `#embed`, and
+the conformance/benchmark suites of Phase 7, which is where any claim about throughput or RSS under
+load has to come from. Where a doc and the source disagree, trust the source and fix the doc in the
+same commit.

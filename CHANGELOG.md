@@ -63,17 +63,89 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Cutting a release
 
-1. Update `MONOBUCKET_VERSION_{YEAR,MONTH,MICRO}` at the top of `CMakeLists.txt`.
-2. Move the `[Unreleased]` entries below under a new dated CalVer heading.
-3. Tick the corresponding boxes in `ROADMAP.md`.
-4. Commit, then tag: `git tag -a v2026.08.0 -m "MonoBucket 2026.08.0"`.
-5. Push the tag; CI builds the multi-arch image and pushes the tag set above.
+```bash
+scripts/cut-release.sh --dry-run     # what it would do
+scripts/cut-release.sh               # next MICRO for the current month
+scripts/cut-release.sh 2026.09.0     # or an explicit version
+```
+
+It rewrites the version in `CMakeLists.txt`, promotes the `[Unreleased]` block
+below under a dated CalVer heading, commits and tags. Tick the boxes in
+`ROADMAP.md` first — they go in the commit before the release, not in it.
+
+Pushing the tag is what publishes. `release.yml` refuses to go on unless the
+tag, `CMakeLists.txt` and this file agree, then builds both architectures on
+native runners, smoke-tests each on its own hardware, merges them into one
+manifest, signs it with cosign and creates the GitHub release from the section
+below matching the version.
+
+Each heading's entries become the release notes verbatim, so nothing may follow
+the last one — which is why the template for the next release lives here, above
+them, rather than at the foot of the file:
+
+<!--
+## [YYYY.0M.MICRO] — YYYY-MM-DD
+
+### Breaking
+### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+### Security
+-->
 
 ---
 
 ## [Unreleased]
 
 ### Added
+
+<!-- Phase 6 — Packaging -->
+
+- **Signed, multi-architecture container images** on GHCR for `linux/amd64` and
+  `linux/arm64`. They are built one job per architecture on a runner of that
+  architecture rather than both on one under QEMU. Emulated compilation of
+  Drogon and the engine runs roughly an order of magnitude slower, which would
+  put the arm64 leg within reach of the job timeout — but the reason that
+  matters less than the other one: a native runner can *execute* the image it
+  just produced, so the arm64 artefact is smoke-tested on arm64 instead of being
+  assumed to work because the amd64 one did. Each leg pushes by digest and names
+  nothing; the manifest list is what binds digests to tags, so a smoke test that
+  fails leaves an unreferenced blob rather than a `latest` that points at a
+  broken image.
+- **Keyless signing with cosign**, over the manifest list, so one signature
+  covers every architecture beneath it. There is no key to distribute or leak:
+  the signature is bound to this workflow's GitHub OIDC identity and recorded in
+  the public Rekor log, which makes it a statement about *which workflow at
+  which commit* produced the image rather than about who held a file. It is
+  verified in the same run that creates it, because a signature nobody checks is
+  a file. `edge` is deliberately left unsigned — a signature is what marks a
+  release, and signing every push to `master` would reduce it to a note that CI
+  ran.
+- **A software bill of materials**, twice over and on purpose: BuildKit attaches
+  an SPDX attestation per architecture, and the release carries the same
+  inventory as a plain `.spdx.json` file. The attestation is what a policy
+  engine admits an image on; the file is what a person reads or diffs without
+  putting a registry client in the way.
+- **`edge` published from CI** on every push to `master`, and pushed from the
+  image that just passed the smoke test rather than rebuilt afterwards — a tag
+  that names a *different* build from the one that was exercised is worse than
+  no tag. It is amd64 only: it exists for trying out what is coming, and the
+  cross-architecture matrix runs where it earns its cost, on a tag.
+- **`scripts/cut-release.sh`.** `release.yml` refuses to publish when the tag,
+  `CMakeLists.txt` and `CHANGELOG.md` disagree; this is what makes them agree.
+  It derives the next version — including the MICRO reset that a month rollover
+  needs and that nobody remembers — rewrites the version in both of the places
+  CMake keeps it, promotes the `[Unreleased]` block under a dated heading,
+  commits and tags. It refuses a dirty tree, a tag that already exists and an
+  `[Unreleased]` section with nothing in it, on the grounds that a release with
+  empty notes is worse than a late one.
+- **The published runtime footprint** the packaging phase was supposed to
+  produce, in [README.md](README.md#runtime-footprint): ~14 MB to pull, ~33 MB
+  unpacked, a 6.6 MB stripped binary with the dashboard inside it, 23.7 MB
+  resident when idle, and under half a second from `docker run` to `/readyz`.
+  Throughput and RSS *under load* are Phase 7's and are not claimed here.
 
 <!-- Phase 5 — Dashboard -->
 
@@ -423,6 +495,37 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Fixed
 
+- **The release workflow would have failed on its own first tag.** It derived
+  the image name from `github.repository`, which is `sinhaparth5/MonoBucket` —
+  and GHCR rejects an uppercase path component. Nothing had ever pushed an
+  image, so the error was waiting behind the one event that was supposed to
+  produce a release. The name is now lowercased once, where it is resolved.
+
+- **A manually triggered release published one tag instead of four.** The
+  rolling `2026.08`, `2026` and `latest` tags were derived from the git ref with
+  `type=match`, which matches nothing when the workflow is dispatched by hand
+  rather than by a tag push — so the fallback path for "the tag push failed,
+  publish it manually" quietly produced a release nobody's `latest` would ever
+  see. Tags now come from the resolved version, and a manual run produces
+  exactly what a tag push does.
+
+- **Images were stamped with the wrong build date.** `BUILD_DATE` was
+  `github.event.repository.updated_at`, which is when the repository record last
+  changed — a description edit moves it, a rebuild of the same commit does not.
+  It now comes from the push that triggered the build.
+
+- **The container smoke test never looked at the dashboard.** It checked
+  `/healthz`, `/metrics` and a clean exit code, all of which pass just as well
+  with an empty asset table — which is exactly what a build with
+  `MONOBUCKET_EMBED_FRONTEND=OFF` produces. The console being *inside the
+  binary* is the whole premise, and it was the one thing the image was not
+  asked about. CI and the release now fetch the console from a running
+  container, assert it comes back compressed, and assert the S3 listener does
+  not serve it.
+
+- **The Docker build context carried the repository's root `node_modules/`.**
+  `.dockerignore` excluded `frontend/node_modules/` but not the one beside it.
+
 - **A field in the create-bucket dialog grew straight through the side of it.**
   A `fieldset` carries `min-inline-size: min-content` from the user agent, and
   daisyUI's `.label` is `white-space: nowrap`; together, one line of helper text
@@ -554,19 +657,3 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   `_FORTIFY_SOURCE`, which trades hardening for optimisation on a
   network-facing server. The build detects musl and drops LTO instead; the
   container image is therefore `-O3` and section-GC'd but not LTO'd.
-
----
-
-<!--
-Template for the next release — copy, do not edit in place.
-
-## [YYYY.0M.MICRO] — YYYY-MM-DD
-
-### Breaking
-### Added
-### Changed
-### Deprecated
-### Removed
-### Fixed
-### Security
--->

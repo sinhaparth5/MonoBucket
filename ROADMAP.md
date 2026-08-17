@@ -6,7 +6,7 @@ dashboard.
 
 **Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Current phase:** Phase 6 — Single-Container Build & Packaging
+**Current phase:** Phase 7 — Testing, Profiling & Benchmarking
 **Last updated:** 2026-08-17
 
 ---
@@ -38,7 +38,10 @@ trade-off.
       `/common` (shared definitions)
 - [x] `CMakePresets.json` for dev / asan / release / release-redis
 - [x] CalVer version header generated from CMake into `common/`
-- [ ] CI workflow: configure, build, test, and publish the image
+- [x] CI workflow: configure, build, test, and publish the image
+      (`.github/workflows/ci.yml` builds `dev` and `asan`, checks and builds the
+      dashboard, and builds, smoke-tests and publishes `edge`; releases go
+      through `release.yml` — see Phase 6)
 
 ### Threading & core loop strategy
 - [x] Asynchronous event loop on Drogon (Trantor / epoll)
@@ -274,8 +277,10 @@ external assets and no network fetches.
 console call answers, and the page issues no request to any host but the console
 listener — the font is served from the binary and there is no CDN, script or
 stylesheet from anywhere else. Assets negotiate `Accept-Encoding` correctly, and
-an incompressible one is served untouched. Not yet re-verified through the image
-itself; that belongs to Phase 6's smoke test.*
+an incompressible one is served untouched. Re-verified through the image in
+Phase 6: both the CI and release smoke tests now fetch the console from a
+running container and assert that it is served, compressed, and absent from the
+S3 listener.*
 
 ---
 
@@ -294,12 +299,32 @@ itself; that belongs to Phase 6's smoke test.*
 - [x] `/healthz`, `/readyz`, container `HEALTHCHECK`
 - [x] `/metrics` in Prometheus text format
 - [x] Graceful shutdown flushing state and closing descriptors
-- [ ] Multi-architecture images (`linux/amd64`, `linux/arm64`)
-- [ ] Automated CalVer tagging and publication to GHCR
-- [ ] SBOM and image signing
+- [x] Multi-architecture images (`linux/amd64`, `linux/arm64`), built one job
+      per architecture on a runner of that architecture rather than both under
+      QEMU. Emulated compilation of Drogon and the engine is roughly an order of
+      magnitude slower, and a native runner can *execute* what it just built —
+      so the arm64 image is smoke-tested on arm64 instead of being assumed to
+      work because the amd64 one did. Each leg pushes by digest and names
+      nothing; the manifest list is what binds digests to tags, so a failed
+      smoke test leaves an unreferenced blob rather than a broken `latest`
+- [x] Automated CalVer tagging and publication to GHCR: `2026.08.0`, `2026.08`,
+      `2026` and `latest` derived from the version, with the rolling three
+      withheld from a pre-release. `release.yml` refuses to publish unless the
+      tag, `CMakeLists.txt` and `CHANGELOG.md` agree, and `scripts/cut-release.sh`
+      makes them agree — including the MICRO reset that a month rollover needs
+      and nobody remembers
+- [x] SBOM and image signing: keyless cosign over the manifest list, verified in
+      the same run, plus BuildKit SPDX attestations per architecture and a plain
+      SPDX file on the GitHub release for reading without a registry client
 
 **Exit criteria:** a tagged commit produces a published, signed, multi-arch
 image whose runtime footprint is documented.
+*The pipeline is in place and the footprint is measured and published in
+[README.md](README.md#runtime-footprint) — ~14 MB to pull, ~33 MB unpacked,
+23.7 MB idle RSS, ready in under half a second. Signing, the manifest merge and
+the arm64 leg are exercised for the first time by the tag that publishes
+`2026.08.0`; the amd64 image, the whole smoke test and the version/changelog
+gate are verified locally.*
 
 ---
 

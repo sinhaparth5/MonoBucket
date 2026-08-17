@@ -308,8 +308,15 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
 drogon::HttpResponsePtr consoleAssetResponse(const std::string& path) {
     if (!assets::embedded()) return nullptr;
 
+    // `/_mb/` is the server's own namespace, not a client route. Without this,
+    // the fallback below hands the SPA shell to a mistyped or retired API path,
+    // and the caller gets 200 with HTML where it expected JSON — a parse error
+    // at the far end instead of the 404 that would have named the problem.
+    const bool serverNamespace = path.rfind("/_mb/", 0) == 0;
+
     const assets::Asset* asset = assets::find(path);
-    if (asset == nullptr && (path == "/" || path.find('.') == std::string::npos)) {
+    if (asset == nullptr && !serverNamespace &&
+        (path == "/" || path.find('.') == std::string::npos)) {
         // Client-side routing: unknown extension-less paths get the SPA shell
         // and let SvelteKit resolve the route.
         asset = assets::indexDocument();

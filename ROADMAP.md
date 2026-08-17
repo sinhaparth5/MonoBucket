@@ -199,15 +199,35 @@ for explicitly.*
 
 *Goal: an admin dashboard that ships inside the binary.*
 
+### Console API
+
+The dashboard needs a surface of its own: the S3 listener speaks SigV4, and a
+browser holding an S3 secret cannot have console access revoked separately.
+
+- [x] `/_mb/api/*` on the console listener only, session-authenticated, with
+      every storage call posted to the I/O pool (`backend/src/server/console_api.cpp`)
+- [x] Bounded metrics ring sampled on a timer, so the graphs need no time-series
+      store and cost the same after a day as after a minute
+      (`backend/src/server/metrics_history.cpp`)
+
 ### Dashboard
-- [ ] Overview: storage capacity, active connections, request rate, cache
-      hit/miss graphs
-- [ ] Bucket tree with create / delete / policy editing
-- [ ] File browser: listing with pagination, drag-and-drop chunked uploader with
-      progress, object metadata viewer, presigned link generator
+- [x] Visual language: two high-contrast daisyUI themes (`corporate` / `night`),
+      Inter latin subset self-hosted from the binary, one sanctioned type scale
+- [x] Overview: storage capacity, request rate, throughput, cache hit/miss,
+      resident memory and storage-queue graphs
+- [ ] Active connections on the overview — needs a listener-level counter that
+      does not exist yet
+- [x] Bucket list with create / delete and the anonymous-read toggle
+- [ ] Bucket policy editing
+- [x] File browser: delimiter-based folder walk, continuation pagination, object
+      metadata viewer
+- [ ] Drag-and-drop chunked uploader with progress
+- [ ] Presigned link generator
 - [ ] Settings panel: cache backend selection, RAM thresholds, API key
       management
-- [ ] Auth for the console, separate from S3 credentials
+- [x] Auth for the console, separate from S3 credentials: the root key pair is
+      exchanged for an HttpOnly session cookie, so the browser never holds an S3
+      secret
 
 ### Embedding pipeline
 - [x] SvelteKit 2 / Svelte 5 project on pnpm, scaffolded with `sv create`

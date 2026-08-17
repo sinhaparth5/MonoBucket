@@ -37,6 +37,8 @@ set(MONOBUCKET_CORE_SOURCES
     src/storage/records.cpp
     src/storage/rocksdb_metadata_store.cpp
     src/storage/storage_engine.cpp
+    src/server/console_api.cpp
+    src/server/metrics_history.cpp
     src/server/server.cpp
     src/server/system_routes.cpp
 )

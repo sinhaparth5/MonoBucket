@@ -12,6 +12,7 @@
 #include "core/logging.hpp"
 #include "monobucket/version.hpp"
 #include "s3/router.hpp"
+#include "server/console_api.hpp"
 #include "server/system_routes.hpp"
 
 namespace monobucket {
@@ -143,6 +144,7 @@ void Server::registerRoutes() {
     // Exact-path handlers first: Drogon matches those before any regex route,
     // so these stay reachable underneath the S3 catch-all below.
     registerSystemRoutes(config_, *storage_, *io_, *cache_, s3Metrics_);
+    registerConsoleApi(config_, *storage_, *io_, *cache_, s3Metrics_);
 
     // One catch-all serves both listeners — the console assets included. Two
     // regex routes would shadow each other by registration order.

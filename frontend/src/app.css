@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+@import 'layerchart/daisyui-5.css';
+
+/* Two themes, not thirty-five. Every enabled theme emits its full variable block
+   into the stylesheet, and this stylesheet is compiled into the binary — so the
+   theme list is a size decision, not a taste one.
+
+   corporate: white surfaces, base-content at L=22% against L=100% (~14:1).
+   night:     L=21% surfaces, base-content at L=84% (~12:1).
+
+   Both use a blue primary in the same hue family (241 / 233), so the brand
+   colour does not shift when the OS flips to dark. */
+@plugin "daisyui" {
+	themes:
+		corporate --default,
+		night --prefersdark;
+	logs: false;
+}
+
+/* Inter, latin subset only, served from the binary. The console must not fetch
+   anything from the network, so a font CDN is out; the full fontsource package
+   ships fifteen woff2 subsets (~400 KB) and we take the one worth 48 KB.
+   Monospace stays a system stack — it is used for keys, ETags and IDs, where
+   the exact face does not matter and 40 KB does. */
+@font-face {
+	font-family: 'Inter Variable';
+	font-style: normal;
+	font-display: swap;
+	font-weight: 100 900;
+	src: url('@fontsource-variable/inter/files/inter-latin-wght-normal.woff2')
+		format('woff2-variations');
+	unicode-range:
+		U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+		U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@theme {
+	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+	/* The sanctioned scale. Seven steps, no arbitrary values anywhere else:
+	   xs   captions, table meta, timestamps
+	   sm   body and table text — the console default
+	   base emphasised body
+	   lg   card and panel titles
+	   xl   section headings
+	   2xl  page titles
+	   3xl  stat values
+	   Inter needs negative tracking above ~18px or headings look loose. */
+	--text-xs: 0.75rem;
+	--text-xs--line-height: 1rem;
+	--text-sm: 0.875rem;
+	--text-sm--line-height: 1.25rem;
+	--text-base: 1rem;
+	--text-base--line-height: 1.5rem;
+	--text-lg: 1.125rem;
+	--text-lg--line-height: 1.625rem;
+	--text-lg--letter-spacing: -0.01em;
+	--text-xl: 1.25rem;
+	--text-xl--line-height: 1.75rem;
+	--text-xl--letter-spacing: -0.015em;
+	--text-2xl: 1.5rem;
+	--text-2xl--line-height: 2rem;
+	--text-2xl--letter-spacing: -0.02em;
+	--text-3xl: 1.875rem;
+	--text-3xl--line-height: 2.25rem;
+	--text-3xl--letter-spacing: -0.02em;
+}
+
+@layer base {
+	html {
+		-webkit-text-size-adjust: 100%;
+	}
+
+	/* 14px, not 16px. The console is dense — object listings, part tables, header
+	   dumps — and 16px body text forces scrolling on rows that should be scannable.
+	   Root stays at 16px so every rem-based utility keeps its documented value. */
+	body {
+		font-size: var(--text-sm);
+		line-height: var(--text-sm--line-height);
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	/* Sizes, counts and rates live in columns and update in place. Proportional
+	   digits make them jitter on every refresh. */
+	th,
+	td,
+	.stat-value,
+	.font-mono {
+		font-variant-numeric: tabular-nums;
+	}
+}

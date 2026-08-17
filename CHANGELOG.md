@@ -75,6 +75,44 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Added
 
+<!-- Phase 5 — Dashboard -->
+
+- **A console API at `/_mb/api/*`**, answering on the console listener only. It
+  is a separate surface from S3 on purpose: the browser exchanges the root key
+  pair for an HttpOnly, `SameSite=Strict` session cookie and never holds an S3
+  secret, which is what lets console access be revoked without rotating storage
+  credentials. Sessions live in memory, so a restart signs everyone out — the
+  alternative is a stolen data directory also being a stolen login. Failed
+  logins are rate-limited in one global window rather than per source address,
+  because there is exactly one account and a per-IP bucket only advises an
+  attacker to change addresses.
+- **A bounded metrics ring** sampled every five seconds and holding twenty
+  minutes of history in roughly 30 KB. Counters are stored as differences
+  between consecutive readings, so the browser never has to reason about a
+  reset, and the ring is allocated once — a dashboard left open overnight costs
+  what one opened a second ago costs. Longer windows remain Prometheus's job.
+- **The dashboard itself**: an overview with live graphs for request rate,
+  throughput in and out, cache hit ratio, resident memory and storage-queue
+  depth; a disk capacity gauge; a bucket list with create, delete and the
+  anonymous-read toggle; and a file browser that walks prefixes as folders with
+  continuation pagination and an object metadata viewer.
+- **The object URL in the metadata viewer**, in a read-only field with a copy
+  button, alongside a badge saying whether the bucket answers an unsigned GET —
+  the difference between a link that opens in a browser and one that returns
+  403. The URL is assembled in the browser because `MONOBUCKET_HOST` is normally
+  `0.0.0.0`: the only hostname known to reach the deployment is the one the
+  console was loaded from, so the server contributes the S3 port and endpoint
+  domain and the client contributes the host. Copying falls back to selecting
+  the field when `navigator.clipboard` is unavailable, which is every console
+  served over plain HTTP to anything but localhost.
+- **A visual language for the console.** Two daisyUI themes, `corporate` and
+  `night`, chosen for contrast measured rather than eyeballed (~14:1 and ~12:1)
+  and sharing a blue primary so the brand colour does not shift when the OS
+  flips to dark. Only those two are enabled: every theme emits a full variable
+  block into a stylesheet that ships inside the binary. Inter is self-hosted
+  from the latin subset alone — 48 KB rather than the ~400 KB of the full
+  fontsource package — because the console must fetch nothing from the network.
+
 <!-- Phase 4 — S3 REST API Protocol -->
 
 - **AWS Signature Version 4 verification** on OpenSSL: canonical request,
@@ -294,6 +332,14 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   documenting every setting, and this changelog.
 
 ### Fixed
+
+- **The console's SPA fallback swallowed unknown `/_mb/` paths.** Any
+  extension-less path the asset table does not recognise is answered with
+  `index.html` so client-side routing works, and `/_mb/api/anything` fitted that
+  rule — a retired or mistyped endpoint returned 200 with an HTML body where the
+  caller expected JSON, which surfaces at the far end as a parse error rather
+  than the 404 that would have named the problem. `/_mb/` is the server's own
+  namespace and is now excluded from the fallback.
 
 - **Zero-byte objects could not be written by any AWS SDK.** Drogon's request
   parser rejects an HTTP/1.1 request carrying `Expect: 100-continue` together

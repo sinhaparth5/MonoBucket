@@ -593,23 +593,30 @@
 		<div class="skeleton rounded-box h-64"></div>
 	{:else if prefixes.length === 0 && objects.length === 0}
 		<div
-			class="panel surface-raised flex flex-col items-center gap-3 border-dashed px-6 py-12 text-center"
+			class="panel surface-raised grid items-center gap-6 overflow-hidden p-6 sm:p-8 lg:grid-cols-[13rem_1fr]"
 		>
-			<span class="bg-primary/10 text-primary grid size-12 place-items-center rounded-xl">
-				<Icon name="upload" class="size-6" />
-			</span>
-			<div class="flex flex-col gap-1">
-				<p class="font-medium">Nothing here yet</p>
-				<p class="text-base-content/60 max-w-md text-sm">
-					Drop files in from the Upload button, or push them with
-					<code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs">aws s3 cp</code> against the
-					S3 port.
-				</p>
+			<img
+				src="/images/empty-bucket.webp"
+				alt="Colourful storage bucket ready for file uploads"
+				width="768"
+				height="768"
+				loading="lazy"
+				class="mx-auto aspect-square w-44 rounded-2xl object-cover shadow-xl shadow-primary/10 lg:w-52"
+			/>
+			<div class="flex flex-col items-center gap-4 text-center lg:items-start lg:text-left">
+				<div class="flex flex-col gap-1">
+					<p class="text-xl font-bold tracking-tight">This bucket is ready for files</p>
+					<p class="text-base-content/60 max-w-md text-sm">
+						Drop files in from the Upload button, or push them with
+						<code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs">aws s3 cp</code> against the
+						S3 port.
+					</p>
+				</div>
+				<button class="btn btn-primary gap-2" onclick={() => (uploadOpen = true)}>
+					<Icon name="upload" class="size-4" />
+					Upload files
+				</button>
 			</div>
-			<button class="btn btn-primary btn-sm gap-1.5" onclick={() => (uploadOpen = true)}>
-				<Icon name="upload" class="size-3.5" />
-				Upload files
-			</button>
 		</div>
 	{:else}
 		<div class="panel overflow-x-auto">

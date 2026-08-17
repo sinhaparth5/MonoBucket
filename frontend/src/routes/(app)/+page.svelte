@@ -5,6 +5,7 @@
 	import { api, ApiError, type Overview, type Sample, type Series } from '$lib/api';
 	import {
 		formatBytes,
+		formatClock,
 		formatCount,
 		formatDuration,
 		formatPercent,
@@ -12,12 +13,15 @@
 		plural
 	} from '$lib/format';
 	import SeriesChart from '$lib/components/SeriesChart.svelte';
+	import ThroughputChart from '$lib/components/ThroughputChart.svelte';
 	import StatTile from '$lib/components/StatTile.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let overview = $state<Overview | null>(null);
 	let series = $state<Series | null>(null);
 	let error = $state('');
+	let refreshing = $state(false);
+	let updatedAt = $state<Date | null>(null);
 
 	// Matches the server's sampling cadence. Polling faster would redraw the same
 	// ring; polling slower would leave the newest sample on screen for longer
@@ -26,20 +30,25 @@
 
 	// Shapes for the first paint, before the first response arrives.
 	const TILE_PLACEHOLDERS = [0, 1, 2, 3];
-	const CHART_PLACEHOLDERS = [0, 1, 2, 3];
+	const CHART_PLACEHOLDERS = [0, 1, 2];
 
 	async function refresh() {
+		if (refreshing) return;
+		refreshing = true;
 		try {
 			const [nextOverview, nextSeries] = await Promise.all([api.overview(), api.series()]);
 			overview = nextOverview;
 			series = nextSeries;
 			error = '';
+			updatedAt = new Date();
 		} catch (cause) {
 			if (cause instanceof ApiError && cause.unauthorized) {
 				await goto(resolve('/login'));
 				return;
 			}
 			error = cause instanceof ApiError ? cause.message : 'could not refresh';
+		} finally {
+			refreshing = false;
 		}
 	}
 
@@ -63,8 +72,13 @@
 	}
 
 	const requestRate = $derived(points((s) => rate(s, s.requests)));
-	const bytesOutRate = $derived(points((s) => rate(s, s.bytesOut)));
-	const bytesInRate = $derived(points((s) => rate(s, s.bytesIn)));
+	const throughput = $derived(
+		samples.map((sample) => ({
+			t: new Date(sample.atMs),
+			ingress: rate(sample, sample.bytesIn),
+			egress: rate(sample, sample.bytesOut)
+		}))
+	);
 	const resident = $derived(points((s) => s.residentBytes));
 	const queueDepth = $derived(points((s) => s.ioQueued + s.ioActive));
 	const connections = $derived(points((s) => s.connections));
@@ -101,28 +115,78 @@
 
 <svelte:head><title>Overview · MonoBucket</title></svelte:head>
 
-<div class="flex flex-col gap-5">
-	<div class="flex flex-wrap items-center justify-between gap-3">
-		<div class="flex flex-col gap-0.5">
-			<h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
-			<p class="text-base-content/55 text-xs">
-				Sampled every {REFRESH_MS / 1000}s, twenty minutes of history held in memory.
-			</p>
-		</div>
-		{#if overview}
-			<div class="flex flex-wrap items-center gap-2">
-				<span class="badge badge-sm badge-ghost gap-1.5 font-mono">
+<div class="flex flex-col gap-6">
+	<header
+		class="bg-neutral text-neutral-content relative isolate min-h-72 overflow-hidden rounded-box shadow-xl"
+	>
+		<img
+			src="/images/dashboard-fabric.webp"
+			alt="Colorful data paths flowing into a luminous storage core"
+			width="1600"
+			height="593"
+			class="absolute inset-0 size-full object-cover object-[68%_center] sm:object-center"
+			fetchpriority="high"
+			decoding="async"
+		/>
+		<div
+			class="from-neutral via-neutral/90 to-neutral/35 absolute inset-0 bg-gradient-to-r sm:via-neutral/75 sm:to-transparent"
+		></div>
+		<div class="from-neutral/10 to-neutral/60 absolute inset-0 bg-gradient-to-b"></div>
+
+		<div class="relative flex min-h-72 max-w-2xl flex-col justify-between gap-8 p-6 sm:p-8">
+			<div class="flex max-w-xl flex-col items-start gap-3">
+				<span
+					class="badge border-neutral-content/15 bg-neutral-content/10 text-neutral-content gap-2 backdrop-blur"
+				>
 					<span class="bg-success size-1.5 rounded-full"></span>
-					up {formatDuration(overview.server.uptimeSeconds)}
+					Live telemetry
 				</span>
-				<span class="badge badge-sm badge-ghost font-mono">{overview.storage.engine}</span>
-				<span class="badge badge-sm badge-ghost font-mono">{overview.server.region}</span>
-				<span class="badge badge-sm badge-ghost font-mono">
-					:{overview.server.s3Port} · :{overview.server.consolePort}
-				</span>
+				<div>
+					<h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Storage, in motion.</h1>
+					<p class="text-neutral-content/65 mt-2 max-w-lg text-sm leading-6 sm:text-base">
+						A live view of traffic, memory, cache, and capacity across your MonoBucket instance.
+					</p>
+				</div>
 			</div>
-		{/if}
-	</div>
+
+			<div class="flex flex-wrap items-end justify-between gap-4">
+				<div class="flex flex-wrap items-center gap-2">
+					{#if overview}
+						<span
+							class="badge badge-sm border-neutral-content/15 bg-neutral-content/10 text-neutral-content gap-1.5 font-mono backdrop-blur"
+						>
+							<span class="bg-success size-1.5 rounded-full"></span>
+							up {formatDuration(overview.server.uptimeSeconds)}
+						</span>
+						<span
+							class="badge badge-sm border-neutral-content/15 bg-neutral-content/10 text-neutral-content font-mono backdrop-blur"
+							>{overview.storage.engine}</span
+						>
+						<span
+							class="badge badge-sm border-neutral-content/15 bg-neutral-content/10 text-neutral-content font-mono backdrop-blur"
+							>{overview.server.region}</span
+						>
+						<span
+							class="badge badge-sm border-neutral-content/15 bg-neutral-content/10 text-neutral-content font-mono backdrop-blur"
+						>
+							:{overview.server.s3Port} · :{overview.server.consolePort}
+						</span>
+					{/if}
+				</div>
+				<div class="flex items-center gap-3">
+					{#if updatedAt}
+						<span class="text-neutral-content/50 text-xs" aria-live="polite">
+							Updated {formatClock(updatedAt.getTime())}
+						</span>
+					{/if}
+					<button class="btn btn-primary btn-sm gap-2" onclick={refresh} disabled={refreshing}>
+						<Icon name="refresh" class="size-4 {refreshing ? 'animate-spin' : ''}" />
+						Refresh
+					</button>
+				</div>
+			</div>
+		</div>
+	</header>
 
 	{#if error}
 		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
@@ -132,19 +196,19 @@
 	{/if}
 
 	{#if !overview}
-		<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
 			{#each TILE_PLACEHOLDERS as index (index)}
 				<div class="skeleton rounded-box h-24"></div>
 			{/each}
 		</div>
-		<div class="skeleton rounded-box h-24"></div>
-		<div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+		<div class="skeleton rounded-box h-32"></div>
+		<div class="grid gap-4 lg:grid-cols-3">
 			{#each CHART_PLACEHOLDERS as index (index)}
-				<div class="skeleton rounded-box h-56"></div>
+				<div class="skeleton rounded-box h-72"></div>
 			{/each}
 		</div>
 	{:else}
-		<section class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+		<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Key storage metrics">
 			<StatTile
 				label="Objects"
 				icon="file"
@@ -185,14 +249,18 @@
 			/>
 		</section>
 
-		<section class="panel flex flex-col gap-3 p-4">
+		<section
+			class="panel surface-raised flex flex-col gap-4 p-5"
+			aria-labelledby="disk-capacity-heading"
+		>
 			<div class="flex flex-wrap items-center justify-between gap-2">
-				<span
+				<h2
+					id="disk-capacity-heading"
 					class="text-base-content/70 flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase"
 				>
 					<Icon name="disk" class="size-3.5" />
 					Disk capacity
-				</span>
+				</h2>
 				<span class="text-base-content/60 text-xs tabular-nums">
 					{formatBytes(overview.storage.diskTotalBytes - overview.storage.diskAvailableBytes)} used of
 					{formatBytes(overview.storage.diskTotalBytes)}
@@ -220,7 +288,10 @@
 			</div>
 		</section>
 
-		<section class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+		<section class="grid gap-4 xl:grid-cols-3" aria-label="Traffic charts">
+			<div class="xl:col-span-2">
+				<ThroughputChart points={throughput} />
+			</div>
 			<SeriesChart
 				label="Request rate"
 				icon="overview"
@@ -228,31 +299,12 @@
 				headline={latest ? formatRate(rate(latest, latest.requests)) : '0/s'}
 				hint="S3 listener"
 				format={(value) => formatRate(value)}
+				height="h-64 sm:h-72"
+				featured
 			/>
-			<SeriesChart
-				label="Bytes out"
-				icon="upload"
-				points={bytesOutRate}
-				headline={latest ? `${formatBytes(rate(latest, latest.bytesOut))}/s` : '0 B/s'}
-				hint="object payloads only"
-				accentClass="text-info"
-				lineClass="stroke-info"
-				areaClass="fill-info/15"
-				format={(value) => formatBytes(value, 0)}
-				minTop={1024}
-			/>
-			<SeriesChart
-				label="Bytes in"
-				icon="upload"
-				points={bytesInRate}
-				headline={latest ? `${formatBytes(rate(latest, latest.bytesIn))}/s` : '0 B/s'}
-				hint="object payloads only"
-				accentClass="text-accent"
-				lineClass="stroke-accent"
-				areaClass="fill-accent/15"
-				format={(value) => formatBytes(value, 0)}
-				minTop={1024}
-			/>
+		</section>
+
+		<section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4" aria-label="Runtime charts">
 			<SeriesChart
 				label="Cache hit ratio"
 				icon="cache"
@@ -302,30 +354,56 @@
 			/>
 		</section>
 
-		<section class="grid gap-3 lg:grid-cols-2">
-			<div class="panel flex flex-col gap-3 p-4">
-				<span
-					class="text-base-content/70 flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase"
+		<section class="grid gap-4 lg:grid-cols-2">
+			<div class="panel flex flex-col gap-4 p-5">
+				<h2
+					class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
 				>
 					<Icon name="overview" class="size-3.5" />
 					Responses since start
-				</span>
+				</h2>
 
 				{#if mixTotal === 0}
 					<div
-						class="border-base-300 text-base-content/50 flex flex-col items-center gap-1 rounded-lg border border-dashed py-6 text-sm"
+						class="border-base-300 bg-base-200/35 grid min-h-36 overflow-hidden rounded-xl border border-dashed sm:grid-cols-[9rem_1fr]"
 					>
-						<Icon name="overview" class="size-5 opacity-40" />
-						No S3 requests yet.
+						<img
+							src="/images/telemetry-idle.webp"
+							alt="A quiet telemetry beacon waiting for its first signal"
+							width="560"
+							height="560"
+							class="h-36 w-full object-cover sm:h-full"
+							loading="lazy"
+							decoding="async"
+						/>
+						<div class="flex flex-col items-start justify-center gap-2 p-5">
+							<span class="badge badge-primary badge-soft badge-sm gap-1.5">
+								<span class="bg-primary size-1.5 rounded-full"></span>
+								Listening
+							</span>
+							<div>
+								<h3 class="font-semibold">Waiting for the first S3 request</h3>
+								<p class="text-base-content/55 mt-1 text-sm leading-5">
+									Response health will appear here as traffic reaches the listener.
+								</p>
+							</div>
+						</div>
 					</div>
 				{:else}
-					<div class="bg-base-300 flex h-2.5 w-full gap-0.5 overflow-hidden rounded-full">
+					<div
+						class="bg-base-300 flex h-3 w-full gap-0.5 overflow-hidden rounded-full"
+						role="img"
+						aria-label="Response mix: {responseMix
+							.map((part) => `${part.label} ${formatCount(part.value)}`)
+							.join(', ')}"
+					>
 						{#each responseMix as part (part.label)}
 							{#if part.value > 0}
 								<span
 									class="{part.tone} h-full transition-all duration-500"
 									style="width: {(part.value / mixTotal) * 100}%"
 									title="{part.label}: {formatCount(part.value)}"
+									aria-hidden="true"
 								></span>
 							{/if}
 						{/each}
@@ -356,13 +434,13 @@
 				</div>
 			</div>
 
-			<div class="panel flex flex-col gap-3 p-4">
-				<span
-					class="text-base-content/70 flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase"
+			<div class="panel flex flex-col gap-4 p-5">
+				<h2
+					class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
 				>
 					<Icon name="disk" class="size-3.5" />
 					Metadata engine
-				</span>
+				</h2>
 				<div class="overflow-x-auto">
 					<table class="table table-xs">
 						<tbody>

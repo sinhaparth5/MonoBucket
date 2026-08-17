@@ -123,12 +123,13 @@
 
 <svelte:head><title>Buckets · MonoBucket</title></svelte:head>
 
-<div class="flex flex-col gap-5">
-	<div class="flex flex-wrap items-center justify-between gap-3">
-		<div class="flex flex-col gap-0.5">
-			<h1 class="text-2xl font-semibold tracking-tight">Buckets</h1>
+<div class="flex flex-col gap-6">
+	<header class="flex flex-wrap items-end justify-between gap-4">
+		<div class="flex flex-col gap-1">
+			<span class="eyebrow">Object storage</span>
+			<h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Buckets</h1>
 			{#if buckets}
-				<p class="text-base-content/55 text-xs">
+				<p class="text-base-content/55 text-sm">
 					{plural(buckets.length, 'bucket')}{filter.trim() ? ` · ${visible.length} shown` : ''}
 				</p>
 			{/if}
@@ -146,12 +147,12 @@
 					/>
 				</label>
 			{/if}
-			<button class="btn btn-primary btn-sm gap-1.5" onclick={openCreate}>
-				<Icon name="plus" class="size-3.5" />
+			<button class="btn btn-primary gap-2 shadow-lg shadow-primary/20" onclick={openCreate}>
+				<Icon name="plus" class="size-4" />
 				Create bucket
 			</button>
 		</div>
-	</div>
+	</header>
 
 	{#if error}
 		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
@@ -164,26 +165,33 @@
 		<div class="skeleton rounded-box h-48"></div>
 	{:else if buckets.length === 0}
 		<div
-			class="panel surface-raised flex flex-col items-center gap-3 border-dashed px-6 py-12 text-center"
+			class="panel surface-raised grid items-center gap-6 overflow-hidden p-6 sm:p-8 lg:grid-cols-[14rem_1fr]"
 		>
-			<span class="bg-primary/10 text-primary grid size-12 place-items-center rounded-xl">
-				<Icon name="bucket" class="size-6" />
-			</span>
-			<div class="flex flex-col gap-1">
-				<p class="font-medium">No buckets yet</p>
-				<p class="text-base-content/60 max-w-md text-sm">
-					Create one here, or with <code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs"
-						>aws s3 mb</code
-					> against the S3 port. Both write the same record.
-				</p>
+			<img
+				src="/images/empty-bucket.webp"
+				alt="Colourful empty storage bucket with file tiles above it"
+				width="768"
+				height="768"
+				loading="lazy"
+				class="mx-auto aspect-square w-48 rounded-2xl object-cover shadow-xl shadow-primary/10 lg:w-56"
+			/>
+			<div class="flex flex-col items-center gap-4 text-center lg:items-start lg:text-left">
+				<div class="flex flex-col gap-1">
+					<p class="text-xl font-bold tracking-tight">Your first bucket starts here</p>
+					<p class="text-base-content/60 max-w-md text-sm">
+						Create one here, or with <code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs"
+							>aws s3 mb</code
+						> against the S3 port. Both write the same record.
+					</p>
+				</div>
+				<button class="btn btn-primary gap-2" onclick={openCreate}>
+					<Icon name="plus" class="size-4" />
+					Create the first bucket
+				</button>
 			</div>
-			<button class="btn btn-primary btn-sm gap-1.5" onclick={openCreate}>
-				<Icon name="plus" class="size-3.5" />
-				Create the first bucket
-			</button>
 		</div>
 	{:else}
-		<div class="panel overflow-x-auto">
+		<div class="panel overflow-x-auto shadow-sm">
 			<table class="table table-sm">
 				<thead>
 					<tr class="border-base-300">

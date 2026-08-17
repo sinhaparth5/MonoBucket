@@ -40,84 +40,122 @@
 <svelte:head><title>Sign in · MonoBucket</title></svelte:head>
 
 <div
-	class="bg-base-200 text-base-content relative flex min-h-dvh items-center justify-center overflow-hidden p-6"
+	class="text-base-content min-h-dvh lg:grid lg:grid-cols-[minmax(26rem,0.82fr)_minmax(0,1.18fr)]"
 >
-	<!-- Two soft washes off the brand hues. Decoration, so it is hidden from
-	     assistive technology and sits behind everything. -->
-	<div
-		aria-hidden="true"
-		class="bg-primary/12 pointer-events-none absolute -top-40 -left-40 size-96 rounded-full blur-3xl"
-	></div>
-	<div
-		aria-hidden="true"
-		class="bg-secondary/12 pointer-events-none absolute -right-40 -bottom-40 size-96 rounded-full blur-3xl"
-	></div>
+	<section
+		class="bg-base-100/80 relative flex min-h-dvh items-center px-6 py-12 backdrop-blur-xl sm:px-10 lg:px-14"
+	>
+		<div
+			aria-hidden="true"
+			class="bg-primary/10 pointer-events-none absolute -top-32 -left-32 size-80 rounded-full blur-3xl"
+		></div>
 
-	<div class="relative w-full max-w-sm" in:fly={{ y: 12, duration: 300 }}>
-		<div class="mb-6 flex items-center gap-3">
-			<img src={logo} alt="" class="size-12" />
-			<div class="flex flex-col leading-tight">
-				<span class="text-xl font-semibold tracking-tight">MonoBucket</span>
-				<span class="text-base-content/55 text-sm">Sign in to the console.</span>
+		<div class="relative mx-auto w-full max-w-md" in:fly={{ y: 12, duration: 300 }}>
+			<div class="mb-10 flex items-center gap-3">
+				<img src={logo} alt="" class="size-12" width="48" height="48" />
+				<div class="flex flex-col leading-tight">
+					<span class="brand-text text-xl font-bold tracking-tight">MonoBucket</span>
+					<span class="text-base-content/50 text-sm">Object storage console</span>
+				</div>
+			</div>
+
+			<div class="mb-7">
+				<span class="badge badge-primary badge-soft mb-4 gap-2">
+					<span class="bg-primary size-1.5 rounded-full"></span>
+					Self-hosted and S3 compatible
+				</span>
+				<h1 class="max-w-sm text-4xl leading-tight font-bold tracking-tight sm:text-5xl">
+					Your storage, <span class="brand-text">in clear view.</span>
+				</h1>
+				<p class="text-base-content/60 mt-3 max-w-sm text-base leading-relaxed">
+					Sign in with the root credentials configured for this MonoBucket instance.
+				</p>
+			</div>
+
+			<form class="panel surface-raised flex flex-col gap-5 p-6 sm:p-7" onsubmit={submit}>
+				<fieldset class="fieldset gap-1.5 p-0">
+					<legend class="fieldset-legend text-sm">Access key</legend>
+					<label class="input h-12 w-full">
+						<Icon name="key" class="text-primary size-4.5" />
+						<input
+							type="text"
+							autocomplete="username"
+							spellcheck="false"
+							bind:value={accessKey}
+							placeholder="monobucket"
+							required
+						/>
+					</label>
+				</fieldset>
+
+				<fieldset class="fieldset gap-1.5 p-0">
+					<legend class="fieldset-legend text-sm">Secret key</legend>
+					<label class="input h-12 w-full pr-1">
+						<Icon name="shield" class="text-primary size-4.5" />
+						<input
+							type={showSecret ? 'text' : 'password'}
+							autocomplete="current-password"
+							bind:value={secretKey}
+							placeholder="Enter your secret key"
+							required
+						/>
+						<button
+							type="button"
+							class="btn btn-ghost size-10 p-0"
+							aria-label={showSecret ? 'Hide the secret key' : 'Show the secret key'}
+							onclick={() => (showSecret = !showSecret)}
+						>
+							<Icon name={showSecret ? 'eyeOff' : 'eye'} class="size-4.5" />
+						</button>
+					</label>
+				</fieldset>
+
+				{#if error}
+					<div role="alert" class="alert alert-error alert-soft text-sm" in:fly={{ y: -6 }}>
+						<Icon name="warning" class="size-4" />
+						<span>{error}</span>
+					</div>
+				{/if}
+
+				<button
+					class="btn btn-primary h-12 text-base shadow-lg shadow-primary/20"
+					type="submit"
+					disabled={busy}
+				>
+					{#if busy}<span class="loading loading-spinner loading-sm"></span>{/if}
+					{busy ? 'Signing in…' : 'Sign in to console'}
+				</button>
+
+				<p class="text-base-content/50 text-xs leading-relaxed">
+					The browser receives an HttpOnly session cookie. Your S3 secret stays on the server.
+				</p>
+			</form>
+		</div>
+	</section>
+
+	<aside class="relative hidden min-h-dvh overflow-hidden p-4 lg:block">
+		<img
+			src="/images/console-login.webp"
+			alt="Abstract file objects flowing into a colourful storage vessel"
+			width="1536"
+			height="1024"
+			fetchpriority="high"
+			class="absolute inset-4 size-[calc(100%_-_2rem)] rounded-[2rem] object-cover"
+		/>
+		<div
+			class="absolute inset-4 rounded-[2rem] bg-gradient-to-t from-[#07091f]/90 via-transparent to-transparent"
+		></div>
+		<div class="absolute right-12 bottom-12 left-12 text-white">
+			<p class="max-w-xl text-2xl leading-snug font-semibold">
+				One binary for your S3 API, metadata, cache, and dashboard.
+			</p>
+			<div class="mt-5 flex flex-wrap gap-2">
+				<span class="badge border-white/20 bg-white/10 text-white backdrop-blur"
+					>Bounded memory</span
+				>
+				<span class="badge border-white/20 bg-white/10 text-white backdrop-blur">SigV4</span>
+				<span class="badge border-white/20 bg-white/10 text-white backdrop-blur">Live metrics</span>
 			</div>
 		</div>
-
-		<form class="panel surface-raised flex flex-col gap-4 p-6 shadow-sm" onsubmit={submit}>
-			<fieldset class="fieldset gap-1 p-0">
-				<legend class="fieldset-legend">Access key</legend>
-				<label class="input w-full">
-					<Icon name="key" class="size-4 opacity-50" />
-					<input
-						type="text"
-						autocomplete="username"
-						spellcheck="false"
-						bind:value={accessKey}
-						required
-					/>
-				</label>
-			</fieldset>
-
-			<fieldset class="fieldset gap-1 p-0">
-				<legend class="fieldset-legend">Secret key</legend>
-				<label class="input w-full">
-					<Icon name="shield" class="size-4 opacity-50" />
-					<!-- Reveal, because a secret pasted from a password manager that
-					     silently picked up a trailing space is otherwise diagnosed as
-					     "invalid credentials". -->
-					<input
-						type={showSecret ? 'text' : 'password'}
-						autocomplete="current-password"
-						bind:value={secretKey}
-						required
-					/>
-					<button
-						type="button"
-						class="opacity-50 transition-opacity hover:opacity-100"
-						aria-label={showSecret ? 'Hide the secret key' : 'Show the secret key'}
-						onclick={() => (showSecret = !showSecret)}
-					>
-						<Icon name={showSecret ? 'eyeOff' : 'eye'} class="size-4" />
-					</button>
-				</label>
-			</fieldset>
-
-			{#if error}
-				<div role="alert" class="alert alert-error alert-soft text-sm" in:fly={{ y: -6 }}>
-					<Icon name="warning" class="size-4" />
-					<span>{error}</span>
-				</div>
-			{/if}
-
-			<button class="btn btn-primary" type="submit" disabled={busy}>
-				{#if busy}<span class="loading loading-spinner loading-sm"></span>{/if}
-				Sign in
-			</button>
-
-			<p class="text-base-content/50 text-xs">
-				These are the credentials in <code class="font-mono">MONOBUCKET_ROOT_ACCESS_KEY</code> and
-				<code class="font-mono">MONOBUCKET_ROOT_SECRET_KEY</code>. The browser is given a session
-				cookie, never an S3 secret.
-			</p>
-		</form>
-	</div>
+	</aside>
 </div>

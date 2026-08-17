@@ -158,13 +158,14 @@
 
 <svelte:head><title>Settings · MonoBucket</title></svelte:head>
 
-<div class="flex flex-col gap-5">
-	<div class="flex flex-col gap-0.5">
-		<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-		<p class="text-base-content/55 text-xs">
+<div class="flex flex-col gap-6">
+	<header class="flex flex-col gap-1">
+		<span class="eyebrow">Runtime configuration</span>
+		<h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Settings</h1>
+		<p class="text-base-content/55 text-sm">
 			The configuration this process resolved at startup, and the variable behind each value.
 		</p>
-	</div>
+	</header>
 
 	{#if error}
 		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
@@ -201,7 +202,7 @@
 	{/if}
 
 	{#if !config}
-		<div class="grid gap-3 lg:grid-cols-2">
+		<div class="grid gap-4 lg:grid-cols-2">
 			{#each [0, 1, 2, 3] as index (index)}
 				<div class="skeleton rounded-box h-56"></div>
 			{/each}
@@ -220,12 +221,12 @@
 			</div>
 		{/if}
 
-		<div class="grid gap-3 lg:grid-cols-2">
+		<div class="grid gap-4 lg:grid-cols-2">
 			{#each GROUPS as group (group.title)}
 				{@const rows = group.keys.map((key) => byKey.get(key)).filter((row) => row !== undefined)}
 				{#if rows.length > 0}
 					<section class="panel flex flex-col overflow-hidden">
-						<header class="surface-raised border-base-300 flex items-start gap-3 border-b p-4">
+						<header class="surface-raised border-base-300 flex items-start gap-3 border-b p-5">
 							<span
 								class="bg-primary/10 text-primary grid size-9 shrink-0 place-items-center rounded-lg"
 							>

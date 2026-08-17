@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 #include <drogon/HttpResponse.h>
 
@@ -32,8 +33,10 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
 /// Returned rather than registered on its own route: Drogon takes the first
 /// matching regex handler, so the console and the S3 API cannot each own a
 /// catch-all. The S3 router calls this for requests arriving on the console
-/// listener.
-drogon::HttpResponsePtr consoleAssetResponse(const std::string& path);
+/// listener, passing the request's `Accept-Encoding` so a pre-compressed
+/// variant can be chosen where one was generated.
+drogon::HttpResponsePtr consoleAssetResponse(const std::string& path,
+                                             std::string_view acceptEncoding);
 
 /// Resident set size of this process in bytes, or 0 where it cannot be read.
 std::size_t residentBytes() noexcept;

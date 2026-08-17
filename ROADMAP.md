@@ -6,7 +6,7 @@ dashboard.
 
 **Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Current phase:** Phase 5 — SvelteKit Frontend & Asset Embedding
+**Current phase:** Phase 6 — Single-Container Build & Packaging
 **Last updated:** 2026-08-17
 
 ---
@@ -215,23 +215,36 @@ browser holding an S3 secret cannot have console access revoked separately.
       (`backend/src/server/metrics_history.cpp`)
 
 ### Dashboard
-- [x] Visual language: two high-contrast daisyUI themes (`corporate` / `night`),
-      Inter latin subset self-hosted from the binary, one sanctioned type scale
+- [x] Visual language: two purpose-built daisyUI themes (`monobucket` /
+      `monobucket-dark`) on one hue axis, one inline icon set, Inter latin
+      subset self-hosted from the binary, one sanctioned type scale
 - [x] Overview: storage capacity, request rate, throughput, cache hit/miss,
       resident memory and storage-queue graphs
-- [ ] Active connections on the overview — needs a listener-level counter that
-      does not exist yet
+- [x] Active connections on the overview, and as `monobucket_connections` on
+      `/metrics`. Drogon counts per process rather than per listener, so the
+      number covers both and is labelled that way instead of inventing a split
 - [x] Bucket list with create / delete and the anonymous-read toggle
-- [ ] Bucket policy editing
+- [x] Bucket policy editing, sharing `s3::validateBucketPolicy` and
+      `s3::policyGrantsAnonymousRead` with the `?policy` endpoint
+      (`/_mb/api/buckets/policy`)
 - [x] File browser: delimiter-based folder walk, continuation pagination, object
       metadata viewer
-- [ ] Drag-and-drop chunked uploader with progress
+- [x] Drag-and-drop uploader with per-file progress (`PUT /_mb/api/upload`).
+      One request per file, streamed into the payload tree in fixed-size chunks
+      — the chunking is the server's, not a resumable console protocol, because
+      the S3 listener already has multipart for the clients that need one
 - [x] Presigned link generator, signed on the server so the browser never holds
       an S3 secret (`s3::presignQuery`, `POST /_mb/api/presign`)
 - [x] CORS rule editor, sharing `s3::validateCorsRules` with the S3 API so the
       two cannot disagree about what a valid rule is (`/_mb/api/buckets/cors`)
-- [ ] Settings panel: cache backend selection, RAM thresholds, API key
-      management
+- [x] Settings panel — read-only, and deliberately so (`/_mb/api/config`). It
+      shows the resolved configuration with the `MONOBUCKET_*` variable behind
+      each value. Cache backend selection and RAM thresholds are *not* editable
+      here and will not be: configuration is environment only, validated before
+      the first listener opens, and an editable panel would either lie about
+      taking effect or invent a reload path that does not exist. API key
+      management beyond the root pair needs a credential store that does not
+      exist — see *Beyond 1.0*
 - [x] Auth for the console, separate from S3 credentials: the root key pair is
       exchanged for an HttpOnly session cookie, so the browser never holds an S3
       secret
@@ -247,11 +260,22 @@ browser holding an S3 secret cannot have console access revoked separately.
 - [x] SPA fallback routing on the console listener; the S3 listener never serves
       console assets
 - [x] Long-lived cache headers for fingerprinted `/_app/immutable/` assets
-- [ ] Pre-compressed `gzip`/`brotli` variants selected by `Accept-Encoding`
-- [ ] Migrate the generator to C++23 `#embed` once the toolchain floor allows
+- [x] Pre-compressed `gzip`/`brotli` variants selected by `Accept-Encoding`,
+      generated at build time and kept only where they save at least a tenth, so
+      fonts and images carry none. Both compressors are optional — without them
+      the table has no variants and every response is the original
+- [ ] Migrate the generator to C++23 `#embed` once the toolchain floor allows.
+      Blocked on the toolchain, not on us: GCC 15 / Clang 19 are the floor and
+      the Alpine builder is below it
 
 **Exit criteria:** `docker run` serves the dashboard on the console port with no
 external assets and no network fetches.
+*Met on 2026-08-17 against a locally embedded build: every route renders, every
+console call answers, and the page issues no request to any host but the console
+listener — the font is served from the binary and there is no CDN, script or
+stylesheet from anywhere else. Assets negotiate `Accept-Encoding` correctly, and
+an incompressible one is served untouched. Not yet re-verified through the image
+itself; that belongs to Phase 6's smoke test.*
 
 ---
 

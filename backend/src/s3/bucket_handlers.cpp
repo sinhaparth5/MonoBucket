@@ -69,13 +69,24 @@ std::string decodeContinuation(std::string_view token) {
     return *decoded;
 }
 
-/// Whether a policy document grants anonymous reads of this bucket's objects.
-///
-/// This is a deliberately narrow reading of one shape of policy, not an IAM
-/// evaluator. A document it does not recognise is stored and reported back
-/// unchanged but grants nothing — refusing to guess is the only safe direction
-/// to be wrong in.
-bool grantsAnonymousRead(const std::string& document, std::string_view bucket) {
+}  // namespace
+
+void validateBucketPolicy(const std::string& document) {
+    if (document.empty()) {
+        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is empty.");
+    }
+    if (document.size() > 20 * 1024) {
+        throw S3Exception(S3ErrorCode::InvalidArgument,
+                          "The policy document exceeds the maximum size of 20 KB.");
+    }
+    if (!nlohmann::json::accept(document)) {
+        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is not valid JSON.");
+    }
+}
+
+// A document this does not recognise is stored and reported back unchanged but
+// grants nothing — refusing to guess is the only safe direction to be wrong in.
+bool policyGrantsAnonymousRead(const std::string& document, std::string_view bucket) {
     nlohmann::json policy;
     try {
         policy = nlohmann::json::parse(document);
@@ -133,8 +144,6 @@ bool grantsAnonymousRead(const std::string& document, std::string_view bucket) {
 
     return false;
 }
-
-}  // namespace
 
 drogon::HttpResponsePtr handleListBuckets(const S3Context& context, const S3Request& request) {
     XmlWriter writer("ListAllMyBucketsResult");
@@ -435,18 +444,9 @@ drogon::HttpResponsePtr handlePutBucketPolicy(const S3Context& context, const S3
     requireBucket(context, request.bucket);
 
     const std::string document = body.materialise();
-    if (document.empty()) {
-        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is empty.");
-    }
-    if (document.size() > 20 * 1024) {
-        throw S3Exception(S3ErrorCode::InvalidArgument,
-                          "The policy document exceeds the maximum size of 20 KB.");
-    }
-    if (!nlohmann::json::accept(document)) {
-        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is not valid JSON.");
-    }
+    validateBucketPolicy(document);
 
-    const bool publicRead = grantsAnonymousRead(document, request.bucket);
+    const bool publicRead = policyGrantsAnonymousRead(document, request.bucket);
     context.storage.setBucketPolicy(request.bucket, document, publicRead);
     invalidateBucket(context, request.bucket);
 

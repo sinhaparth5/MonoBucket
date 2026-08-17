@@ -5,14 +5,18 @@
 	import { fade, fly } from 'svelte/transition';
 	import { api, ApiError, type Bucket } from '$lib/api';
 	import { formatTimestamp, plural } from '$lib/format';
+	import Icon from '$lib/components/Icon.svelte';
 
 	let buckets = $state<Bucket[] | null>(null);
 	let error = $state('');
 	let busy = $state('');
+	let filter = $state('');
 
 	let newName = $state('');
 	let createError = $state('');
+	let creating = $state(false);
 	let createDialog: HTMLDialogElement;
+	let nameField = $state<HTMLInputElement | undefined>();
 
 	let pendingDelete = $state<Bucket | null>(null);
 	let deleteDialog: HTMLDialogElement;
@@ -34,9 +38,22 @@
 		load();
 	});
 
+	const visible = $derived(
+		(buckets ?? []).filter((bucket) => bucket.name.includes(filter.trim().toLowerCase()))
+	);
+
+	function openCreate() {
+		createError = '';
+		createDialog.showModal();
+		// The field is the only thing in the dialog worth touching, and a modal
+		// that opens with nothing focused makes a keyboard user hunt for it.
+		nameField?.focus();
+	}
+
 	async function create(event: SubmitEvent) {
 		event.preventDefault();
 		createError = '';
+		creating = true;
 		try {
 			await api.createBucket(newName.trim());
 			newName = '';
@@ -44,6 +61,8 @@
 			await load();
 		} catch (cause) {
 			createError = cause instanceof ApiError ? cause.message : 'could not create the bucket';
+		} finally {
+			creating = false;
 		}
 	}
 
@@ -80,20 +99,63 @@
 			busy = '';
 		}
 	}
+
+	// A stable colour per bucket, derived from the name rather than assigned.
+	// Six accents from the theme, so a list of buckets has landmarks in it and
+	// the same bucket looks the same on every machine and after every restart.
+	const SWATCHES = [
+		'bg-primary/12 text-primary',
+		'bg-secondary/12 text-secondary',
+		'bg-accent/12 text-accent',
+		'bg-info/12 text-info',
+		'bg-success/12 text-success',
+		'bg-warning/15 text-warning'
+	];
+
+	function swatch(name: string): string {
+		let hash = 0;
+		for (let index = 0; index < name.length; index += 1) {
+			hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+		}
+		return SWATCHES[hash % SWATCHES.length];
+	}
 </script>
 
 <svelte:head><title>Buckets · MonoBucket</title></svelte:head>
 
 <div class="flex flex-col gap-5">
 	<div class="flex flex-wrap items-center justify-between gap-3">
-		<h1 class="text-2xl font-semibold">Buckets</h1>
-		<button class="btn btn-primary btn-sm" onclick={() => createDialog.showModal()}>
-			Create bucket
-		</button>
+		<div class="flex flex-col gap-0.5">
+			<h1 class="text-2xl font-semibold tracking-tight">Buckets</h1>
+			{#if buckets}
+				<p class="text-base-content/55 text-xs">
+					{plural(buckets.length, 'bucket')}{filter.trim() ? ` · ${visible.length} shown` : ''}
+				</p>
+			{/if}
+		</div>
+
+		<div class="flex items-center gap-2">
+			{#if buckets && buckets.length > 4}
+				<label class="input input-sm w-44">
+					<Icon name="overview" class="size-3.5 opacity-50" />
+					<input
+						type="search"
+						placeholder="Filter"
+						bind:value={filter}
+						aria-label="Filter buckets"
+					/>
+				</label>
+			{/if}
+			<button class="btn btn-primary btn-sm gap-1.5" onclick={openCreate}>
+				<Icon name="plus" class="size-3.5" />
+				Create bucket
+			</button>
+		</div>
 	</div>
 
 	{#if error}
 		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+			<Icon name="warning" />
 			<span>{error}</span>
 		</div>
 	{/if}
@@ -102,68 +164,108 @@
 		<div class="skeleton rounded-box h-48"></div>
 	{:else if buckets.length === 0}
 		<div
-			class="border-base-300 rounded-box flex flex-col items-start gap-3 border border-dashed p-8"
+			class="panel surface-raised flex flex-col items-center gap-3 border-dashed px-6 py-12 text-center"
 		>
-			<p class="text-base-content/70">
-				No buckets yet. Create one here, or with <code class="font-mono">aws s3 mb</code> against the
-				S3 port.
-			</p>
-			<button class="btn btn-primary btn-sm" onclick={() => createDialog.showModal()}>
+			<span class="bg-primary/10 text-primary grid size-12 place-items-center rounded-xl">
+				<Icon name="bucket" class="size-6" />
+			</span>
+			<div class="flex flex-col gap-1">
+				<p class="font-medium">No buckets yet</p>
+				<p class="text-base-content/60 max-w-md text-sm">
+					Create one here, or with <code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs"
+						>aws s3 mb</code
+					> against the S3 port. Both write the same record.
+				</p>
+			</div>
+			<button class="btn btn-primary btn-sm gap-1.5" onclick={openCreate}>
+				<Icon name="plus" class="size-3.5" />
 				Create the first bucket
 			</button>
 		</div>
 	{:else}
-		<div class="border-base-300 bg-base-100 rounded-box overflow-x-auto border">
+		<div class="panel overflow-x-auto">
 			<table class="table table-sm">
 				<thead>
-					<tr>
+					<tr class="border-base-300">
 						<th>Name</th>
-						<th>Created</th>
-						<th>Anonymous read</th>
+						<th class="w-52">Created</th>
+						<th class="w-40">Anonymous read</th>
 						<th class="w-0"></th>
 					</tr>
 				</thead>
 				<tbody>
-					{#each buckets as bucket (bucket.name)}
-						<tr animate:flip={{ duration: 200 }} in:fade={{ duration: 150 }}>
+					{#each visible as bucket (bucket.name)}
+						<tr
+							class="hover:bg-base-200/70 transition-colors"
+							animate:flip={{ duration: 200 }}
+							in:fade={{ duration: 150 }}
+						>
 							<td>
-								<a class="link link-hover font-medium" href={resolve(`/buckets/${bucket.name}`)}>
-									{bucket.name}
-								</a>
-								{#if bucket.hasPolicy}
-									<span class="badge badge-xs badge-ghost ml-2">policy</span>
-								{/if}
-								{#if bucket.corsRules > 0}
-									<span class="badge badge-xs badge-ghost ml-2">
-										{plural(bucket.corsRules, 'CORS rule')}
+								<a class="group flex items-center gap-3" href={resolve(`/buckets/${bucket.name}`)}>
+									<span
+										class="grid size-8 shrink-0 place-items-center rounded-lg {swatch(bucket.name)}"
+									>
+										<Icon name="bucket" class="size-4" />
 									</span>
-								{/if}
+									<span class="flex min-w-0 flex-col">
+										<span class="truncate font-medium group-hover:underline">{bucket.name}</span>
+										<span class="flex flex-wrap items-center gap-1">
+											{#if bucket.hasPolicy}
+												<span class="badge badge-xs badge-ghost gap-1">
+													<Icon name="shield" class="size-2.5" />
+													policy
+												</span>
+											{/if}
+											{#if bucket.corsRules > 0}
+												<span class="badge badge-xs badge-ghost gap-1">
+													<Icon name="globe" class="size-2.5" />
+													{plural(bucket.corsRules, 'CORS rule')}
+												</span>
+											{/if}
+										</span>
+									</span>
+								</a>
 							</td>
-							<td class="text-base-content/70">{formatTimestamp(bucket.createdAtMs)}</td>
+							<td class="text-base-content/60">{formatTimestamp(bucket.createdAtMs)}</td>
 							<td>
-								<input
-									type="checkbox"
-									class="toggle toggle-sm"
-									checked={bucket.publicRead}
-									disabled={busy === bucket.name}
-									aria-label="Allow anonymous reads from {bucket.name}"
-									onchange={(event) => toggleAccess(bucket, event.currentTarget.checked)}
-								/>
+								<label class="flex cursor-pointer items-center gap-2">
+									<input
+										type="checkbox"
+										class="toggle toggle-sm toggle-success"
+										checked={bucket.publicRead}
+										disabled={busy === bucket.name}
+										aria-label="Allow anonymous reads from {bucket.name}"
+										onchange={(event) => toggleAccess(bucket, event.currentTarget.checked)}
+									/>
+									<span class="text-base-content/50 text-xs">
+										{bucket.publicRead ? 'public' : 'private'}
+									</span>
+								</label>
 							</td>
 							<td>
 								<button
-									class="btn btn-ghost btn-xs text-error"
+									class="btn btn-ghost btn-xs text-error gap-1"
 									disabled={busy === bucket.name}
+									aria-label="Delete {bucket.name}"
 									onclick={() => {
 										pendingDelete = bucket;
 										deleteDialog.showModal();
 									}}
 								>
+									<Icon name="trash" class="size-3.5" />
 									Delete
 								</button>
 							</td>
 						</tr>
 					{/each}
+
+					{#if visible.length === 0}
+						<tr>
+							<td colspan="4" class="text-base-content/50 py-8 text-center text-sm">
+								No bucket matches “{filter.trim()}”.
+							</td>
+						</tr>
+					{/if}
 				</tbody>
 			</table>
 		</div>
@@ -171,33 +273,51 @@
 </div>
 
 <dialog bind:this={createDialog} class="modal">
-	<div class="modal-box max-w-sm">
-		<h2 class="text-lg font-medium">Create bucket</h2>
+	<div class="modal-box max-w-md">
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
+				<Icon name="bucket" class="size-4" />
+			</span>
+			Create bucket
+		</h2>
+
 		<form class="mt-4 flex flex-col gap-4" onsubmit={create}>
 			<fieldset class="fieldset gap-1 p-0">
 				<legend class="fieldset-legend">Name</legend>
 				<input
-					class="input w-full"
+					bind:this={nameField}
+					class="input w-full font-mono"
 					type="text"
 					bind:value={newName}
 					placeholder="my-bucket"
+					autocomplete="off"
+					spellcheck="false"
 					required
 				/>
-				<p class="label">
+				<!-- `fieldset-label`, not `label`: daisyUI's `.label` is
+				     `white-space: nowrap`, and a sentence of guidance inside a
+				     fieldset then sets a minimum width the dialog cannot meet, so
+				     the field grows straight through the side of the modal. -->
+				<p class="fieldset-label">
 					DNS rules apply: lowercase letters, digits, dots and hyphens, 3 to 63 characters.
 				</p>
 			</fieldset>
 
 			{#if createError}
-				<div role="alert" class="alert alert-error alert-soft text-sm">
+				<div role="alert" class="alert alert-error alert-soft text-sm" in:fly={{ y: -4 }}>
+					<Icon name="warning" class="size-4" />
 					<span>{createError}</span>
 				</div>
 			{/if}
 
 			<div class="modal-action">
-				<button class="btn btn-sm" type="button" onclick={() => createDialog.close()}>Cancel</button
-				>
-				<button class="btn btn-primary btn-sm" type="submit">Create</button>
+				<button class="btn btn-sm" type="button" onclick={() => createDialog.close()}>
+					Cancel
+				</button>
+				<button class="btn btn-primary btn-sm" type="submit" disabled={creating}>
+					{#if creating}<span class="loading loading-spinner loading-xs"></span>{/if}
+					Create
+				</button>
 			</div>
 		</form>
 	</div>
@@ -205,9 +325,14 @@
 </dialog>
 
 <dialog bind:this={deleteDialog} class="modal">
-	<div class="modal-box max-w-sm">
-		<h2 class="text-lg font-medium">Delete {pendingDelete?.name}</h2>
-		<p class="text-base-content/70 mt-2 text-sm">
+	<div class="modal-box max-w-md">
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-error/10 text-error grid size-8 place-items-center rounded-lg">
+				<Icon name="trash" class="size-4" />
+			</span>
+			Delete {pendingDelete?.name}
+		</h2>
+		<p class="text-base-content/70 mt-3 text-sm">
 			The server refuses this while the bucket still holds objects, so nothing is deleted by
 			accident.
 		</p>

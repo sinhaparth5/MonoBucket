@@ -82,6 +82,9 @@ export interface Overview {
 		workerThreads: number;
 		s3Port: number;
 		consolePort: number;
+		/// Across both listeners. Drogon counts connections per process, so this
+		/// includes the console tab that is asking.
+		connections: number;
 	};
 	storage: {
 		engine: string;
@@ -146,6 +149,7 @@ export interface Sample {
 	cacheBytes: number;
 	ioQueued: number;
 	ioActive: number;
+	connections: number;
 }
 
 export interface Series {
@@ -219,6 +223,32 @@ export interface PresignQuery {
 	expiresSeconds: number;
 }
 
+export interface BucketPolicy {
+	bucket: string;
+	/// The document verbatim, or empty when the bucket has none. Never
+	/// reformatted on the way through: a policy is read by people as well as by
+	/// the server, and re-emitting somebody's JSON with different whitespace is
+	/// a diff nobody asked for.
+	policy: string;
+	/// What the server derived from that document, which is the half that
+	/// actually decides whether an unsigned GET works.
+	publicRead: boolean;
+}
+
+export interface Setting {
+	key: string;
+	value: string | number | boolean;
+	/// The `MONOBUCKET_*` variable behind it, or empty where there is none.
+	env: string;
+}
+
+export interface ServerConfig {
+	version: string;
+	settings: Setting[];
+	cacheBackendActive: string;
+	usingDefaultCredentials: boolean;
+}
+
 export interface ListQuery {
 	bucket: string;
 	prefix?: string;
@@ -277,6 +307,23 @@ export const api = {
 			body: JSON.stringify({ name })
 		}).then((r) => r.rules),
 
+	bucketPolicy: (name: string) =>
+		request<BucketPolicy>(`/buckets/policy?bucket=${encodeURIComponent(name)}`),
+
+	setBucketPolicy: (name: string, policy: string) =>
+		request<BucketPolicy>('/buckets/policy', {
+			method: 'POST',
+			body: JSON.stringify({ name, policy })
+		}),
+
+	clearBucketPolicy: (name: string) =>
+		request<BucketPolicy>('/buckets/policy', {
+			method: 'DELETE',
+			body: JSON.stringify({ name })
+		}),
+
+	config: () => request<ServerConfig>('/config'),
+
 	objects: (query: ListQuery) => {
 		const params = new URLSearchParams({ bucket: query.bucket });
 		if (query.prefix) params.set('prefix', query.prefix);
@@ -302,3 +349,58 @@ export const api = {
 			{ method: 'DELETE' }
 		)
 };
+
+export interface UploadHandle {
+	/// Resolves with the stored object once the server has committed it.
+	done: Promise<StoredObject>;
+	/// Aborts the transfer. The server discards a partial payload rather than
+	/// publishing it, so a cancelled upload leaves no object behind.
+	cancel: () => void;
+}
+
+/// Sends one file and reports progress as it goes.
+///
+/// XMLHttpRequest rather than fetch, for the one thing it still does that fetch
+/// does not: report how much of a request body has gone out. `fetch` can stream
+/// a request, but only over HTTP/2 and only with a duplex flag no browser
+/// implements for uploads yet, so a progress bar built on it would be a
+/// spinner wearing a percentage.
+export function uploadObject(
+	bucket: string,
+	key: string,
+	file: File,
+	onProgress: (sentBytes: number) => void
+): UploadHandle {
+	const transfer = new XMLHttpRequest();
+
+	const done = new Promise<StoredObject>((resolve, reject) => {
+		transfer.upload.addEventListener('progress', (event) => onProgress(event.loaded));
+
+		transfer.addEventListener('load', () => {
+			const payload = safeParse(transfer.responseText);
+			if (transfer.status >= 200 && transfer.status < 300) {
+				resolve(payload as StoredObject);
+				return;
+			}
+			const message =
+				payload && typeof payload === 'object' && 'error' in payload
+					? String((payload as { error: unknown }).error)
+					: `upload failed with ${transfer.status}`;
+			reject(new ApiError(transfer.status, message));
+		});
+
+		transfer.addEventListener('error', () => reject(new ApiError(0, 'cannot reach the server')));
+		transfer.addEventListener('abort', () => reject(new ApiError(0, 'cancelled')));
+
+		const target = `${BASE}/upload?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`;
+		transfer.open('PUT', target);
+		transfer.withCredentials = true;
+		// The browser's guess, which is what every S3 client sends too. An empty
+		// type means the file had no recognisable extension, and the server's
+		// own default says the same thing more honestly.
+		if (file.type) transfer.setRequestHeader('Content-Type', file.type);
+		transfer.send(file);
+	});
+
+	return { done, cancel: () => transfer.abort() };
+}

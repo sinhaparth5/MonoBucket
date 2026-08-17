@@ -24,16 +24,6 @@ constexpr std::size_t kMaxUserMetadataBytes = 2048;
 /// could not.
 constexpr std::uint8_t kCachedObjectVersion = 1;
 
-std::string objectCacheKey(std::string_view bucket, std::string_view key) {
-    std::string out;
-    out.reserve(bucket.size() + key.size() + 3);
-    out += "o:";
-    out += bucket;
-    out += '/';
-    out += key;
-    return out;
-}
-
 std::string encodeObject(const ObjectRecord& record) {
     std::string  out;
     codec::Writer writer(out);
@@ -203,6 +193,16 @@ void invalidateBucket(const S3Context& context, std::string_view name) {
 
 std::string bucketCacheKey(std::string_view name) {
     return "b:" + std::string(name);
+}
+
+std::string objectCacheKey(std::string_view bucket, std::string_view key) {
+    std::string out;
+    out.reserve(bucket.size() + key.size() + 3);
+    out += "o:";
+    out += bucket;
+    out += '/';
+    out += key;
+    return out;
 }
 
 // --- Header helpers --------------------------------------------------------

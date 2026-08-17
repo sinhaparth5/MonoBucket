@@ -276,7 +276,7 @@ void registerS3Routes(const Config& config, StorageEngine& storage, IoExecutor& 
 
             if (settings.consoleEnabled &&
                 http->getLocalAddr().toPort() == settings.consolePort) {
-                auto response = consoleAssetResponse(http->path());
+                auto response = consoleAssetResponse(http->path(), http->getHeader("accept-encoding"));
                 if (!response) {
                     response = drogon::HttpResponse::newHttpResponse();
                     response->setStatusCode(drogon::k404NotFound);

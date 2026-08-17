@@ -42,6 +42,7 @@ public:
         std::uint64_t cacheBytes    = 0;
         std::uint64_t ioQueued      = 0;
         std::uint64_t ioActive      = 0;
+        std::uint64_t connections   = 0;
     };
 
     /// One point on the console's graphs. Counter fields hold what happened
@@ -66,6 +67,7 @@ public:
         std::uint64_t cacheBytes    = 0;
         std::uint64_t ioQueued      = 0;
         std::uint64_t ioActive      = 0;
+        std::uint64_t connections   = 0;
     };
 
     MetricsHistory(std::size_t capacity, std::uint32_t intervalSeconds);

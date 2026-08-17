@@ -30,8 +30,23 @@ std::size_t totalBytes() noexcept {
     const Asset* const first = tableData();
     const std::size_t count = tableSize();
     if (first == nullptr) return 0;
-    return std::accumulate(first, first + count, std::size_t{0},
-                           [](std::size_t sum, const Asset& a) { return sum + a.size; });
+    return std::accumulate(first, first + count, std::size_t{0}, [](std::size_t sum, const Asset& a) {
+        return sum + a.size + a.gzipSize + a.brotliSize;
+    });
+}
+
+Encoded encodedFor(const Asset& asset, std::string_view acceptEncoding) noexcept {
+    const auto accepts = [acceptEncoding](std::string_view token) {
+        return acceptEncoding.find(token) != std::string_view::npos;
+    };
+
+    if (asset.brotli != nullptr && accepts("br")) {
+        return {asset.brotli, asset.brotliSize, "br"};
+    }
+    if (asset.gzip != nullptr && accepts("gzip")) {
+        return {asset.gzip, asset.gzipSize, "gzip"};
+    }
+    return {asset.data, asset.size, {}};
 }
 
 }  // namespace monobucket::assets

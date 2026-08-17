@@ -5,6 +5,7 @@
 	import { Area, Axis, Chart, Highlight, Svg, Tooltip } from 'layerchart';
 	import { fade } from 'svelte/transition';
 	import { formatClock } from '$lib/format';
+	import Icon, { type IconName } from './Icon.svelte';
 
 	interface Point {
 		t: Date;
@@ -32,6 +33,11 @@
 		/// would render as "0 1 1 2 2" once the format rounds them.
 		integerTicks?: boolean;
 		height?: string;
+		icon?: IconName;
+		/// Tints the label to match the series. The line already carries the
+		/// colour; repeating it on the heading is what lets six charts on one
+		/// screen be told apart from across a desk.
+		accentClass?: string;
 	}
 
 	let {
@@ -39,6 +45,8 @@
 		label,
 		headline,
 		hint,
+		icon,
+		accentClass = 'text-primary',
 		lineClass = 'stroke-primary',
 		areaClass = 'fill-primary/15',
 		format = (value: number) => String(Math.round(value)),
@@ -63,11 +71,18 @@
 	});
 </script>
 
-<div class="border-base-300 bg-base-100 rounded-box flex flex-col gap-1 border p-4">
-	<div class="flex items-baseline justify-between gap-3">
-		<span class="text-base-content/70 text-xs font-medium tracking-wide uppercase">{label}</span>
+<div
+	class="panel hover:border-base-content/20 flex flex-col gap-1 p-4 transition-colors duration-200"
+>
+	<div class="flex items-center justify-between gap-3">
+		<span
+			class="flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase {accentClass}"
+		>
+			{#if icon}<Icon name={icon} class="size-3.5" />{/if}
+			{label}
+		</span>
 		{#if hint}
-			<span class="text-base-content/50 text-xs">{hint}</span>
+			<span class="text-base-content/45 text-xs">{hint}</span>
 		{/if}
 	</div>
 

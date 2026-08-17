@@ -149,6 +149,17 @@ stub with an empty table is generated instead, so the backend always builds with
 console port then returns 404. SSR and prerendering are off (`src/routes/+layout.ts`) and Kit config
 lives in `vite.config.ts` — this SvelteKit version has no `svelte.config.js`.
 
+The generator also shells out to `gzip` and `brotli` to pre-compress text assets at build time,
+storing the variants in the same table entry; `assets::encodedFor()` picks one from the request's
+`Accept-Encoding`. Both tools are optional — absent, the table simply has no variants. Nothing
+compresses per request.
+
+Console styling is daisyUI 5 over Tailwind 4. The two themes (`monobucket`, `monobucket-dark`) are
+defined in `frontend/src/app.css`, not borrowed from daisyUI's built-ins; use semantic colour names
+(`bg-primary`, `text-base-content/60`) so both themes stay correct, never `dark:` and never a raw
+Tailwind palette colour for text. Icons come from `$lib/components/Icon.svelte` — one inline set, no
+icon package and no emoji.
+
 ## Project conventions
 
 - **Configuration is environment only.** Every knob is a `MONOBUCKET_*` variable parsed once at
@@ -170,8 +181,7 @@ lives in `vite.config.ts` — this SvelteKit version has no `svelte.config.js`.
 
 ## Status vs. docs
 
-`README.md` still says the S3 API "arrives in Phase 4" and lists only system endpoints; the S3
-protocol layer (`backend/src/s3/`) is in fact implemented as of commit `0c6ce88`. Trust the source
-over the README on what exists. `ROADMAP.md` is the source of truth for what is *not* yet done —
-notably `io_uring`, `fsck`, per-bucket durability, `rediss://` TLS, the dashboard UI itself, and the
-conformance/benchmark suites of Phase 7.
+Phases 1–5 are complete: the S3 protocol layer (`backend/src/s3/`) and the dashboard both exist and
+work. `ROADMAP.md` is the source of truth for what is *not* yet done — notably `io_uring`, `fsck`,
+per-bucket durability, `rediss://` TLS, C++23 `#embed`, and the conformance/benchmark suites of
+Phase 7. Where a doc and the source disagree, trust the source and fix the doc in the same commit.

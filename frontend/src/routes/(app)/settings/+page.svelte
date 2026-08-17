@@ -1,0 +1,299 @@
+<script lang="ts">
+	// Read-only, and that is the feature rather than a limitation.
+	//
+	// Configuration is environment only: every knob is parsed once at startup,
+	// cross-validated, and frozen before the first listener opens. A panel with
+	// save buttons would either lie about taking effect or force a restart path
+	// that does not exist. So this shows what the server actually resolved, and
+	// names the variable that produced each value — which is what someone came
+	// here to find out.
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { fly } from 'svelte/transition';
+	import { api, ApiError, type ServerConfig, type Setting } from '$lib/api';
+	import { formatBytes, formatDuration, plural } from '$lib/format';
+	import Icon, { type IconName } from '$lib/components/Icon.svelte';
+
+	let config = $state<ServerConfig | null>(null);
+	let error = $state('');
+	let copied = $state('');
+
+	async function load() {
+		try {
+			config = await api.config();
+			error = '';
+		} catch (cause) {
+			if (cause instanceof ApiError && cause.unauthorized) {
+				await goto(resolve('/login'));
+				return;
+			}
+			error = cause instanceof ApiError ? cause.message : 'could not read the configuration';
+		}
+	}
+
+	$effect(() => {
+		load();
+	});
+
+	// The grouping the server does not have and a reader does: config.cpp is one
+	// flat struct, but nobody comes here asking about "settings", they come
+	// asking about storage, or memory, or who can sign in.
+	const GROUPS: { title: string; icon: IconName; blurb: string; keys: string[] }[] = [
+		{
+			title: 'Listeners',
+			icon: 'plug',
+			blurb: 'Two ports, one process. The console never answers on the S3 port.',
+			keys: ['host', 's3Port', 'consolePort', 'consoleEnabled', 's3Domain', 'region']
+		},
+		{
+			title: 'Credentials',
+			icon: 'key',
+			blurb: 'One root key pair. The console exchanges it for a session cookie.',
+			keys: ['rootAccessKey', 'rootSecretKey']
+		},
+		{
+			title: 'Storage',
+			icon: 'disk',
+			blurb: 'Where payloads live and how hard a write is pushed to the platter.',
+			keys: [
+				'dataDir',
+				'durability',
+				'metadataMemoryBytes',
+				'metadataMaxOpenFiles',
+				'reclaimGraceSeconds',
+				'reclaimIntervalSeconds'
+			]
+		},
+		{
+			title: 'Concurrency and limits',
+			icon: 'memory',
+			blurb:
+				'The bounds that keep resident memory flat. A full I/O queue sheds load as 503 SlowDown rather than growing.',
+			keys: [
+				'workerThreads',
+				'ioThreads',
+				'ioQueueLimit',
+				'maxBodyBytes',
+				'maxMemoryBodyBytes',
+				'streamChunkBytes',
+				'idleTimeoutSeconds'
+			]
+		},
+		{
+			title: 'Cache',
+			icon: 'cache',
+			blurb: 'Sits in front of metadata reads. A cache outage never becomes a storage outage.',
+			keys: [
+				'cacheBackend',
+				'cacheMaxBytes',
+				'cacheTtlSeconds',
+				'cacheLocalTtlSeconds',
+				'redisConfigured',
+				'redisPoolSize'
+			]
+		},
+		{
+			title: 'Observability',
+			icon: 'overview',
+			blurb: 'Prometheus text on /metrics, structured lines on stderr.',
+			keys: ['logLevel', 'metricsEnabled']
+		}
+	];
+
+	const byKey = $derived(
+		new Map((config?.settings ?? []).map((setting) => [setting.key, setting]))
+	);
+
+	// Anything the server reports that no group claims. Listed rather than
+	// dropped: a setting added to the backend should show up here on its own
+	// instead of silently disappearing from the panel.
+	const ungrouped = $derived.by(() => {
+		const claimed = new Set(GROUPS.flatMap((group) => group.keys));
+		return (config?.settings ?? []).filter((setting) => !claimed.has(setting.key));
+	});
+
+	const BYTE_KEYS = new Set([
+		'metadataMemoryBytes',
+		'maxBodyBytes',
+		'maxMemoryBodyBytes',
+		'streamChunkBytes',
+		'cacheMaxBytes'
+	]);
+	const SECOND_KEYS = new Set([
+		'reclaimGraceSeconds',
+		'reclaimIntervalSeconds',
+		'idleTimeoutSeconds',
+		'cacheTtlSeconds',
+		'cacheLocalTtlSeconds'
+	]);
+
+	/// The raw value is always shown; this is the second line that says what it
+	/// means. 1073741824 is a number, "1.0 GiB" is an answer.
+	function annotate(setting: Setting): string {
+		if (typeof setting.value !== 'number') return '';
+		if (BYTE_KEYS.has(setting.key)) return formatBytes(setting.value);
+		if (SECOND_KEYS.has(setting.key)) {
+			return setting.value === 0 ? 'no limit' : formatDuration(setting.value);
+		}
+		return '';
+	}
+
+	function render(setting: Setting): string {
+		if (typeof setting.value === 'boolean') return setting.value ? 'on' : 'off';
+		if (setting.value === '') return '—';
+		return String(setting.value);
+	}
+
+	async function copyEnv(setting: Setting) {
+		const line = `${setting.env}=${setting.value}`;
+		try {
+			await navigator.clipboard.writeText(line);
+			copied = setting.key;
+			setTimeout(() => (copied = ''), 1500);
+		} catch {
+			// Clipboard access can be refused; the text is on screen either way.
+		}
+	}
+</script>
+
+<svelte:head><title>Settings · MonoBucket</title></svelte:head>
+
+<div class="flex flex-col gap-5">
+	<div class="flex flex-col gap-0.5">
+		<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
+		<p class="text-base-content/55 text-xs">
+			The configuration this process resolved at startup, and the variable behind each value.
+		</p>
+	</div>
+
+	{#if error}
+		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+			<Icon name="warning" />
+			<span>{error}</span>
+		</div>
+	{/if}
+
+	<div role="note" class="alert alert-info alert-soft items-start">
+		<Icon name="settings" />
+		<div class="flex flex-col gap-1">
+			<span class="font-medium">Nothing here is editable, on purpose.</span>
+			<span class="text-sm">
+				Every setting is a <code class="font-mono">MONOBUCKET_*</code> environment variable, parsed once
+				and validated before the first listener opens. A malformed value aborts startup with a message
+				rather than falling back to a default nobody asked for — which is only true because there is no
+				second way to set one.
+			</span>
+		</div>
+	</div>
+
+	{#if config?.usingDefaultCredentials}
+		<div role="alert" class="alert alert-warning alert-soft items-start">
+			<Icon name="warning" />
+			<div class="flex flex-col gap-1">
+				<span class="font-medium">The built-in demo credentials are in use.</span>
+				<span class="text-sm">
+					Set <code class="font-mono">MONOBUCKET_ROOT_ACCESS_KEY</code> and
+					<code class="font-mono">MONOBUCKET_ROOT_SECRET_KEY</code> before this is reachable by anyone
+					else.
+				</span>
+			</div>
+		</div>
+	{/if}
+
+	{#if !config}
+		<div class="grid gap-3 lg:grid-cols-2">
+			{#each [0, 1, 2, 3] as index (index)}
+				<div class="skeleton rounded-box h-56"></div>
+			{/each}
+		</div>
+	{:else}
+		{#if config.cacheBackendActive !== byKey.get('cacheBackend')?.value}
+			<div role="alert" class="alert alert-warning alert-soft">
+				<Icon name="cache" />
+				<span>
+					The configured cache backend is
+					<code class="font-mono">{byKey.get('cacheBackend')?.value}</code>, but
+					<code class="font-mono">{config.cacheBackendActive}</code>
+					is serving. A backend that cannot be reached falls back to the local tier rather than failing
+					requests.
+				</span>
+			</div>
+		{/if}
+
+		<div class="grid gap-3 lg:grid-cols-2">
+			{#each GROUPS as group (group.title)}
+				{@const rows = group.keys.map((key) => byKey.get(key)).filter((row) => row !== undefined)}
+				{#if rows.length > 0}
+					<section class="panel flex flex-col overflow-hidden">
+						<header class="surface-raised border-base-300 flex items-start gap-3 border-b p-4">
+							<span
+								class="bg-primary/10 text-primary grid size-9 shrink-0 place-items-center rounded-lg"
+							>
+								<Icon name={group.icon} class="size-4.5" />
+							</span>
+							<div class="flex flex-col gap-0.5">
+								<h2 class="font-medium">{group.title}</h2>
+								<p class="text-base-content/55 text-xs">{group.blurb}</p>
+							</div>
+						</header>
+
+						<dl class="divide-base-300 divide-y">
+							{#each rows as setting (setting.key)}
+								<div
+									class="hover:bg-base-200/60 flex items-start gap-3 px-4 py-2.5 transition-colors"
+								>
+									<dt class="flex min-w-0 flex-1 flex-col gap-0.5">
+										<span class="text-sm">{setting.key}</span>
+										{#if setting.env}
+											<button
+												class="text-base-content/45 hover:text-primary flex items-center gap-1 self-start font-mono text-[0.6875rem] transition-colors"
+												title="Copy {setting.env}=… "
+												onclick={() => copyEnv(setting)}
+											>
+												<Icon name={copied === setting.key ? 'check' : 'copy'} class="size-3" />
+												{setting.env}
+											</button>
+										{/if}
+									</dt>
+									<dd class="flex shrink-0 flex-col items-end gap-0.5 text-right">
+										<span class="font-mono text-sm break-all">{render(setting)}</span>
+										{#if annotate(setting)}
+											<span class="text-base-content/45 text-[0.6875rem]">
+												{annotate(setting)}
+											</span>
+										{/if}
+									</dd>
+								</div>
+							{/each}
+						</dl>
+					</section>
+				{/if}
+			{/each}
+		</div>
+
+		{#if ungrouped.length > 0}
+			<section class="panel flex flex-col overflow-hidden">
+				<header class="surface-raised border-base-300 border-b p-4">
+					<h2 class="font-medium">Other</h2>
+					<p class="text-base-content/55 text-xs">
+						{plural(ungrouped.length, 'setting')} the server reports that this panel has no group for.
+					</p>
+				</header>
+				<dl class="divide-base-300 divide-y">
+					{#each ungrouped as setting (setting.key)}
+						<div class="flex items-center justify-between gap-3 px-4 py-2.5">
+							<dt class="text-sm">{setting.key}</dt>
+							<dd class="font-mono text-sm break-all">{render(setting)}</dd>
+						</div>
+					{/each}
+				</dl>
+			</section>
+		{/if}
+
+		<p class="text-base-content/45 text-xs">
+			Secrets are redacted by the server before they reach this page. API keys beyond the root pair,
+			and per-bucket overrides of these values, are not implemented — see the roadmap rather than
+			assuming they are hidden somewhere.
+		</p>
+	{/if}
+</div>

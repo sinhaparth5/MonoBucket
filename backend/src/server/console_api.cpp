@@ -287,6 +287,47 @@ std::vector<CorsRule> corsRulesFrom(const nlohmann::json& value) {
     return rules;
 }
 
+/// The environment variable behind each key of `Config::toJson()`.
+///
+/// The settings panel is read-only because configuration is environment-only,
+/// and a read-only panel that does not say *which* variable to set is a panel
+/// that sends the reader to the documentation anyway. Anything unmapped is
+/// rendered without a variable rather than with a guessed one.
+const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
+    static const std::unordered_map<std::string, std::string> kNames{
+        {"host", "MONOBUCKET_HOST"},
+        {"s3Port", "MONOBUCKET_S3_PORT"},
+        {"consolePort", "MONOBUCKET_CONSOLE_PORT"},
+        {"consoleEnabled", "MONOBUCKET_CONSOLE_ENABLED"},
+        {"dataDir", "MONOBUCKET_DATA_DIR"},
+        {"region", "MONOBUCKET_REGION"},
+        {"s3Domain", "MONOBUCKET_S3_DOMAIN"},
+        {"durability", "MONOBUCKET_DURABILITY"},
+        {"metadataMemoryBytes", "MONOBUCKET_METADATA_MEMORY_BYTES"},
+        {"metadataMaxOpenFiles", "MONOBUCKET_METADATA_MAX_OPEN_FILES"},
+        {"reclaimGraceSeconds", "MONOBUCKET_RECLAIM_GRACE_SECONDS"},
+        {"reclaimIntervalSeconds", "MONOBUCKET_RECLAIM_INTERVAL_SECONDS"},
+        {"ioThreads", "MONOBUCKET_IO_THREADS"},
+        {"ioQueueLimit", "MONOBUCKET_IO_QUEUE_LIMIT"},
+        {"rootAccessKey", "MONOBUCKET_ROOT_ACCESS_KEY"},
+        {"rootSecretKey", "MONOBUCKET_ROOT_SECRET_KEY"},
+        {"workerThreads", "MONOBUCKET_WORKER_THREADS"},
+        {"maxBodyBytes", "MONOBUCKET_MAX_BODY_BYTES"},
+        {"maxMemoryBodyBytes", "MONOBUCKET_MAX_MEMORY_BODY_BYTES"},
+        {"streamChunkBytes", "MONOBUCKET_STREAM_CHUNK_BYTES"},
+        {"idleTimeoutSeconds", "MONOBUCKET_IDLE_TIMEOUT_SECONDS"},
+        {"cacheBackend", "MONOBUCKET_CACHE_BACKEND"},
+        {"cacheMaxBytes", "MONOBUCKET_CACHE_MAX_BYTES"},
+        {"cacheTtlSeconds", "MONOBUCKET_CACHE_TTL_SECONDS"},
+        {"cacheLocalTtlSeconds", "MONOBUCKET_CACHE_LOCAL_TTL_SECONDS"},
+        {"redisConfigured", "MONOBUCKET_REDIS_URL"},
+        {"redisPoolSize", "MONOBUCKET_REDIS_POOL_SIZE"},
+        {"logLevel", "MONOBUCKET_LOG_LEVEL"},
+        {"metricsEnabled", "MONOBUCKET_METRICS_ENABLED"},
+    };
+    return kNames;
+}
+
 nlohmann::json toJson(const ObjectRecord& object) {
     return {{"key", object.key},
             {"size", object.size},
@@ -313,7 +354,8 @@ nlohmann::json toJson(const MetricsHistory::Sample& sample) {
             {"residentBytes", sample.residentBytes},
             {"cacheBytes", sample.cacheBytes},
             {"ioQueued", sample.ioQueued},
-            {"ioActive", sample.ioActive}};
+            {"ioActive", sample.ioActive},
+            {"connections", sample.connections}};
 }
 
 drogon::HttpStatusCode statusFor(StorageErrorCode code) {
@@ -502,7 +544,12 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                         {"residentBytes", residentBytes()},
                                         {"workerThreads", config.workerThreads},
                                         {"s3Port", config.s3Port},
-                                        {"consolePort", config.consolePort}}},
+                                        {"consolePort", config.consolePort},
+                                        // Both listeners together, which is
+                                        // all Drogon counts. Labelling it "S3"
+                                        // would be a number that includes this
+                                        // very request.
+                                        {"connections", drogon::app().getConnectionCount()}}},
                         {"storage",
                          nlohmann::json{{"engine", stats.engine},
                                         {"buckets", stats.usage.buckets},
@@ -723,6 +770,121 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         },
         {drogon::Get, drogon::Post, drogon::Delete});
 
+    // The same three verbs, the same validation and the same derived
+    // anonymous-read flag as `?policy` on the S3 listener. The console is a
+    // second front door onto one feature, never a second implementation.
+    app.registerHandler(
+        "/_mb/api/buckets/policy",
+        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
+                                           ResponseCallback&& callback) {
+            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+                const std::string method = std::string(req->getMethodString());
+
+                if (method == "GET") {
+                    const std::string name = req->getParameter("bucket");
+                    if (name.empty()) {
+                        callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                        return;
+                    }
+                    offload(callback, [&storage, name]() -> HttpResponsePtr {
+                        const auto record = storage.getBucket(name);
+                        if (!record) return errorJson("no such bucket", drogon::k404NotFound);
+                        return jsonResponse({{"bucket", name},
+                                             {"policy", record->policy},
+                                             {"publicRead", record->publicRead}});
+                    });
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                const auto name = body.value("name", std::string{});
+                if (name.empty()) {
+                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                    return;
+                }
+
+                std::string document;
+                if (method == "POST") {
+                    // Accepted either as a JSON string holding the document or
+                    // as the document itself, because a textarea produces the
+                    // first and a programmatic caller reaches for the second.
+                    const auto& policy = body.contains("policy") ? body.at("policy")
+                                                                 : nlohmann::json(nullptr);
+                    document = policy.is_string() ? policy.get<std::string>() : policy.dump();
+                    try {
+                        s3::validateBucketPolicy(document);
+                    } catch (const s3::S3Exception& error) {
+                        callback(errorJson(error.what(), drogon::k400BadRequest));
+                        return;
+                    }
+                }
+
+                // Deleting the policy removes the access it granted; leaving
+                // the flag set would keep a bucket public with nothing left in
+                // the record to say why.
+                const bool publicRead =
+                    !document.empty() && s3::policyGrantsAnonymousRead(document, name);
+
+                offload(callback, [&storage, &cache, name, document, publicRead]()
+                                      -> HttpResponsePtr {
+                    storage.setBucketPolicy(name, document, publicRead);
+                    cache.del(s3::bucketCacheKey(name));
+
+                    const auto record = storage.getBucket(name);
+                    if (!record) return errorJson("no such bucket", drogon::k404NotFound);
+                    return jsonResponse({{"bucket", name},
+                                         {"policy", record->policy},
+                                         {"publicRead", record->publicRead}});
+                });
+            });
+        },
+        {drogon::Get, drogon::Post, drogon::Delete});
+
+    // --- Settings ----------------------------------------------------------
+
+    // Read-only, and behind the session: the resolved configuration names the
+    // data directory and the root access key, which is not something to hand
+    // out to whoever can reach the console port.
+    //
+    // There is nothing to write here on purpose. Configuration is environment
+    // only, validated once before the first listener opens, so an editable
+    // panel would be a promise the server cannot keep.
+    app.registerHandler(
+        "/_mb/api/config",
+        [&config, &cache, guard](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, [&config, &cache, callback](const std::string&) {
+                const auto& names = settingEnvironmentNames();
+
+                // Bound to a local rather than iterated in place: `items()`
+                // returns a view over the object it was called on, and calling
+                // it on the temporary `toJson()` returns leaves the loop walking
+                // a destroyed value.
+                const nlohmann::json resolved = config.toJson();
+
+                nlohmann::json settings = nlohmann::json::array();
+                for (const auto& [key, value] : resolved.items()) {
+                    const auto name = names.find(key);
+                    settings.push_back({{"key", key},
+                                        {"value", value},
+                                        {"env", name == names.end() ? "" : name->second}});
+                }
+
+                callback(jsonResponse(
+                    {{"version", version::kVersion},
+                     {"settings", std::move(settings)},
+                     // The backend that is actually in use, which is not always
+                     // the one that was asked for: a Redis that cannot be
+                     // reached leaves the local tier serving alone.
+                     {"cacheBackendActive", std::string(cache.name())},
+                     {"usingDefaultCredentials", config.usingDefaultCredentials()}}));
+            });
+        },
+        {drogon::Get});
+
     // --- Objects -----------------------------------------------------------
 
     // Bucket and key travel as query parameters rather than path segments: an
@@ -731,8 +893,9 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // exactly the keys a file browser needs to show.
     app.registerHandler(
         "/_mb/api/objects",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
+                                           ResponseCallback&& callback) {
+            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
                 const std::string bucket = req->getParameter("bucket");
                 if (bucket.empty()) {
                     callback(errorJson("a bucket is required", drogon::k400BadRequest));
@@ -745,10 +908,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         callback(errorJson("a key is required", drogon::k400BadRequest));
                         return;
                     }
-                    offload(callback, [&storage, bucket, key]() -> HttpResponsePtr {
+                    offload(callback, [&storage, &cache, bucket, key]() -> HttpResponsePtr {
                         if (!storage.deleteObject(bucket, key)) {
                             return errorJson("no such key", drogon::k404NotFound);
                         }
+                        // Without this the S3 read path answers HEAD from the
+                        // cached metadata of an object that is no longer there.
+                        cache.del(s3::objectCacheKey(bucket, key));
                         return jsonResponse({{"deleted", key}});
                     });
                     return;
@@ -798,6 +964,74 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             });
         },
         {drogon::Get, drogon::Delete});
+
+    // One request per file, streamed into the payload tree in fixed-size
+    // chunks. The browser's own upload progress is what the drop zone draws:
+    // a chunked console protocol would need a resumable upload session on this
+    // side, and the S3 listener already has one — multipart — for the clients
+    // that need it.
+    //
+    // Memory stays flat because Drogon spills anything above
+    // MONOBUCKET_MAX_MEMORY_BODY_BYTES to a file and hands back a mapping of
+    // it, so a five-gigabyte body is five gigabytes of page cache and one
+    // chunk of heap. No signature is involved: the caller holds a console
+    // session, not an S3 secret.
+    app.registerHandler(
+        "/_mb/api/upload",
+        [&config, &storage, &cache, guard, offload](const HttpRequestPtr& req,
+                                                    ResponseCallback&& callback) {
+            guard(req, callback, [&config, &storage, &cache, req, callback,
+                                  offload](const std::string&) {
+                const std::string bucket = req->getParameter("bucket");
+                const std::string key    = req->getParameter("key");
+                if (bucket.empty() || key.empty()) {
+                    callback(errorJson("a bucket and key are required", drogon::k400BadRequest));
+                    return;
+                }
+                // The same rule the S3 key validator applies. Refusing here
+                // means the browser is told which name is the problem instead
+                // of finding out after the bytes have been sent.
+                if (key.size() > 1024 || key.front() == '/' || key.find("//") != std::string::npos ||
+                    key.find("..") != std::string::npos) {
+                    callback(errorJson("that object key is not valid", drogon::k400BadRequest));
+                    return;
+                }
+
+                std::string contentType = std::string(req->getHeader("content-type"));
+                if (contentType.empty()) contentType = "application/octet-stream";
+
+                offload(callback, [&config, &storage, &cache, req, bucket, key,
+                                   contentType]() -> HttpResponsePtr {
+                    if (!storage.getBucket(bucket)) {
+                        return errorJson("no such bucket", drogon::k404NotFound);
+                    }
+
+                    StorageEngine::PutRequest put;
+                    put.bucket      = bucket;
+                    put.key         = key;
+                    put.contentType = contentType;
+
+                    // `req` is kept alive by this closure, which is what keeps
+                    // the body's mapping valid for the whole write.
+                    const std::string_view payload = req->getBody();
+                    const std::size_t chunk = std::max<std::size_t>(config.streamChunkBytes, 1);
+
+                    BlobWriter writer = storage.beginWrite();
+                    for (std::size_t at = 0; at < payload.size(); at += chunk) {
+                        writer.write(payload.substr(at, chunk));
+                    }
+
+                    const ObjectRecord record = storage.finishWrite(put, std::move(writer));
+
+                    // After the write, never before: a failed upload must not
+                    // drop a cached entry that is still the current one.
+                    cache.del(s3::objectCacheKey(bucket, key));
+
+                    return jsonResponse(toJson(record), drogon::k201Created);
+                });
+            });
+        },
+        {drogon::Put});
 
     app.registerHandler(
         "/_mb/api/object",
@@ -913,7 +1147,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // real work: a gap in a graph is cheaper than a slower PUT.
     drogon::app().getLoop()->runEvery(kSampleIntervalSeconds, [state, &storage, &io, &cache,
                                                                &s3Metrics] {
-        const bool accepted = io.post([state, &storage, &io, &cache, &s3Metrics] {
+        // Read here rather than inside the posted task: by the time the task
+        // runs it is one of the things being counted, and the number would
+        // include the queue delay as if it were load.
+        const std::int64_t connectionCount = drogon::app().getConnectionCount();
+
+        const bool accepted = io.post([state, &storage, &io, &cache, &s3Metrics,
+                                       connectionCount] {
             try {
                 const auto stats      = storage.stats();
                 const auto ioStats    = io.stats();
@@ -938,6 +1178,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 reading.cacheBytes    = cacheStats.bytes;
                 reading.ioQueued      = ioStats.queued;
                 reading.ioActive      = ioStats.active;
+                reading.connections =
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(0, connectionCount));
 
                 state->history.record(reading);
             } catch (const std::exception& error) {

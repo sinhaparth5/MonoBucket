@@ -3,18 +3,106 @@
 
 /* Two themes, not thirty-five. Every enabled theme emits its full variable block
    into the stylesheet, and this stylesheet is compiled into the binary — so the
-   theme list is a size decision, not a taste one.
+   theme list is a size decision, not a taste one. Both are defined here rather
+   than borrowed from daisyUI's built-ins: the built-in pair that came closest
+   (corporate / night) is neutral to the point of having no identity, and a
+   console whose only colours are its alert states gives a reader nothing to
+   navigate by.
 
-   corporate: white surfaces, base-content at L=22% against L=100% (~14:1).
-   night:     L=21% surfaces, base-content at L=84% (~12:1).
+   The two share one hue axis (264-268, a cool slate-indigo) so that flipping to
+   dark changes the light level and nothing else. Surfaces carry a trace of that
+   hue rather than being pure grey; at C=0.003–0.02 it is not a colour anyone
+   would name, but it is the difference between a page that looks designed and
+   one that looks unstyled.
 
-   Both use a blue primary in the same hue family (241 / 233), so the brand
-   colour does not shift when the OS flips to dark. */
+   Contrast, measured against the surface each is used on:
+     light  base-content on base-100  ~13:1     dark  ~12:1
+     light  primary      on base-100  ~7.4:1    dark  primary-content on primary ~9:1
+   Every semantic pair clears WCAG AA for body text; warning is the tight one in
+   light mode, which is why its content colour is dark rather than white. */
 @plugin "daisyui" {
-	themes:
-		corporate --default,
-		night --prefersdark;
+	themes: false;
 	logs: false;
+}
+
+@plugin "daisyui/theme" {
+	name: 'monobucket';
+	default: true;
+	prefersdark: false;
+	color-scheme: light;
+
+	--color-base-100: oklch(99.2% 0.003 264);
+	--color-base-200: oklch(96.6% 0.006 264);
+	--color-base-300: oklch(92.2% 0.011 264);
+	--color-base-content: oklch(27% 0.028 265);
+	--color-primary: oklch(53% 0.19 268);
+	--color-primary-content: oklch(98.5% 0.012 268);
+	--color-secondary: oklch(56% 0.14 216);
+	--color-secondary-content: oklch(98.5% 0.01 216);
+	--color-accent: oklch(60% 0.15 172);
+	--color-accent-content: oklch(98.5% 0.01 172);
+	--color-neutral: oklch(32% 0.03 266);
+	--color-neutral-content: oklch(97% 0.008 266);
+	--color-info: oklch(58% 0.13 232);
+	--color-info-content: oklch(98.5% 0.01 232);
+	--color-success: oklch(58% 0.14 152);
+	--color-success-content: oklch(98.5% 0.01 152);
+	--color-warning: oklch(74% 0.15 72);
+	--color-warning-content: oklch(26% 0.05 72);
+	--color-error: oklch(57% 0.2 25);
+	--color-error-content: oklch(98.5% 0.01 25);
+
+	--radius-selector: 1rem;
+	--radius-field: 0.5rem;
+	--radius-box: 0.5rem;
+
+	--size-selector: 0.25rem;
+	--size-field: 0.25rem;
+
+	--border: 1px;
+
+	--depth: 1;
+	--noise: 0;
+}
+
+@plugin "daisyui/theme" {
+	name: 'monobucket-dark';
+	default: false;
+	prefersdark: true;
+	color-scheme: dark;
+
+	--color-base-100: oklch(22.5% 0.018 264);
+	--color-base-200: oklch(18.2% 0.017 264);
+	--color-base-300: oklch(29% 0.021 264);
+	--color-base-content: oklch(91% 0.014 264);
+	--color-primary: oklch(70% 0.16 268);
+	--color-primary-content: oklch(17% 0.04 268);
+	--color-secondary: oklch(72% 0.12 216);
+	--color-secondary-content: oklch(17% 0.03 216);
+	--color-accent: oklch(74% 0.14 172);
+	--color-accent-content: oklch(17% 0.03 172);
+	--color-neutral: oklch(30% 0.022 264);
+	--color-neutral-content: oklch(93% 0.012 264);
+	--color-info: oklch(73% 0.12 232);
+	--color-info-content: oklch(17% 0.03 232);
+	--color-success: oklch(74% 0.15 152);
+	--color-success-content: oklch(17% 0.03 152);
+	--color-warning: oklch(80% 0.14 72);
+	--color-warning-content: oklch(20% 0.04 72);
+	--color-error: oklch(68% 0.18 25);
+	--color-error-content: oklch(17% 0.04 25);
+
+	--radius-selector: 1rem;
+	--radius-field: 0.5rem;
+	--radius-box: 0.5rem;
+
+	--size-selector: 0.25rem;
+	--size-field: 0.25rem;
+
+	--border: 1px;
+
+	--depth: 1;
+	--noise: 0;
 }
 
 /* Inter, latin subset only, served from the binary. The console must not fetch
@@ -89,5 +177,62 @@
 	.stat-value,
 	.font-mono {
 		font-variant-numeric: tabular-nums;
+	}
+
+	/* A `fieldset` carries `min-inline-size: min-content` from the user agent,
+	   and daisyUI's `.label` sets `white-space: nowrap`. Together they mean one
+	   line of helper text sets a floor the fieldset will not shrink below — so a
+	   sentence of guidance pushes the whole field, and the modal around it, past
+	   the width it was given. Neutralised here rather than per form: the trap is
+	   in the element, so every fieldset that ever gets written falls into it.
+
+	   Helper text still belongs in `.fieldset-label`, which wraps. This only
+	   stops the layout from breaking when something forgets. */
+	fieldset {
+		min-inline-size: 0;
+	}
+
+	/* Nothing in a console needs to move for longer than it takes to notice that
+	   it moved, and someone who has asked the system for less motion has said so
+	   about every animation, not only the ones we remembered to check. */
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+			scroll-behavior: auto !important;
+		}
+	}
+}
+
+/* `--radius-selector: 1rem` is what makes toggles and badges read as pills, and
+   it is applied to checkboxes too — where a fully round box is a radio button as
+   far as anyone looking at it is concerned. The CORS editor has five checkboxes
+   in a row and no radios anywhere, so the shape is the only thing saying "more
+   than one of these". */
+@utility checkbox {
+	border-radius: 0.375rem;
+}
+
+@layer components {
+	/* The one bespoke surface treatment, used for page and panel headers. A flat
+	   fill would be fine; this is a two-stop wash off the brand hue that reads as
+	   depth without becoming decoration, and it costs one gradient. */
+	.surface-raised {
+		background-image: linear-gradient(
+			to bottom,
+			color-mix(in oklab, var(--color-primary) 4%, var(--color-base-100)),
+			var(--color-base-100)
+		);
+	}
+
+	/* Panels are all the same three decisions — surface, hairline, radius — and
+	   writing them out at every call site is how they drift apart. */
+	.panel {
+		background-color: var(--color-base-100);
+		border: var(--border) solid var(--color-base-300);
+		border-radius: var(--radius-box);
 	}
 }

@@ -4,6 +4,25 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
+		<meta name="color-scheme" content="light dark" />
+		<script>
+			// Before first paint, and deliberately not in a component: the console
+			// is a static SPA, so the shell reaches the browser as plain HTML and
+			// anything that runs after hydration runs one painted frame too late.
+			// A saved dark preference would show as a white flash, once per load.
+			//
+			// No saved choice means no attribute, which leaves the theme to the
+			// `prefersdark` media query — "follow the system" is the absence of a
+			// decision rather than a third value to store.
+			try {
+				const saved = localStorage.getItem('mb-theme');
+				if (saved === 'monobucket' || saved === 'monobucket-dark') {
+					document.documentElement.dataset.theme = saved;
+				}
+			} catch {
+				// Private mode, or storage disabled. The system preference stands.
+			}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

@@ -5,11 +5,14 @@ SvelteKit administration dashboard compiled into the executable.
 
 One binary. One container. No sidecars, no external database.
 
-> **Status: pre-alpha.** Phases 1–4 (scaffolding and lifecycle, the storage
-> engine, the cache layer, the S3 REST API) and the Phase 5 embedding pipeline
-> are in place. `aws s3`, `boto3` and `rclone` all work against it. The
-> dashboard itself does not exist yet — the console port serves an empty SPA.
-> See [ROADMAP.md](ROADMAP.md). Do not put data you cannot lose in it.
+> **Status: pre-alpha.** Phases 1–5 are in place: scaffolding and lifecycle, the
+> storage engine, the cache layer, the S3 REST API, and the dashboard with its
+> embedding pipeline. `aws s3`, `boto3` and `rclone` all work against it, and
+> the console port serves a working admin UI — overview graphs, a bucket list, a
+> file browser with drag-and-drop upload, presigned links, and bucket policy and
+> CORS editors. See [ROADMAP.md](ROADMAP.md) for what is still open, notably
+> `io_uring`, `fsck`, and the Phase 7 conformance and benchmark suites. Do not
+> put data you cannot lose in it.
 
 ---
 
@@ -130,6 +133,13 @@ cmake --build --preset release
 
 Without `MONOBUCKET_EMBED_FRONTEND=ON` the binary compiles with an empty asset
 table and the console port returns 404 — useful while working on the engine.
+
+The embedder also pre-compresses every text asset with `gzip` and `brotli` and
+bakes the variants in beside the original, so the console negotiates on
+`Accept-Encoding` without compressing anything per request. Both compressors are
+optional: if neither is on `PATH` the table carries no variants and every
+response is the original. A variant is kept only where it saves at least a
+tenth, so fonts and images have none.
 
 ### How it was scaffolded
 
@@ -283,7 +293,14 @@ System routes, on both listeners unless noted:
 | `GET /readyz` | both | Readiness |
 | `GET /metrics` | both | Prometheus text format |
 | `GET /_mb/version` | both | Version and build info |
-| `GET /_mb/config` | console | Resolved configuration, secrets redacted |
+
+The console API lives under `/_mb/api/*` on the console listener only. It is
+session-authenticated — the root key pair is exchanged for an HttpOnly cookie,
+so the browser never holds an S3 secret — and covers the dashboard's needs:
+`/session`, `/login`, `/logout`, `/overview`, `/series`, `/config`, `/buckets`
+and its `/access`, `/policy` and `/cors` subresources, `/objects`, `/object`,
+`/upload` and `/presign`. It is not a second S3 API and is not stable; use the
+S3 port for anything programmatic.
 
 The S3 API, on port 9000:
 

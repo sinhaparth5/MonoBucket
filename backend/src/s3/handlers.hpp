@@ -80,10 +80,12 @@ void invalidateObject(const S3Context& context, std::string_view bucket, std::st
 /// already empty, so this exists for the bucket record itself.
 void invalidateBucket(const S3Context& context, std::string_view name);
 
-/// The key a bucket record is cached under. Exposed because the console changes
-/// bucket settings without an S3Context, and a stale entry here is what would
-/// keep the S3 read path answering from the settings that were just replaced.
+/// The keys a bucket record and an object record are cached under. Exposed
+/// because the console mutates both without an S3Context, and a stale entry
+/// here is what would keep the S3 read path answering from state the console
+/// has just replaced.
 std::string bucketCacheKey(std::string_view name);
+std::string objectCacheKey(std::string_view bucket, std::string_view key);
 
 // --- Handlers --------------------------------------------------------------
 //
@@ -103,6 +105,18 @@ drogon::HttpResponsePtr handlePutBucketAcl(const S3Context&, const S3Request&,
 drogon::HttpResponsePtr handleGetBucketPolicy(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handlePutBucketPolicy(const S3Context&, const S3Request&, const S3Body&);
 drogon::HttpResponsePtr handleDeleteBucketPolicy(const S3Context&, const S3Request&);
+
+/// Throws `S3Exception(InvalidArgument)` for a document S3 itself would refuse:
+/// empty, larger than 20 KB, or not JSON.
+void validateBucketPolicy(const std::string& document);
+
+/// Whether a policy document grants anonymous reads of this bucket's objects.
+///
+/// Deliberately a narrow reading of one shape of policy rather than an IAM
+/// evaluator: a document it does not recognise grants nothing. Exposed because
+/// the console writes policies too, and two readings of the same document would
+/// eventually be two different answers to "is this bucket public".
+bool policyGrantsAnonymousRead(const std::string& document, std::string_view bucket);
 drogon::HttpResponsePtr handleDeleteObjects(const S3Context&, const S3Request&,
                                             const drogon::HttpRequestPtr&, const S3Body&);
 

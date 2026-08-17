@@ -46,11 +46,6 @@ HttpResponsePtr textResponse(std::string body, const char* contentType) {
     return resp;
 }
 
-/// True when the request arrived on the console listener rather than the S3 one.
-bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
-    return req->getLocalAddr().toPort() == config.consolePort;
-}
-
 std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecutor& io,
                           CacheProvider& cache, const s3::S3Metrics& s3Metrics) {
     std::ostringstream os;
@@ -71,6 +66,12 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
     os << "# HELP monobucket_worker_threads Configured event-loop worker threads.\n"
        << "# TYPE monobucket_worker_threads gauge\n"
        << "monobucket_worker_threads " << config.workerThreads << '\n';
+
+    // Both listeners together: Drogon counts connections per process, not per
+    // listener, and splitting the number here would mean inventing the split.
+    os << "# HELP monobucket_connections Client connections open across all listeners.\n"
+       << "# TYPE monobucket_connections gauge\n"
+       << "monobucket_connections " << drogon::app().getConnectionCount() << '\n';
 
     os << "# HELP monobucket_embedded_asset_bytes Size of the dashboard baked into the binary.\n"
        << "# TYPE monobucket_embedded_asset_bytes gauge\n"
@@ -292,20 +293,10 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
             {drogon::Get});
     }
 
-    // Read-only view of the effective configuration for the settings panel.
-    app.registerHandler(
-        "/_mb/config",
-        [&config](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            if (!onConsoleListener(req, config)) {
-                callback(jsonResponse({{"error", "not found"}}, drogon::k404NotFound));
-                return;
-            }
-            callback(jsonResponse(config.toJson()));
-        },
-        {drogon::Get});
 }
 
-drogon::HttpResponsePtr consoleAssetResponse(const std::string& path) {
+drogon::HttpResponsePtr consoleAssetResponse(const std::string& path,
+                                             std::string_view acceptEncoding) {
     if (!assets::embedded()) return nullptr;
 
     // `/_mb/` is the server's own namespace, not a client route. Without this,
@@ -323,10 +314,22 @@ drogon::HttpResponsePtr consoleAssetResponse(const std::string& path) {
     }
     if (asset == nullptr) return nullptr;
 
+    const assets::Encoded body = assets::encodedFor(*asset, acceptEncoding);
+
     auto resp = HttpResponse::newHttpResponse();
     resp->setStatusCode(drogon::k200OK);
     resp->setContentTypeString(std::string(asset->mime));
-    resp->setBody(std::string(reinterpret_cast<const char*>(asset->data), asset->size));
+    resp->setBody(std::string(reinterpret_cast<const char*>(body.data), body.size));
+
+    if (!body.encoding.empty()) {
+        resp->addHeader("Content-Encoding", std::string(body.encoding));
+        // Named whether or not a variant was chosen for this particular
+        // request: a shared cache that stored the brotli answer under an
+        // unqualified key would hand it to a client that cannot read it.
+    }
+    if (asset->gzip != nullptr || asset->brotli != nullptr) {
+        resp->addHeader("Vary", "Accept-Encoding");
+    }
 
     // SvelteKit fingerprints everything under /_app/immutable/.
     if (path.rfind("/_app/immutable/", 0) == 0) {

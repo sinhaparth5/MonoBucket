@@ -55,6 +55,11 @@ RUN apk add --no-cache \
         openssl-dev \
         zlib-dev \
         brotli-dev \
+        # The CLI, not the library: the asset embedder shells out to `brotli` and
+        # `gzip` (busybox) to pre-compress the dashboard once at build time. Both
+        # are optional — without them the table simply carries no variants — but
+        # a release image should ship them.
+        brotli \
         jsoncpp-dev \
         util-linux-dev \
         c-ares-dev \

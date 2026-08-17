@@ -139,13 +139,60 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   the bucket in the list. It reads and writes the same rules through the same
   validation as the S3 API — one feature with two front doors, not two
   implementations that can disagree about what a valid rule is.
-- **A visual language for the console.** Two daisyUI themes, `corporate` and
-  `night`, chosen for contrast measured rather than eyeballed (~14:1 and ~12:1)
-  and sharing a blue primary so the brand colour does not shift when the OS
-  flips to dark. Only those two are enabled: every theme emits a full variable
-  block into a stylesheet that ships inside the binary. Inter is self-hosted
-  from the latin subset alone — 48 KB rather than the ~400 KB of the full
-  fontsource package — because the console must fetch nothing from the network.
+- **A drag-and-drop uploader** on the bucket page, with per-file progress, a
+  queue three transfers wide and cancellation that leaves nothing behind. Files
+  go to `PUT /_mb/api/upload` one request each and are streamed into the payload
+  tree in fixed-size chunks; Drogon spills anything above
+  `MONOBUCKET_MAX_MEMORY_BODY_BYTES` to a file and hands back a mapping of it,
+  so a five-gigabyte upload is five gigabytes of page cache and one chunk of
+  heap. The console does not chunk the request itself: a resumable console
+  protocol would be a second upload session to design and get wrong, and the S3
+  listener already has the one S3 clients use. Progress comes from
+  `XMLHttpRequest` because `fetch` still cannot report how much of a request
+  body has gone out, and a progress bar that cannot is a spinner wearing a
+  percentage.
+- **A bucket policy editor**, sharing `validateBucketPolicy` and
+  `policyGrantsAnonymousRead` with the S3 `?policy` endpoint so the console and
+  the wire cannot disagree about what a document means. It is a textarea rather
+  than a builder: a policy has a published grammar, it is usually pasted in from
+  somewhere that already has one, and a form limited to the shapes we thought of
+  would quietly refuse the rest. What the console adds is the server's own
+  reading — whether the document grants an unauthenticated `GetObject` —
+  recomputed on every write, so removing the statement removes the access.
+- **A settings panel**, read-only and behind the session. It shows the
+  configuration this process resolved at startup, grouped the way someone asks
+  about it rather than the way `Config` is declared, with the `MONOBUCKET_*`
+  variable behind each value and a byte or duration reading beside the raw
+  number. Nothing is editable on purpose: configuration is environment only,
+  parsed once and validated before the first listener opens, and a panel with
+  save buttons would either lie about taking effect or invent a reload path that
+  does not exist.
+- **Open connections** on the overview, as a tile and a graph, and as
+  `monobucket_connections` on `/metrics`. Drogon counts connections per process
+  rather than per listener, so the number covers both and says so instead of
+  claiming a split that would have to be invented.
+- **Pre-compressed dashboard assets.** The embedder now runs `gzip` and `brotli`
+  over every text asset at build time and bakes the variants in beside the
+  original, and the console serves whichever the request's `Accept-Encoding`
+  allows, with `Vary: Accept-Encoding`. Compressing per request would spend CPU
+  re-deriving bytes that never change; this spends binary size instead, and only
+  where it pays — a variant is kept only if it saves at least a tenth, so fonts
+  and images have none and are served untouched. Both compressors are optional:
+  without them the table carries no variants and every response is the original.
+  The console stylesheet goes out at 21 KB instead of 147 KB.
+- **A visual language for the console.** Two purpose-built daisyUI themes,
+  `monobucket` and `monobucket-dark`, replacing the built-in pair the console
+  started on. The built-ins were neutral to the point of having no identity, and
+  a console whose only colours are its alert states gives a reader nothing to
+  navigate by. Both sit on one hue axis so flipping to dark changes the light
+  level and nothing else; surfaces carry a trace of that hue rather than being
+  grey; and every semantic pair clears WCAG AA against the surface it is used
+  on. The theme choice is stored and replayed before first paint rather than
+  held in a checkbox, so it survives a reload — with "follow the system" as the
+  absence of a choice rather than a third value. Icons are one inline set drawn
+  on a single grid, and Inter is self-hosted from the latin subset alone — 48 KB
+  rather than the ~400 KB of the full fontsource package — because the console
+  must fetch nothing from the network.
 
 <!-- Phase 4 — S3 REST API Protocol -->
 
@@ -196,6 +243,15 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   later.
 
 ### Changed
+
+- **`GET /_mb/config` is gone; the resolved configuration is now
+  `GET /_mb/api/config`, behind the console session.** The old route answered
+  anyone who could reach the console port, and what it answered names the data
+  directory and the root access key. It was added for a settings panel that did
+  not exist yet; the panel exists now, it authenticates like every other console
+  call, and the response carries the environment variable behind each setting
+  rather than the bare value. Nothing outside the dashboard is known to have
+  used the old path, but it was reachable, so it is called out here.
 
 - **Drogon is now always built from source unless a system copy is explicitly
   requested.** It is the one dependency MonoBucket patches (see *Fixed*), and a
@@ -366,6 +422,22 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   documenting every setting, and this changelog.
 
 ### Fixed
+
+- **A field in the create-bucket dialog grew straight through the side of it.**
+  A `fieldset` carries `min-inline-size: min-content` from the user agent, and
+  daisyUI's `.label` is `white-space: nowrap`; together, one line of helper text
+  set a floor the dialog could not meet, so the input and its guidance ran 88px
+  past the modal on a desktop and 114px past it on a phone. Helper text now uses
+  `.fieldset-label`, which wraps, and `fieldset { min-inline-size: 0 }` is set
+  globally — the trap is in the element, so every fieldset anyone ever writes
+  falls into it.
+
+- **Deleting an object in the console left it readable over S3.** The console's
+  delete removed the record but not the cached metadata the S3 read path answers
+  HEAD from, so the object went on existing for a whole cache TTL as far as any
+  client was concerned. The same gap as the anonymous-read one below, found
+  while auditing the rest of the console's writes; console uploads invalidate
+  the same key.
 
 - **Turning off anonymous read in the console took a cache TTL to take effect.**
   The console wrote the flag straight to the store, but the S3 read path answers

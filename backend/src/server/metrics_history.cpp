@@ -47,6 +47,7 @@ void MetricsHistory::record(const Reading& reading) {
     sample.cacheBytes    = reading.cacheBytes;
     sample.ioQueued      = reading.ioQueued;
     sample.ioActive      = reading.ioActive;
+    sample.connections   = reading.connections;
 
     ring_[next_] = sample;
     next_        = (next_ + 1) % ring_.size();

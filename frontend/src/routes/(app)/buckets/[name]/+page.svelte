@@ -13,6 +13,8 @@
 	} from '$lib/api';
 	import { formatBytes, formatTimestamp, leafName, plural } from '$lib/format';
 	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
+	import Icon from '$lib/components/Icon.svelte';
+	import Uploader from '$lib/components/Uploader.svelte';
 
 	let { data } = $props();
 
@@ -354,15 +356,160 @@
 			.then((rules) => (corsCount = rules.length))
 			.catch(() => (corsCount = 0));
 	});
+
+	// --- Bucket policy -------------------------------------------------------
+
+	// A textarea rather than a builder. A policy is an IAM document with a
+	// published grammar, it is usually pasted in from somewhere that already has
+	// one, and a form that could only express the shapes we thought of would
+	// quietly refuse the rest. What the console adds is the server's own reading
+	// of the document — whether it grants anonymous reads — which is the half
+	// that actually decides what happens on the wire.
+	const PUBLIC_READ_TEMPLATE = (name: string) =>
+		JSON.stringify(
+			{
+				Version: '2012-10-17',
+				Statement: [
+					{
+						Sid: 'PublicRead',
+						Effect: 'Allow',
+						Principal: '*',
+						Action: 's3:GetObject',
+						Resource: `arn:aws:s3:::${name}/*`
+					}
+				]
+			},
+			null,
+			2
+		);
+
+	let policyDialog: HTMLDialogElement;
+	let policyDraft = $state('');
+	let policyLoading = $state(false);
+	let policySaving = $state(false);
+	let policyError = $state('');
+	let policySaved = $state(false);
+	let hasPolicy = $state(false);
+	let policyPublicRead = $state(false);
+
+	/// Client-side only, and only to keep the Save button from sending something
+	/// the server will certainly refuse. The server validates again — it has to,
+	/// since the S3 API accepts the same document without going through here.
+	const policyMalformed = $derived.by(() => {
+		const text = policyDraft.trim();
+		if (!text) return '';
+		try {
+			JSON.parse(text);
+			return '';
+		} catch (cause) {
+			return cause instanceof Error ? cause.message : 'not valid JSON';
+		}
+	});
+
+	async function loadPolicy() {
+		policyLoading = true;
+		policyError = '';
+		policySaved = false;
+		try {
+			const current = await api.bucketPolicy(bucket);
+			hasPolicy = current.policy.length > 0;
+			policyPublicRead = current.publicRead;
+			// Pretty-printed on the way in so a document written by a client on
+			// one line is readable here, and left exactly as typed on the way
+			// back out.
+			policyDraft = current.policy ? format(current.policy) : '';
+		} catch (cause) {
+			policyError = cause instanceof ApiError ? cause.message : 'could not read the policy';
+		} finally {
+			policyLoading = false;
+		}
+	}
+
+	function format(document: string): string {
+		try {
+			return JSON.stringify(JSON.parse(document), null, 2);
+		} catch {
+			return document;
+		}
+	}
+
+	function openPolicy() {
+		policyDialog.showModal();
+		loadPolicy();
+	}
+
+	async function savePolicy() {
+		policySaving = true;
+		policyError = '';
+		policySaved = false;
+		try {
+			const saved = await api.setBucketPolicy(bucket, policyDraft.trim());
+			hasPolicy = saved.policy.length > 0;
+			policyPublicRead = saved.publicRead;
+			publicRead = saved.publicRead;
+			policySaved = true;
+			setTimeout(() => (policySaved = false), 2000);
+		} catch (cause) {
+			policyError = cause instanceof ApiError ? cause.message : 'could not save the policy';
+		} finally {
+			policySaving = false;
+		}
+	}
+
+	async function clearPolicy() {
+		policySaving = true;
+		policyError = '';
+		try {
+			const saved = await api.clearBucketPolicy(bucket);
+			hasPolicy = false;
+			policyPublicRead = saved.publicRead;
+			publicRead = saved.publicRead;
+			policyDraft = '';
+			policySaved = true;
+			setTimeout(() => (policySaved = false), 2000);
+		} catch (cause) {
+			policyError = cause instanceof ApiError ? cause.message : 'could not remove the policy';
+		} finally {
+			policySaving = false;
+		}
+	}
+
+	$effect(() => {
+		api
+			.bucketPolicy(bucket)
+			.then((current) => {
+				hasPolicy = current.policy.length > 0;
+				policyPublicRead = current.publicRead;
+			})
+			.catch(() => (hasPolicy = false));
+	});
+
+	// --- Uploads -------------------------------------------------------------
+
+	let uploadOpen = $state(false);
+
+	// --- Presentation --------------------------------------------------------
+
+	/// A file's icon by extension. Only the families worth telling apart at a
+	/// glance in a listing; everything else is a file, which is honest.
+	function fileIcon(key: string): 'file' | 'memory' | 'overview' | 'globe' {
+		const extension = key.slice(key.lastIndexOf('.') + 1).toLowerCase();
+		if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'avif'].includes(extension)) {
+			return 'globe';
+		}
+		if (['json', 'xml', 'yaml', 'yml', 'csv', 'toml'].includes(extension)) return 'overview';
+		if (['zip', 'gz', 'tar', 'br', 'zst', 'bz2', '7z'].includes(extension)) return 'memory';
+		return 'file';
+	}
 </script>
 
 <svelte:head><title>{bucket} · MonoBucket</title></svelte:head>
 
 <div class="flex flex-col gap-5">
-	<div class="flex flex-col gap-2">
+	<div class="flex flex-col gap-3">
 		<div class="breadcrumbs py-0 text-sm">
 			<ul>
-				<li><a href={resolve('/buckets')}>Buckets</a></li>
+				<li><a class="link-hover" href={resolve('/buckets')}>Buckets</a></li>
 				<li>
 					<button class="link link-hover" onclick={() => navigate('')}>{bucket}</button>
 				</li>
@@ -376,19 +523,54 @@
 			</ul>
 		</div>
 
-		<div class="flex flex-wrap items-baseline justify-between gap-3">
-			<h1 class="text-2xl font-semibold">{crumbs.at(-1)?.label ?? bucket}</h1>
-			<div class="flex items-baseline gap-3">
-				<span class="text-base-content/60 text-xs">
-					{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
-						totalBytes
-					)}{truncated ? ' so far' : ''}
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<div class="flex min-w-0 items-center gap-3">
+				<span
+					class="bg-primary/10 text-primary grid size-10 shrink-0 place-items-center rounded-xl"
+				>
+					<Icon name={prefix ? 'folder' : 'bucket'} class="size-5" />
 				</span>
-				<button class="btn btn-ghost btn-xs" onclick={openCors}>
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<h1 class="truncate text-2xl font-semibold tracking-tight">
+						{crumbs.at(-1)?.label ?? bucket}
+					</h1>
+					<p class="text-base-content/55 text-xs">
+						{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
+							totalBytes
+						)}{truncated ? ' so far' : ''}
+					</p>
+				</div>
+			</div>
+
+			<div class="flex flex-wrap items-center gap-2">
+				{#if publicRead}
+					<span class="badge badge-sm badge-success badge-soft gap-1">
+						<Icon name="globe" class="size-3" />
+						anonymous read
+					</span>
+				{/if}
+
+				<button
+					class="btn btn-sm gap-1.5 {hasPolicy ? 'btn-ghost' : 'btn-ghost'}"
+					onclick={openPolicy}
+				>
+					<Icon name="shield" class="size-3.5" />
+					Policy
+					{#if hasPolicy}<span class="badge badge-xs badge-primary"></span>{/if}
+				</button>
+
+				<button class="btn btn-ghost btn-sm gap-1.5" onclick={openCors}>
+					<Icon name="globe" class="size-3.5" />
 					CORS
-					{#if corsCount > 0}
-						<span class="badge badge-xs badge-ghost">{corsCount}</span>
-					{/if}
+					{#if corsCount > 0}<span class="badge badge-xs badge-ghost">{corsCount}</span>{/if}
+				</button>
+
+				<button
+					class="btn btn-sm gap-1.5 {uploadOpen ? 'btn-neutral' : 'btn-primary'}"
+					onclick={() => (uploadOpen = !uploadOpen)}
+				>
+					<Icon name={uploadOpen ? 'close' : 'upload'} class="size-3.5" />
+					{uploadOpen ? 'Close' : 'Upload'}
 				</button>
 			</div>
 		</div>
@@ -396,24 +578,44 @@
 
 	{#if error}
 		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+			<Icon name="warning" />
 			<span>{error}</span>
+		</div>
+	{/if}
+
+	{#if uploadOpen}
+		<div transition:fly={{ y: -8, duration: 200 }}>
+			<Uploader {bucket} {prefix} onfinished={() => loadFirstPage(bucket, prefix)} />
 		</div>
 	{/if}
 
 	{#if loading}
 		<div class="skeleton rounded-box h-64"></div>
 	{:else if prefixes.length === 0 && objects.length === 0}
-		<div class="border-base-300 rounded-box border border-dashed p-8">
-			<p class="text-base-content/70">
-				Nothing here. Upload with <code class="font-mono">aws s3 cp</code> against the S3 port — the console's
-				own uploader is not built yet.
-			</p>
+		<div
+			class="panel surface-raised flex flex-col items-center gap-3 border-dashed px-6 py-12 text-center"
+		>
+			<span class="bg-primary/10 text-primary grid size-12 place-items-center rounded-xl">
+				<Icon name="upload" class="size-6" />
+			</span>
+			<div class="flex flex-col gap-1">
+				<p class="font-medium">Nothing here yet</p>
+				<p class="text-base-content/60 max-w-md text-sm">
+					Drop files in from the Upload button, or push them with
+					<code class="bg-base-200 rounded px-1 py-0.5 font-mono text-xs">aws s3 cp</code> against the
+					S3 port.
+				</p>
+			</div>
+			<button class="btn btn-primary btn-sm gap-1.5" onclick={() => (uploadOpen = true)}>
+				<Icon name="upload" class="size-3.5" />
+				Upload files
+			</button>
 		</div>
 	{:else}
-		<div class="border-base-300 bg-base-100 rounded-box overflow-x-auto border">
+		<div class="panel overflow-x-auto">
 			<table class="table table-sm table-pin-rows">
 				<thead>
-					<tr>
+					<tr class="border-base-300">
 						<th>Name</th>
 						<th class="w-32">Size</th>
 						<th class="w-48">Modified</th>
@@ -422,25 +624,22 @@
 				</thead>
 				<tbody>
 					{#each prefixes as folder (folder)}
-						<tr in:fade={{ duration: 120 }}>
+						<tr class="hover:bg-base-200/70 transition-colors" in:fade={{ duration: 120 }}>
 							<td colspan="3">
 								<button
-									class="link link-hover flex items-center gap-2 font-medium"
+									class="group flex items-center gap-2.5 font-medium"
 									onclick={() => navigate(folder)}
 								>
-									<svg
-										class="text-base-content/40 size-4 shrink-0"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="2"
+									<span
+										class="bg-warning/12 text-warning grid size-7 shrink-0 place-items-center rounded-lg"
 									>
-										<path
-											d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"
-											stroke-linejoin="round"
-										/>
-									</svg>
-									{leafName(folder, prefix)}
+										<Icon name="folder" class="size-3.5" />
+									</span>
+									<span class="group-hover:underline">{leafName(folder, prefix)}</span>
+									<Icon
+										name="chevronRight"
+										class="text-base-content/30 size-3.5 transition-transform group-hover:translate-x-0.5"
+									/>
 								</button>
 							</td>
 							<td></td>
@@ -448,26 +647,35 @@
 					{/each}
 
 					{#each objects as object (object.key)}
-						<tr in:fade={{ duration: 120 }}>
+						<tr class="hover:bg-base-200/70 transition-colors" in:fade={{ duration: 120 }}>
 							<td class="max-w-md">
 								<button
-									class="link link-hover block truncate text-left font-mono text-xs"
+									class="group flex w-full items-center gap-2.5 text-left"
 									title={object.key}
 									onclick={() => openDetail(object)}
 								>
-									{leafName(object.key, prefix)}
+									<span
+										class="bg-base-200 text-base-content/50 grid size-7 shrink-0 place-items-center rounded-lg"
+									>
+										<Icon name={fileIcon(object.key)} class="size-3.5" />
+									</span>
+									<span class="truncate font-mono text-xs group-hover:underline">
+										{leafName(object.key, prefix)}
+									</span>
 								</button>
 							</td>
-							<td>{formatBytes(object.size)}</td>
-							<td class="text-base-content/70">{formatTimestamp(object.lastModifiedMs)}</td>
+							<td class="tabular-nums">{formatBytes(object.size)}</td>
+							<td class="text-base-content/60">{formatTimestamp(object.lastModifiedMs)}</td>
 							<td>
 								<button
-									class="btn btn-ghost btn-xs text-error"
+									class="btn btn-ghost btn-xs text-error gap-1"
+									aria-label="Delete {object.key}"
 									onclick={() => {
 										pendingDelete = object;
 										deleteDialog.showModal();
 									}}
 								>
+									<Icon name="trash" class="size-3.5" />
 									Delete
 								</button>
 							</td>
@@ -478,7 +686,7 @@
 		</div>
 
 		{#if truncated}
-			<button class="btn btn-sm self-start" onclick={loadMore} disabled={loadingMore}>
+			<button class="btn btn-sm gap-1.5 self-start" onclick={loadMore} disabled={loadingMore}>
 				{#if loadingMore}<span class="loading loading-spinner loading-xs"></span>{/if}
 				Load more
 			</button>
@@ -496,7 +704,14 @@
 				<span class="text-base-content/60 text-sm">Reading metadata…</span>
 			</div>
 		{:else}
-			<h2 class="font-mono text-sm break-all">{detail.key}</h2>
+			<h2 class="flex items-start gap-2.5">
+				<span
+					class="bg-base-200 text-base-content/60 grid size-8 shrink-0 place-items-center rounded-lg"
+				>
+					<Icon name={fileIcon(detail.key)} class="size-4" />
+				</span>
+				<span class="pt-1.5 font-mono text-sm break-all">{detail.key}</span>
+			</h2>
 
 			<div class="mt-4 flex flex-col gap-1">
 				<div class="flex items-center justify-between gap-2">
@@ -660,7 +875,12 @@
 
 <dialog bind:this={corsDialog} class="modal">
 	<div class="modal-box max-w-3xl">
-		<h2 class="text-lg font-medium">Cross-origin access</h2>
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
+				<Icon name="globe" class="size-4" />
+			</span>
+			Cross-origin access
+		</h2>
 		<p class="text-base-content/70 mt-2 text-sm">
 			Rules are checked top to bottom and the first one that permits the origin, the method
 			<em>and</em> every header the browser asked about is the one that answers. A request no rule permits
@@ -699,7 +919,7 @@
 									placeholder="https://app.example.com, https://*.example.com"
 									bind:value={draft.origins}
 								/>
-								<p class="label">
+								<p class="fieldset-label">
 									Scheme and port are part of the match. One <code class="font-mono">*</code> per entry.
 								</p>
 							</fieldset>
@@ -729,7 +949,7 @@
 									placeholder="content-type, x-amz-*"
 									bind:value={draft.headers}
 								/>
-								<p class="label">What the browser may send. Blank permits none.</p>
+								<p class="fieldset-label">What the browser may send. Blank permits none.</p>
 							</fieldset>
 
 							<fieldset class="fieldset gap-1 p-0">
@@ -739,7 +959,9 @@
 									placeholder="ETag"
 									bind:value={draft.expose}
 								/>
-								<p class="label">What a script may read back. ETag is needed to upload in parts.</p>
+								<p class="fieldset-label">
+									What a script may read back. ETag is needed to upload in parts.
+								</p>
 							</fieldset>
 
 							<fieldset class="fieldset gap-1 p-0">
@@ -763,10 +985,11 @@
 				{/each}
 
 				<button
-					class="btn btn-ghost btn-sm self-start"
+					class="btn btn-ghost btn-sm border-base-300 hover:border-primary gap-1.5 self-start border border-dashed"
 					type="button"
 					onclick={() => (corsDrafts = [...corsDrafts, blankDraft()])}
 				>
+					<Icon name="plus" class="size-3.5" />
 					Add a rule
 				</button>
 			</div>
@@ -787,6 +1010,113 @@
 			<button class="btn btn-sm" type="button" onclick={() => corsDialog.close()}>Close</button>
 			<button class="btn btn-primary btn-sm" type="button" disabled={corsSaving} onclick={saveCors}>
 				{corsSaving ? 'Saving…' : 'Save rules'}
+			</button>
+		</div>
+	</div>
+	<form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog bind:this={policyDialog} class="modal">
+	<div class="modal-box max-w-3xl">
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
+				<Icon name="shield" class="size-4" />
+			</span>
+			Bucket policy
+		</h2>
+		<p class="text-base-content/70 mt-3 text-sm">
+			An IAM-shaped JSON document, stored and returned verbatim. MonoBucket does not evaluate it in
+			general — it reads one thing out of it: whether an unauthenticated <code class="font-mono"
+				>GetObject</code
+			>
+			is allowed. A statement it does not recognise, or one carrying a
+			<code class="font-mono">Condition</code>, grants nothing rather than being guessed at.
+		</p>
+
+		{#if policyError}
+			<div role="alert" class="alert alert-error alert-soft mt-4" in:fly={{ y: -6, duration: 200 }}>
+				<Icon name="warning" />
+				<span>{policyError}</span>
+			</div>
+		{/if}
+
+		{#if policyLoading}
+			<div class="skeleton rounded-box mt-4 h-64"></div>
+		{:else}
+			<div class="mt-4 flex flex-col gap-2">
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<span class="text-base-content/70 text-xs font-medium tracking-wide uppercase">
+						Document
+					</span>
+					<div class="flex items-center gap-2">
+						{#if hasPolicy}
+							{#if policyPublicRead}
+								<span class="badge badge-sm badge-success badge-soft gap-1">
+									<Icon name="globe" class="size-3" />
+									grants anonymous read
+								</span>
+							{:else}
+								<span class="badge badge-sm badge-ghost">grants no anonymous access</span>
+							{/if}
+						{/if}
+						<button
+							class="btn btn-ghost btn-xs"
+							type="button"
+							onclick={() => (policyDraft = PUBLIC_READ_TEMPLATE(bucket))}
+						>
+							Insert public-read template
+						</button>
+						<button
+							class="btn btn-ghost btn-xs"
+							type="button"
+							disabled={!policyDraft.trim() || policyMalformed !== ''}
+							onclick={() => (policyDraft = format(policyDraft))}
+						>
+							Reformat
+						</button>
+					</div>
+				</div>
+
+				<textarea
+					class="textarea h-72 w-full font-mono text-xs leading-relaxed {policyMalformed
+						? 'textarea-error'
+						: ''}"
+					spellcheck="false"
+					placeholder={'{\n  "Version": "2012-10-17",\n  "Statement": []\n}'}
+					aria-label="Bucket policy document"
+					bind:value={policyDraft}></textarea>
+
+				{#if policyMalformed}
+					<p class="text-error text-xs">{policyMalformed}</p>
+				{:else}
+					<p class="text-base-content/50 text-xs">
+						Up to 20 KB. Saving replaces whatever is there; the derived anonymous-read flag is
+						recomputed on every write, so removing the statement removes the access it granted.
+					</p>
+				{/if}
+			</div>
+		{/if}
+
+		<div class="modal-action">
+			{#if policySaved}
+				<span class="text-success self-center text-xs" in:fade={{ duration: 150 }}>Saved</span>
+			{/if}
+			<button
+				class="btn btn-ghost btn-sm"
+				type="button"
+				disabled={policySaving || !hasPolicy}
+				onclick={clearPolicy}
+			>
+				Remove policy
+			</button>
+			<button class="btn btn-sm" type="button" onclick={() => policyDialog.close()}>Close</button>
+			<button
+				class="btn btn-primary btn-sm"
+				type="button"
+				disabled={policySaving || policyMalformed !== '' || !policyDraft.trim()}
+				onclick={savePolicy}
+			>
+				{policySaving ? 'Saving…' : 'Save policy'}
 			</button>
 		</div>
 	</div>

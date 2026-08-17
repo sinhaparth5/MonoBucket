@@ -1,6 +1,7 @@
 #include "server/console_api.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,8 @@
 #include "core/logging.hpp"
 #include "monobucket/version.hpp"
 #include "s3/metrics.hpp"
+#include "s3/sigv4.hpp"
+#include "s3/uri.hpp"
 #include "server/metrics_history.hpp"
 #include "server/server.hpp"
 #include "server/system_routes.hpp"
@@ -51,6 +54,25 @@ constexpr std::size_t kSampleCapacity        = 240;
 /// so a per-IP bucket would only tell an attacker to change source addresses.
 constexpr int          kMaxFailedLogins    = 10;
 constexpr std::int64_t kLoginWindowSeconds = 60;
+
+/// S3's own ceiling on a presigned URL's lifetime. Repeated here rather than
+/// reached for through sigv4 because the console rejects an over-long request
+/// before it reaches an I/O thread.
+constexpr std::int64_t kMaxPresignSeconds = 604800;
+
+/// The console tells us which name the browser reached the deployment by,
+/// because `config.host` is normally 0.0.0.0 and knows no better. That string is
+/// signed and handed back inside a URL, so it is held to what a host and port
+/// can actually contain — not to stop an attack (the caller already holds the
+/// root credentials) but so a mistake surfaces as a 400 here instead of as a
+/// link that fails somewhere else.
+bool plausibleHost(const std::string& host) {
+    if (host.empty() || host.size() > 255) return false;
+    return std::all_of(host.begin(), host.end(), [](unsigned char ch) {
+        return std::isalnum(ch) != 0 || ch == '.' || ch == '-' || ch == ':' || ch == '[' ||
+               ch == ']';
+    });
+}
 
 std::int64_t nowSeconds() noexcept {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -656,6 +678,86 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             });
         },
         {drogon::Get});
+
+    // --- Presigned links ---------------------------------------------------
+
+    // Signing happens here rather than in the browser because the browser holds
+    // a session cookie, not an S3 secret — and giving it one to sign with would
+    // undo the reason the two are separate.
+    app.registerHandler(
+        "/_mb/api/presign",
+        [&config, &storage, guard, offload](const HttpRequestPtr& req,
+                                            ResponseCallback&& callback) {
+            guard(req, callback, [&config, &storage, req, callback, offload](const std::string&) {
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+
+                const auto bucket  = body.value("bucket", std::string{});
+                const auto key     = body.value("key", std::string{});
+                const auto host    = body.value("host", std::string{});
+                const bool secure  = body.value("secure", false);
+                const auto expires = body.value("expiresSeconds", std::int64_t{3600});
+
+                if (bucket.empty() || key.empty()) {
+                    callback(errorJson("a bucket and key are required", drogon::k400BadRequest));
+                    return;
+                }
+                if (!plausibleHost(host)) {
+                    callback(errorJson("a valid host is required", drogon::k400BadRequest));
+                    return;
+                }
+                if (expires <= 0 || expires > kMaxPresignSeconds) {
+                    callback(errorJson("expiresSeconds must be between 1 and 604800",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+
+                offload(callback, [&config, &storage, bucket, key, host, secure,
+                                   expires]() -> HttpResponsePtr {
+                    // A link to a key that is not there looks exactly like a link
+                    // that is wrong, and the difference only shows up after it has
+                    // been sent to someone. One stat is cheaper than that.
+                    if (!storage.statObject(bucket, key)) {
+                        return errorJson("no such key", drogon::k404NotFound);
+                    }
+
+                    // Virtual-host addressing only when the host really is this
+                    // bucket's subdomain of the configured endpoint. The two
+                    // forms sign different URIs, so guessing wrong produces a
+                    // signature that verifies against nothing.
+                    const bool virtualHost =
+                        !config.s3Domain.empty() && host == bucket + '.' + config.s3Domain;
+
+                    std::string path = "/";
+                    if (!virtualHost) {
+                        path += s3::uriEncode(bucket, true);
+                        path += '/';
+                    }
+                    path += s3::uriEncode(key, false);
+
+                    s3::PresignRequest presign;
+                    presign.method         = "GET";
+                    presign.host           = host;
+                    presign.uri            = path;
+                    presign.region         = config.region;
+                    presign.nowSeconds     = nowSeconds();
+                    presign.expiresSeconds = expires;
+
+                    const std::string query =
+                        s3::presignQuery(presign, {config.rootAccessKey, config.rootSecretKey});
+
+                    return jsonResponse(
+                        {{"url", (secure ? "https://" : "http://") + host + path + '?' + query},
+                         {"method", presign.method},
+                         {"expiresInSeconds", expires},
+                         {"expiresAtMs", (presign.nowSeconds + expires) * 1000}});
+                });
+            });
+        },
+        {drogon::Post});
 
     // --- Sampler -----------------------------------------------------------
 

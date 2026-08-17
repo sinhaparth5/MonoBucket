@@ -105,6 +105,17 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   domain and the client contributes the host. Copying falls back to selecting
   the field when `navigator.clipboard` is unavailable, which is every console
   served over plain HTTP to anything but localhost.
+- **A presigned link generator**, in the same metadata viewer: pick a lifetime
+  (15 minutes to 7 days, S3's own ceiling) and get a URL that grants an
+  unauthenticated GET of one private object until it expires. Signing happens on
+  the server — the console holds a session cookie, never an S3 secret, and
+  handing the browser one to sign with would undo the reason the two are kept
+  apart. `s3::presignQuery` shares `buildCanonicalRequest` and
+  `deriveSigningKey` with the verifier rather than reimplementing the canonical
+  form, and is tested against the same AWS worked example the verification path
+  uses: it reproduces the documented query string byte for byte. The endpoint
+  refuses a key that does not exist, because a link to a missing object is
+  indistinguishable from a wrong one until after it has been sent to someone.
 - **A visual language for the console.** Two daisyUI themes, `corporate` and
   `night`, chosen for contrast measured rather than eyeballed (~14:1 and ~12:1)
   and sharing a blue primary so the brand colour does not shift when the OS

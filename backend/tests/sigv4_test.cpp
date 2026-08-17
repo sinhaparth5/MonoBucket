@@ -213,6 +213,78 @@ TEST_CASE("a presigned URL stops working once it expires", "[sigv4]") {
                       S3Exception);
 }
 
+TEST_CASE("presigning reproduces the documented AWS query string", "[sigv4]") {
+    // The same worked example the verification test above consumes, generated
+    // rather than parsed. Matching it byte for byte is what says the console's
+    // links are S3's links and not merely ones this server would accept.
+    PresignRequest request;
+    request.method         = "GET";
+    request.host           = kHost;
+    request.uri            = "/test.txt";
+    request.region         = "us-east-1";
+    request.nowSeconds     = kExampleNow;
+    request.expiresSeconds = 86400;
+
+    REQUIRE(presignQuery(request, exampleCredentials()) ==
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request"
+            "&X-Amz-Date=20130524T000000Z"
+            "&X-Amz-Expires=86400"
+            "&X-Amz-SignedHeaders=host"
+            "&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404");
+}
+
+TEST_CASE("a minted URL grants one method against one host", "[sigv4]") {
+    PresignRequest request;
+    request.host           = "storage.example.com:9000";
+    request.uri            = "/photos/summer%20holiday.jpg";
+    request.nowSeconds     = kExampleNow;
+    request.expiresSeconds = 900;
+
+    const std::string query = presignQuery(request, exampleCredentials());
+
+    SigningRequest redeem;
+    redeem.method  = "GET";
+    redeem.uri     = request.uri;
+    redeem.query   = query;
+    redeem.headers = {{"host", request.host}};
+    REQUIRE_NOTHROW(authenticate(redeem, parseQuery(query), exampleCredentials(), defaultOptions()));
+
+    // The method is inside the signature, so a link handed out for reading
+    // cannot be turned into one for writing.
+    SigningRequest asPut = redeem;
+    asPut.method         = "PUT";
+    REQUIRE_THROWS_AS(authenticate(asPut, parseQuery(query), exampleCredentials(), defaultOptions()),
+                      S3Exception);
+
+    // As is the host, so the link does not carry to a second endpoint the same
+    // credentials happen to reach.
+    SigningRequest elsewhere = redeem;
+    elsewhere.headers        = {{"host", "storage.example.com:9001"}};
+    REQUIRE_THROWS_AS(
+        authenticate(elsewhere, parseQuery(query), exampleCredentials(), defaultOptions()),
+        S3Exception);
+}
+
+TEST_CASE("presigning refuses a lifetime S3 would not accept", "[sigv4]") {
+    PresignRequest request;
+    request.host       = kHost;
+    request.uri        = "/test.txt";
+    request.nowSeconds = kExampleNow;
+
+    request.expiresSeconds = 0;
+    REQUIRE_THROWS_AS(presignQuery(request, exampleCredentials()), S3Exception);
+
+    request.expiresSeconds = 604801;
+    REQUIRE_THROWS_AS(presignQuery(request, exampleCredentials()), S3Exception);
+
+    // A URL nothing binds to a host would be redeemable anywhere, and
+    // authenticate() would refuse it on arrival regardless.
+    request.expiresSeconds = 3600;
+    request.host           = "";
+    REQUIRE_THROWS_AS(presignQuery(request, exampleCredentials()), S3Exception);
+}
+
 TEST_CASE("no credentials at all is reported as anonymous rather than refused", "[sigv4]") {
     SigningRequest request;
     request.method  = "GET";

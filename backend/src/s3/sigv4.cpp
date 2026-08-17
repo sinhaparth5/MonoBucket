@@ -536,6 +536,55 @@ AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryP
     return outcome;
 }
 
+// --- Presigning ------------------------------------------------------------
+
+std::string presignQuery(const PresignRequest& request, const Credentials& credentials) {
+    if (request.expiresSeconds <= 0 || request.expiresSeconds > 604800) {
+        throw S3Exception(S3ErrorCode::InvalidArgument,
+                          "X-Amz-Expires must be between 1 and 604800 seconds.");
+    }
+    if (request.host.empty()) {
+        // authenticate() refuses a signature that does not cover a host, so a
+        // URL minted without one could never be redeemed.
+        throw S3Exception(S3ErrorCode::InvalidArgument,
+                          "A presigned URL must be bound to a host.");
+    }
+
+    const std::string amzDate   = formatAmzDate(request.nowSeconds);
+    const std::string dateStamp = amzDate.substr(0, 8);
+    const std::string scope =
+        dateStamp + '/' + request.region + '/' + kService + '/' + kTerminator;
+
+    std::vector<QueryParam> params;
+    const auto              add = [&params](std::string name, std::string value) {
+        params.push_back(QueryParam{std::move(name), std::move(value), true});
+    };
+    add("X-Amz-Algorithm", kAlgorithm);
+    add("X-Amz-Credential", credentials.accessKey + '/' + scope);
+    add("X-Amz-Date", amzDate);
+    add("X-Amz-Expires", std::to_string(request.expiresSeconds));
+    add("X-Amz-SignedHeaders", "host");
+
+    // The canonical query string is also the one that goes in the URL. Building
+    // it once means the bytes signed and the bytes sent cannot disagree about
+    // ordering or encoding.
+    const std::string query = canonicalQueryString(params);
+
+    SigningRequest signing;
+    signing.method = request.method;
+    signing.uri    = request.uri;
+    signing.query  = query;
+    signing.headers.emplace_back("host", request.host);
+
+    const CanonicalRequest canonical =
+        buildCanonicalRequest(signing, {"host"}, kUnsignedPayload);
+    const std::string signingKey =
+        deriveSigningKey(credentials.secretKey, dateStamp, request.region, kService);
+
+    return query + "&X-Amz-Signature=" +
+           sign(signingKey, stringToSign(amzDate, scope, sha256Hex(canonical.render())));
+}
+
 std::string chunkSignature(std::string_view signingKey, std::string_view amzDate,
                            std::string_view scope, std::string_view previousSignature,
                            std::string_view chunkSha256Hex) {

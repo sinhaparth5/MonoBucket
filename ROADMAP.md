@@ -222,7 +222,8 @@ browser holding an S3 secret cannot have console access revoked separately.
 - [x] File browser: delimiter-based folder walk, continuation pagination, object
       metadata viewer
 - [ ] Drag-and-drop chunked uploader with progress
-- [ ] Presigned link generator
+- [x] Presigned link generator, signed on the server so the browser never holds
+      an S3 secret (`s3::presignQuery`, `POST /_mb/api/presign`)
 - [ ] Settings panel: cache backend selection, RAM thresholds, API key
       management
 - [x] Auth for the console, separate from S3 credentials: the root key pair is

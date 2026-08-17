@@ -188,6 +188,23 @@ export interface ObjectDetail extends StoredObject {
 	userMetadata: Record<string, string>;
 }
 
+export interface Presigned {
+	url: string;
+	method: string;
+	expiresInSeconds: number;
+	expiresAtMs: number;
+}
+
+export interface PresignQuery {
+	bucket: string;
+	key: string;
+	/// The authority the recipient's browser will send. Signed, so the console
+	/// supplies the name it itself reached the server by — see $lib/s3url.
+	host: string;
+	secure: boolean;
+	expiresSeconds: number;
+}
+
 export interface ListQuery {
 	bucket: string;
 	prefix?: string;
@@ -242,6 +259,11 @@ export const api = {
 		request<ObjectDetail>(
 			`/object?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`
 		),
+
+	// Signed on the server: the browser has a session cookie, not an S3 secret,
+	// and handing it one to sign with would defeat keeping the two apart.
+	presign: (query: PresignQuery) =>
+		request<Presigned>('/presign', { method: 'POST', body: JSON.stringify(query) }),
 
 	deleteObject: (bucket: string, key: string) =>
 		request<{ deleted: string }>(

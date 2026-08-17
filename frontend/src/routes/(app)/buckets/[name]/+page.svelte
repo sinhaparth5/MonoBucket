@@ -3,9 +3,9 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type ObjectDetail, type StoredObject } from '$lib/api';
+	import { api, ApiError, type ObjectDetail, type Presigned, type StoredObject } from '$lib/api';
 	import { formatBytes, formatTimestamp, leafName, plural } from '$lib/format';
-	import { copyText, objectUrl } from '$lib/s3url';
+	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
 
 	let { data } = $props();
 
@@ -46,6 +46,48 @@
 	async function copyUrl() {
 		copied = await copyText(detailUrl, urlField);
 		setTimeout(() => (copied = false), 1500);
+	}
+
+	// Four choices rather than a number field: the server's range is 1 second to
+	// 7 days, and nobody wants a link that lives for 41 minutes.
+	const EXPIRY_CHOICES = [
+		{ label: '15 minutes', seconds: 900 },
+		{ label: '1 hour', seconds: 3600 },
+		{ label: '24 hours', seconds: 86400 },
+		{ label: '7 days', seconds: 604800 }
+	];
+
+	let expirySeconds = $state(3600);
+	let signing = $state(false);
+	let signed = $state<Presigned | null>(null);
+	let signError = $state('');
+	let signedField = $state<HTMLInputElement | undefined>();
+	let copiedSigned = $state(false);
+
+	async function generateLink() {
+		if (!detail) return;
+		signing = true;
+		signError = '';
+		try {
+			signed = await api.presign({
+				bucket,
+				key: detail.key,
+				// The endpoint the console itself reached, because the host is
+				// inside the signature and the server's own is usually 0.0.0.0.
+				...s3Endpoint(data.session, bucket),
+				expiresSeconds: expirySeconds
+			});
+		} catch (cause) {
+			signError = cause instanceof ApiError ? cause.message : 'could not sign a link';
+		} finally {
+			signing = false;
+		}
+	}
+
+	async function copySigned() {
+		if (!signed) return;
+		copiedSigned = await copyText(signed.url, signedField);
+		setTimeout(() => (copiedSigned = false), 1500);
 	}
 
 	async function loadFirstPage(currentBucket: string, currentPrefix: string) {
@@ -124,6 +166,10 @@
 		detail = null;
 		detailError = '';
 		copied = false;
+		// A link minted for the last object would be a link to the wrong thing.
+		signed = null;
+		signError = '';
+		copiedSigned = false;
 		detailDialog.showModal();
 		try {
 			detail = await api.object(bucket, object.key);
@@ -327,6 +373,63 @@
 						the address bar.
 					{/if}
 				</p>
+			</div>
+
+			<div class="mt-4 flex flex-col gap-1">
+				<div class="flex items-center justify-between gap-2">
+					<span class="text-base-content/70 text-xs font-medium tracking-wide uppercase">
+						Presigned link
+					</span>
+					<span class="badge badge-xs badge-ghost">read only, expires</span>
+				</div>
+				<div class="join w-full">
+					<select
+						class="select join-item"
+						bind:value={expirySeconds}
+						onchange={() => (signed = null)}
+						aria-label="How long the link stays valid"
+					>
+						{#each EXPIRY_CHOICES as choice (choice.seconds)}
+							<option value={choice.seconds}>{choice.label}</option>
+						{/each}
+					</select>
+					<button
+						class="btn btn-primary join-item"
+						type="button"
+						onclick={generateLink}
+						disabled={signing}
+					>
+						{#if signing}<span class="loading loading-spinner loading-xs"></span>{/if}
+						Generate
+					</button>
+				</div>
+
+				{#if signError}
+					<p class="text-error text-xs">{signError}</p>
+				{:else if signed}
+					<div class="join w-full" transition:fly={{ y: -4, duration: 150 }}>
+						<input
+							bind:this={signedField}
+							class="input join-item w-full font-mono text-xs"
+							readonly
+							value={signed.url}
+							aria-label="Presigned URL"
+							onfocus={(event) => event.currentTarget.select()}
+						/>
+						<button class="btn join-item" type="button" onclick={copySigned}>
+							{copiedSigned ? 'Copied' : 'Copy'}
+						</button>
+					</div>
+					<p class="text-base-content/50 text-xs">
+						Opens in any browser until {formatTimestamp(signed.expiresAtMs)}. The method is inside
+						the signature, so it grants a GET and nothing else.
+					</p>
+				{:else}
+					<p class="text-base-content/50 text-xs">
+						Shares one private object for a while without making the whole bucket public. Signed on
+						the server — the console holds a session, never an S3 secret.
+					</p>
+				{/if}
 			</div>
 
 			<div class="mt-4 overflow-x-auto">

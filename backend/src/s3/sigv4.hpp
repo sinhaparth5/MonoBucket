@@ -187,6 +187,46 @@ bool secureEquals(std::string_view a, std::string_view b) noexcept;
 AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryParam>& query,
                          const Credentials& credentials, const AuthOptions& options);
 
+// --- Presigning ------------------------------------------------------------
+
+/// What a presigned URL is minted from.
+struct PresignRequest {
+    /// A presigned GET does not authorise a PUT: the method is inside the
+    /// signature, so one URL grants exactly one verb.
+    std::string method = "GET";
+
+    /// The authority the client will send as `Host`, port included unless it is
+    /// the scheme default. It is signed, so a URL minted for one endpoint does
+    /// not carry to another.
+    std::string host;
+
+    /// The path, already percent-encoded by the caller — the same bytes that
+    /// will travel on the wire, because those are the bytes that get signed.
+    std::string uri;
+
+    std::string region = "us-east-1";
+
+    /// Unix seconds. Injected rather than read from the clock so the output is
+    /// reproducible in a test.
+    std::int64_t nowSeconds = 0;
+
+    /// S3's own bounds, 1 to 604800. Checked rather than clamped: a caller
+    /// asking for eight days wants something we cannot give, and quietly
+    /// handing back seven would be discovered when the link died early.
+    std::int64_t expiresSeconds = 3600;
+};
+
+/// Builds the query string of a presigned URL, `X-Amz-Signature` included and
+/// ready to follow a `?`.
+///
+/// It shares buildCanonicalRequest() and deriveSigningKey() with authenticate()
+/// deliberately. A generator that reimplements the canonical form drifts from
+/// the verifier, and the symptom is a 403 that says nothing about which of the
+/// two sides is wrong.
+///
+/// Throws S3Exception on an out-of-range lifetime or a missing host.
+std::string presignQuery(const PresignRequest& request, const Credentials& credentials);
+
 /// The signature for one `aws-chunked` chunk, chained from the previous one.
 /// The first call passes the request signature as `previousSignature`.
 std::string chunkSignature(std::string_view signingKey, std::string_view amzDate,

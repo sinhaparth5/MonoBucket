@@ -80,6 +80,11 @@ void invalidateObject(const S3Context& context, std::string_view bucket, std::st
 /// already empty, so this exists for the bucket record itself.
 void invalidateBucket(const S3Context& context, std::string_view name);
 
+/// The key a bucket record is cached under. Exposed because the console changes
+/// bucket settings without an S3Context, and a stale entry here is what would
+/// keep the S3 read path answering from the settings that were just replaced.
+std::string bucketCacheKey(std::string_view name);
+
 // --- Handlers --------------------------------------------------------------
 //
 // Each returns a complete response and runs on an I/O thread, never on the
@@ -100,6 +105,26 @@ drogon::HttpResponsePtr handlePutBucketPolicy(const S3Context&, const S3Request&
 drogon::HttpResponsePtr handleDeleteBucketPolicy(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handleDeleteObjects(const S3Context&, const S3Request&,
                                             const drogon::HttpRequestPtr&, const S3Body&);
+
+// CORS. The matching and the document schema live in `s3/cors.hpp`, which knows
+// nothing about Drogon; only these four need a request and a response.
+drogon::HttpResponsePtr handleGetBucketCors(const S3Context&, const S3Request&);
+drogon::HttpResponsePtr handlePutBucketCors(const S3Context&, const S3Request&, const S3Body&);
+drogon::HttpResponsePtr handleDeleteBucketCors(const S3Context&, const S3Request&);
+
+/// Answers an `OPTIONS` preflight.
+///
+/// Runs before authentication and must: a browser never attaches credentials to
+/// a preflight, so requiring a signature here would refuse every cross-origin
+/// request to a private bucket before the real, signed one was ever sent.
+drogon::HttpResponsePtr handlePreflight(const S3Context&, const S3Request&,
+                                        const drogon::HttpRequestPtr&);
+
+/// Adds the `Access-Control-*` headers to a response that has already been
+/// built. Does nothing when the request carried no Origin, when the bucket has
+/// no CORS rules, or when none of them match.
+void applyCorsHeaders(const S3Context&, const S3Request&, const drogon::HttpRequestPtr&,
+                      const drogon::HttpResponsePtr&);
 
 /// Serves HeadObject as well: Drogon rewrites HEAD to GET before routing, and
 /// suppresses the body when it writes the response, so the two operations share

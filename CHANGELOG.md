@@ -116,6 +116,29 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   uses: it reproduces the documented query string byte for byte. The endpoint
   refuses a key that does not exist, because a link to a missing object is
   indistinguishable from a wrong one until after it has been sent to someone.
+- **Bucket CORS**, per bucket and to S3's rules: `PUT`, `GET` and
+  `DELETE /<bucket>?cors`, an unauthenticated `OPTIONS` preflight, and
+  `Access-Control-*` decoration of ordinary responses that carry an `Origin`.
+  Rules are evaluated in document order and the first that permits the origin,
+  the method *and* every header the preflight asked about is the one that
+  answers; a rule that permits two of the three does not match at all, because
+  replying with a partial header list would let the browser send a request the
+  configuration never allowed. The preflight runs before signature verification
+  — a browser never attaches credentials to one, so requiring a signature would
+  refuse every cross-origin request to a private bucket before the real, signed
+  one was ever sent — and answers a missing bucket exactly as it answers a
+  bucket with no rules, so an unauthenticated caller cannot use it to discover
+  which buckets exist. `Access-Control-Allow-Origin` echoes the origin rather
+  than sending `*`, because a browser refuses `*` together with credentials.
+  Error responses are decorated too: a script that cannot read the 403 it got
+  back reports a network failure instead, which sends whoever is debugging it
+  looking at the wrong layer. Rules are stored decomposed rather than as the XML
+  they arrived in, appended to the bucket record behind a length check so that
+  buckets written before this release load unchanged.
+- **A CORS editor in the console**, on the bucket page, and a rule count beside
+  the bucket in the list. It reads and writes the same rules through the same
+  validation as the S3 API — one feature with two front doors, not two
+  implementations that can disagree about what a valid rule is.
 - **A visual language for the console.** Two daisyUI themes, `corporate` and
   `night`, chosen for contrast measured rather than eyeballed (~14:1 and ~12:1)
   and sharing a blue primary so the brand colour does not shift when the OS
@@ -343,6 +366,12 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   documenting every setting, and this changelog.
 
 ### Fixed
+
+- **Turning off anonymous read in the console took a cache TTL to take effect.**
+  The console wrote the flag straight to the store, but the S3 read path answers
+  from a cached bucket record, so unsigned GETs kept succeeding against a bucket
+  the dashboard already showed as private. Both console writes now drop the
+  cached record, as the S3 handlers already did.
 
 - **The console's SPA fallback swallowed unknown `/_mb/` paths.** Any
   extension-less path the asset table does not recognise is answered with

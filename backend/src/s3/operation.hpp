@@ -33,6 +33,14 @@ enum class Operation {
     DeleteBucketPolicy,
     GetBucketAcl,
     PutBucketAcl,
+    GetBucketCors,
+    PutBucketCors,
+    DeleteBucketCors,
+
+    /// A CORS preflight. Not a bucket operation in S3's sense — it is answered
+    /// from the bucket's rules without authenticating the caller, because a
+    /// browser never signs one.
+    Preflight,
 
     // Object
     GetObject,

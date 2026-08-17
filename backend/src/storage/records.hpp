@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "storage/codec.hpp"
+
 // The metadata schema, as plain structs. These cross the boundary between the
 // storage engine and the S3 protocol layer, so field names track S3 vocabulary
 // rather than RocksDB vocabulary.
@@ -26,6 +28,43 @@ std::string toIso8601(TimestampMs ms);
 /// metadata itself comparable and makes tests deterministic.
 using UserMetadata = std::map<std::string, std::string>;
 
+/// One rule of a bucket's CORS configuration.
+///
+/// Stored decomposed rather than as the XML it arrived in: a rule is consulted
+/// on every cross-origin request, and re-parsing a document to answer a header
+/// question would put an XML parse on the read path. GetBucketCors renders it
+/// back, which is also what makes the round trip normalising rather than
+/// byte-preserving — as S3's own is.
+struct CorsRule {
+    /// Optional client-supplied label, echoed back untouched.
+    std::string id;
+
+    /// Each entry is an exact origin or a pattern with at most one `*`.
+    std::vector<std::string> allowedOrigins;
+
+    /// Uppercased. S3 accepts only GET, PUT, POST, DELETE and HEAD here.
+    std::vector<std::string> allowedMethods;
+
+    /// Lowercased, because the header names they are matched against are
+    /// case-insensitive and the comparison should not have to keep saying so.
+    std::vector<std::string> allowedHeaders;
+
+    /// Response headers a browser script is allowed to read. Without these a
+    /// cross-origin fetch can see the body but not the ETag.
+    std::vector<std::string> exposeHeaders;
+
+    /// Negative means the rule sets no max age and the browser picks.
+    std::int32_t maxAgeSeconds = -1;
+};
+
+/// The CORS rules' wire form, shared by the RocksDB bucket record and the
+/// request-path bucket cache. One encoding rather than two: the cache is a
+/// second copy of the same record, and a cached bucket that had quietly lost
+/// its rules would answer preflights differently depending on whether the last
+/// write had aged out.
+void                  encodeCorsRules(codec::Writer& writer, const std::vector<CorsRule>& rules);
+std::vector<CorsRule> decodeCorsRules(codec::Reader& reader);
+
 struct BucketRecord {
     std::string name;
     TimestampMs createdAt = 0;
@@ -36,6 +75,11 @@ struct BucketRecord {
 
     /// Reserved for the Phase 4 policy editor. Empty means "no policy".
     std::string policy;
+
+    /// Empty means CORS is not enabled, which is not the same as enabled with
+    /// no rules: S3 answers a preflight against the former with 403 and the
+    /// latter cannot occur, because an empty CORSConfiguration is refused.
+    std::vector<CorsRule> cors;
 };
 
 struct ObjectRecord {

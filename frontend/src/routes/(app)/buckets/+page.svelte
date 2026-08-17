@@ -4,7 +4,7 @@
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
 	import { api, ApiError, type Bucket } from '$lib/api';
-	import { formatTimestamp } from '$lib/format';
+	import { formatTimestamp, plural } from '$lib/format';
 
 	let buckets = $state<Bucket[] | null>(null);
 	let error = $state('');
@@ -132,6 +132,11 @@
 								</a>
 								{#if bucket.hasPolicy}
 									<span class="badge badge-xs badge-ghost ml-2">policy</span>
+								{/if}
+								{#if bucket.corsRules > 0}
+									<span class="badge badge-xs badge-ghost ml-2">
+										{plural(bucket.corsRules, 'CORS rule')}
+									</span>
 								{/if}
 							</td>
 							<td class="text-base-content/70">{formatTimestamp(bucket.createdAtMs)}</td>

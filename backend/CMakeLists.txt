@@ -18,6 +18,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/s3/base64.cpp
     src/s3/bucket_handlers.cpp
     src/s3/chunked.cpp
+    src/s3/cors.cpp
     src/s3/handlers.cpp
     src/s3/multipart_handlers.cpp
     src/s3/object_handlers.cpp

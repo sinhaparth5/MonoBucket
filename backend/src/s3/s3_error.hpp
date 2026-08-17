@@ -18,6 +18,7 @@ namespace monobucket::s3 {
 
 enum class S3ErrorCode {
     AccessDenied,
+    AccessForbidden,
     BadDigest,
     BucketAlreadyExists,
     BucketAlreadyOwnedByYou,
@@ -42,6 +43,7 @@ enum class S3ErrorCode {
     MissingSecurityHeader,
     NoSuchBucket,
     NoSuchBucketPolicy,
+    NoSuchCORSConfiguration,
     NoSuchKey,
     NoSuchUpload,
     NotImplemented,

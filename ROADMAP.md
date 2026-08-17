@@ -170,6 +170,10 @@ in Phase 4, so `monobucket_cache_hits_total` is legitimately 0 today.*
 - [x] **Multipart:** `CreateMultipartUpload`, `UploadPart`, `ListParts`,
       `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListMultipartUploads`
 - [x] Bucket policy / public-access endpoints backing the link generator
+- [x] **CORS:** `PUT` / `GET` / `DELETE /{bucket}?cors`, an unauthenticated
+      `OPTIONS` preflight answered before signature verification, and
+      `Access-Control-*` on ordinary responses carrying an `Origin`
+      (`backend/src/s3/cors.cpp`)
 
 `CopyObject` is deliberately absent and answers 501 rather than silently
 storing the header's value as an object. It is not on this phase's list; it
@@ -224,6 +228,8 @@ browser holding an S3 secret cannot have console access revoked separately.
 - [ ] Drag-and-drop chunked uploader with progress
 - [x] Presigned link generator, signed on the server so the browser never holds
       an S3 secret (`s3::presignQuery`, `POST /_mb/api/presign`)
+- [x] CORS rule editor, sharing `s3::validateCorsRules` with the S3 API so the
+      two cannot disagree about what a valid rule is (`/_mb/api/buckets/cors`)
 - [ ] Settings panel: cache backend selection, RAM thresholds, API key
       management
 - [x] Auth for the console, separate from S3 credentials: the root key pair is

@@ -67,6 +67,10 @@ public:
     /// derived from it. An empty document removes the policy.
     void setBucketPolicy(std::string_view name, std::string policy, bool publicRead);
 
+    /// Replaces the bucket's CORS rules. An empty vector disables CORS, which
+    /// is what DeleteBucketCors means.
+    void setBucketCors(std::string_view name, std::vector<CorsRule> rules);
+
     // --- Objects -----------------------------------------------------------
 
     /// Opens a payload for streaming and registers it for reclamation first, so

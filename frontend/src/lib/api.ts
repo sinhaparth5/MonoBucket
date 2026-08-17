@@ -160,6 +160,20 @@ export interface Bucket {
 	createdAtMs: number;
 	publicRead: boolean;
 	hasPolicy: boolean;
+	corsRules: number;
+}
+
+export interface CorsRule {
+	id: string;
+	allowedOrigins: string[];
+	allowedMethods: string[];
+	allowedHeaders: string[];
+	exposeHeaders: string[];
+
+	// null means the rule sets no max age and the browser chooses. Zero is a
+	// different instruction — do not cache this preflight at all — so the two
+	// must not collapse into one another.
+	maxAgeSeconds: number | null;
 }
 
 export interface StoredObject {
@@ -245,6 +259,23 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({ name, publicRead })
 		}),
+
+	bucketCors: (name: string) =>
+		request<{ bucket: string; rules: CorsRule[] }>(
+			`/buckets/cors?bucket=${encodeURIComponent(name)}`
+		).then((r) => r.rules),
+
+	setBucketCors: (name: string, rules: CorsRule[]) =>
+		request<{ bucket: string; rules: CorsRule[] }>('/buckets/cors', {
+			method: 'POST',
+			body: JSON.stringify({ name, rules })
+		}).then((r) => r.rules),
+
+	clearBucketCors: (name: string) =>
+		request<{ bucket: string; rules: CorsRule[] }>('/buckets/cors', {
+			method: 'DELETE',
+			body: JSON.stringify({ name })
+		}).then((r) => r.rules),
 
 	objects: (query: ListQuery) => {
 		const params = new URLSearchParams({ bucket: query.bucket });

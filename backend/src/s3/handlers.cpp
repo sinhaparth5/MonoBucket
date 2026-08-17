@@ -34,10 +34,6 @@ std::string objectCacheKey(std::string_view bucket, std::string_view key) {
     return out;
 }
 
-std::string bucketCacheKey(std::string_view name) {
-    return "b:" + std::string(name);
-}
-
 std::string encodeObject(const ObjectRecord& record) {
     std::string  out;
     codec::Writer writer(out);
@@ -154,6 +150,7 @@ BucketRecord requireBucket(const S3Context& context, std::string_view name) {
             record.createdAt  = static_cast<TimestampMs>(reader.varint());
             record.publicRead = reader.boolean();
             record.policy     = reader.string();
+            record.cors       = decodeCorsRules(reader);
             return record;
         } catch (const codec::DecodeError&) {
             // Fall through to the store.
@@ -168,6 +165,7 @@ BucketRecord requireBucket(const S3Context& context, std::string_view name) {
     writer.varint(static_cast<std::uint64_t>(record->createdAt));
     writer.boolean(record->publicRead);
     writer.string(record->policy);
+    encodeCorsRules(writer, record->cors);
     context.cache.put(cacheKey, encoded, std::chrono::seconds(context.config.cacheTtlSeconds));
 
     return *record;
@@ -201,6 +199,10 @@ void invalidateObject(const S3Context& context, std::string_view bucket, std::st
 
 void invalidateBucket(const S3Context& context, std::string_view name) {
     context.cache.del(bucketCacheKey(name));
+}
+
+std::string bucketCacheKey(std::string_view name) {
+    return "b:" + std::string(name);
 }
 
 // --- Header helpers --------------------------------------------------------

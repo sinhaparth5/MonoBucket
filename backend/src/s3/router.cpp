@@ -10,6 +10,7 @@
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
 #include "core/logging.hpp"
+#include "s3/cors.hpp"
 #include "s3/handlers.hpp"
 #include "s3/operation.hpp"
 #include "s3/request.hpp"
@@ -99,6 +100,14 @@ HttpResponsePtr dispatch(const S3Context& context, const S3Request& request, Ope
         case Operation::GetBucketPolicy:     return handleGetBucketPolicy(context, request);
         case Operation::PutBucketPolicy:     return handlePutBucketPolicy(context, request, body);
         case Operation::DeleteBucketPolicy:  return handleDeleteBucketPolicy(context, request);
+        case Operation::GetBucketCors:       return handleGetBucketCors(context, request);
+        case Operation::PutBucketCors:       return handlePutBucketCors(context, request, body);
+        case Operation::DeleteBucketCors:    return handleDeleteBucketCors(context, request);
+
+        // Normally answered by serve() before authentication runs. Reaching
+        // here would mean that branch was removed, so it stays correct rather
+        // than falling through to "not implemented".
+        case Operation::Preflight:      return handlePreflight(context, request, http);
         case Operation::DeleteObjects:  return handleDeleteObjects(context, request, http, body);
 
         // HeadObject arrives here too — Drogon rewrites HEAD to GET before
@@ -135,7 +144,18 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
                                      virtualHostBucket(http->getHeader("host"),
                                                        context.config.s3Domain));
 
+    HttpResponsePtr response;
+
     try {
+        // A preflight is answered before anything looks for a signature. A
+        // browser never attaches credentials to one, so verifying here would
+        // refuse every cross-origin request to a private bucket before the
+        // real, signed request was ever sent. Arrives via the pre-routing
+        // advice rather than the route — see registerS3Routes.
+        if (request.method == "OPTIONS") {
+            return handlePreflight(context, request, http);
+        }
+
         AuthOptions options;
         options.region     = context.config.region;
         options.nowSeconds = nowSeconds();
@@ -164,28 +184,61 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
         const S3Body body(http->getBody(), auth, http->getHeader("content-encoding"),
                           headerAsUnsigned(http, "x-amz-decoded-content-length"));
 
-        return dispatch(context, request, operation, http, body);
+        response = dispatch(context, request, operation, http, body);
     } catch (const S3Exception& error) {
         const S3ErrorInfo& info = describe(error.code());
         if (info.status == 403) {
             context.metrics.authFailures.fetch_add(1, std::memory_order_relaxed);
         }
-        return errorResponse(error.code(), error.what(), request.resource, request.requestId);
+        response = errorResponse(error.code(), error.what(), request.resource, request.requestId);
     } catch (const StorageError& error) {
         const S3ErrorCode code = fromStorage(error.code());
         if (describe(code).status >= 500) {
             log::error("storage failure serving ", request.method, ' ', request.resource, ": ",
                        error.what());
         }
-        return errorResponse(code, error.what(), request.resource, request.requestId);
+        response = errorResponse(code, error.what(), request.resource, request.requestId);
     } catch (const std::exception& error) {
         // The message goes to the log, not to the client: an unexpected
         // exception's text is as likely to name a path on our disk as anything
         // the caller could act on.
         log::error("unhandled failure serving ", request.method, ' ', request.resource, " [",
                    request.requestId, "]: ", error.what());
-        return errorResponse(S3ErrorCode::InternalError, "", request.resource, request.requestId);
+        response =
+            errorResponse(S3ErrorCode::InternalError, "", request.resource, request.requestId);
     }
+
+    // Errors are decorated too. A script that cannot read the 403 it got back
+    // reports a network failure instead, which sends whoever is debugging it
+    // looking at the wrong layer.
+    applyCorsHeaders(context, request, http, response);
+    return response;
+}
+
+/// Runs `serve` on an I/O thread and answers, or sheds when the queue is full.
+/// Every S3 operation touches RocksDB or the filesystem, so none of them may
+/// run on an event loop thread. Posting the whole request — authentication
+/// included, since verifying a body digest is not cheap — keeps the loop free
+/// to accept connections while the disk is busy.
+void offload(const std::shared_ptr<Router>& router, const HttpRequestPtr& http,
+             const ResponseCallback& callback) {
+    router->context.metrics.requests.fetch_add(1, std::memory_order_relaxed);
+
+    const bool accepted = router->io.post([router, http, callback]() mutable {
+        auto response = serve(router->context, http);
+        router->context.metrics.observe(static_cast<int>(response->getStatusCode()));
+        callback(response);
+    });
+    if (accepted) return;
+
+    // Shedding load rather than queueing it is the whole point of a bounded
+    // queue. SlowDown is the code the AWS CLI backs off on.
+    router->context.metrics.shed.fetch_add(1, std::memory_order_relaxed);
+    router->context.metrics.observe(503);
+
+    auto response = errorResponse(S3ErrorCode::SlowDown, "", http->path(), newRequestId());
+    response->addHeader("Retry-After", "1");
+    callback(response);
 }
 
 }  // namespace
@@ -193,6 +246,28 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
 void registerS3Routes(const Config& config, StorageEngine& storage, IoExecutor& io,
                       CacheProvider& cache, S3Metrics& metrics) {
     auto router = std::make_shared<Router>(Router{S3Context{config, storage, cache, metrics}, io});
+
+    // Drogon answers OPTIONS itself, before routing and before any handler
+    // runs, with `Access-Control-Allow-Origin: *` and every method the route
+    // was registered for. That is the one answer a preflight must never get:
+    // it tells any origin that any method is permitted, whatever the bucket's
+    // rules say. There is no hook inside that path, so the request is
+    // intercepted ahead of it — pre-routing advice is the earliest point at
+    // which a response can be substituted. The route below therefore does not
+    // register Options at all; nothing would ever reach it.
+    drogon::app().registerPreRoutingAdvice(
+        [router](const HttpRequestPtr& http, drogon::AdviceCallback&& respond,
+                 drogon::AdviceChainCallback&& next) {
+            const Config& settings = router->context.config;
+            const bool    isConsole =
+                settings.consoleEnabled && http->getLocalAddr().toPort() == settings.consolePort;
+
+            if (http->method() != drogon::Options || isConsole) {
+                next();
+                return;
+            }
+            offload(router, http, respond);
+        });
 
     drogon::app().registerHandlerViaRegex(
         "^/.*$",
@@ -210,32 +285,9 @@ void registerS3Routes(const Config& config, StorageEngine& storage, IoExecutor& 
                 return;
             }
 
-            router->context.metrics.requests.fetch_add(1, std::memory_order_relaxed);
-
-            // Every S3 operation touches RocksDB or the filesystem, so none of
-            // them may run on an event loop thread. Posting the whole request
-            // — authentication included, since verifying a body digest is not
-            // cheap — keeps the loop free to accept connections while the disk
-            // is busy.
-            const bool accepted = router->io.post([router, http, callback]() mutable {
-                auto response = serve(router->context, http);
-                router->context.metrics.observe(static_cast<int>(response->getStatusCode()));
-                callback(response);
-            });
-
-            if (!accepted) {
-                // Shedding load rather than queueing it is the whole point of a
-                // bounded queue. SlowDown is the code the AWS CLI backs off on.
-                router->context.metrics.shed.fetch_add(1, std::memory_order_relaxed);
-                router->context.metrics.observe(503);
-
-                auto response = errorResponse(S3ErrorCode::SlowDown, "", http->path(),
-                                              newRequestId());
-                response->addHeader("Retry-After", "1");
-                callback(response);
-            }
+            offload(router, http, callback);
         },
-        {drogon::Get, drogon::Post, drogon::Put, drogon::Delete, drogon::Head, drogon::Options});
+        {drogon::Get, drogon::Post, drogon::Put, drogon::Delete, drogon::Head});
 }
 
 std::string renderS3Metrics(const S3Metrics& metrics) {

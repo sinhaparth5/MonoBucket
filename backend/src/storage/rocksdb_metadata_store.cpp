@@ -93,6 +93,7 @@ std::string encodeBucket(const BucketRecord& bucket) {
     writer.varint(static_cast<std::uint64_t>(bucket.createdAt));
     writer.boolean(bucket.publicRead);
     writer.string(bucket.policy);
+    encodeCorsRules(writer, bucket.cors);
     return out;
 }
 
@@ -105,6 +106,13 @@ BucketRecord decodeBucket(std::string_view name, std::string_view stored) {
     bucket.createdAt  = static_cast<TimestampMs>(reader.varint());
     bucket.publicRead = reader.boolean();
     bucket.policy     = reader.string();
+
+    // Appended rather than versioned. Bumping kRecordVersion would refuse every
+    // bucket written before CORS existed, and the version byte is there to
+    // catch a *changed* layout — an added trailing field is the case the format
+    // was designed to absorb. A record from an older build simply has no rules.
+    if (!reader.exhausted()) bucket.cors = decodeCorsRules(reader);
+
     return bucket;
 }
 

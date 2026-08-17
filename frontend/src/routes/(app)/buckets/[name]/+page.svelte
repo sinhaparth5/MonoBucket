@@ -3,7 +3,14 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type ObjectDetail, type Presigned, type StoredObject } from '$lib/api';
+	import {
+		api,
+		ApiError,
+		type CorsRule,
+		type ObjectDetail,
+		type Presigned,
+		type StoredObject
+	} from '$lib/api';
 	import { formatBytes, formatTimestamp, leafName, plural } from '$lib/format';
 	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
 
@@ -204,6 +211,149 @@
 	});
 
 	const totalBytes = $derived(objects.reduce((sum, object) => sum + object.size, 0));
+
+	// --- CORS ----------------------------------------------------------------
+
+	// The form edits comma-separated text rather than the arrays the API takes.
+	// A list of chips would look better and would be worse: the values are
+	// origins and header names, they are usually pasted in from somewhere else,
+	// and a field you can paste a whole list into is the one that gets used.
+	type RuleDraft = {
+		id: string;
+		origins: string;
+		methods: string[];
+		headers: string;
+		expose: string;
+
+		// Not a string: `bind:value` on a number input hands back a number, or
+		// null when the box is empty — which is exactly the distinction the rule
+		// needs between "no max age" and a value.
+		maxAge: number | null;
+	};
+
+	const CORS_METHODS = ['GET', 'HEAD', 'PUT', 'POST', 'DELETE'];
+
+	let corsDialog: HTMLDialogElement;
+	let corsDrafts = $state<RuleDraft[]>([]);
+	let corsLoading = $state(false);
+	let corsSaving = $state(false);
+	let corsError = $state('');
+	let corsSaved = $state(false);
+	let corsCount = $state(0);
+
+	function splitList(text: string): string[] {
+		return text
+			.split(/[\s,]+/)
+			.map((entry) => entry.trim())
+			.filter(Boolean);
+	}
+
+	function toDraft(rule: CorsRule): RuleDraft {
+		return {
+			id: rule.id,
+			origins: rule.allowedOrigins.join(', '),
+			methods: [...rule.allowedMethods],
+			headers: rule.allowedHeaders.join(', '),
+			expose: rule.exposeHeaders.join(', '),
+			// An empty box means "no max age", which is what null encodes. Zero
+			// stays visible as a zero because it means something different.
+			maxAge: rule.maxAgeSeconds
+		};
+	}
+
+	function fromDraft(draft: RuleDraft): CorsRule {
+		return {
+			id: draft.id.trim(),
+			allowedOrigins: splitList(draft.origins),
+			allowedMethods: draft.methods,
+			allowedHeaders: splitList(draft.headers),
+			exposeHeaders: splitList(draft.expose),
+			maxAgeSeconds: Number.isFinite(draft.maxAge) ? draft.maxAge : null
+		};
+	}
+
+	function blankDraft(): RuleDraft {
+		// Pre-filled with the rule a browser app almost always wants first, so
+		// the common case is one click and a hostname rather than five fields.
+		return {
+			id: '',
+			origins: '',
+			methods: ['GET', 'HEAD'],
+			headers: '',
+			expose: 'ETag',
+			maxAge: null
+		};
+	}
+
+	async function loadCors() {
+		corsLoading = true;
+		corsError = '';
+		corsSaved = false;
+		try {
+			const rules = await api.bucketCors(bucket);
+			corsCount = rules.length;
+			corsDrafts = rules.length > 0 ? rules.map(toDraft) : [blankDraft()];
+		} catch (cause) {
+			corsError = cause instanceof ApiError ? cause.message : 'could not read the CORS rules';
+			corsDrafts = [blankDraft()];
+		} finally {
+			corsLoading = false;
+		}
+	}
+
+	function openCors() {
+		corsDialog.showModal();
+		loadCors();
+	}
+
+	function toggleMethod(draft: RuleDraft, method: string, on: boolean) {
+		draft.methods = on
+			? // Kept in CORS_METHODS order rather than click order, so two rules
+				// with the same methods read the same way.
+				CORS_METHODS.filter((name) => draft.methods.includes(name) || name === method)
+			: draft.methods.filter((name) => name !== method);
+	}
+
+	async function saveCors() {
+		corsSaving = true;
+		corsError = '';
+		corsSaved = false;
+		try {
+			const rules = corsDrafts.map(fromDraft);
+			corsCount = (await api.setBucketCors(bucket, rules)).length;
+			corsSaved = true;
+			setTimeout(() => (corsSaved = false), 2000);
+		} catch (cause) {
+			corsError = cause instanceof ApiError ? cause.message : 'could not save the CORS rules';
+		} finally {
+			corsSaving = false;
+		}
+	}
+
+	async function clearCors() {
+		corsSaving = true;
+		corsError = '';
+		try {
+			await api.clearBucketCors(bucket);
+			corsCount = 0;
+			corsDrafts = [blankDraft()];
+			corsSaved = true;
+			setTimeout(() => (corsSaved = false), 2000);
+		} catch (cause) {
+			corsError = cause instanceof ApiError ? cause.message : 'could not clear the CORS rules';
+		} finally {
+			corsSaving = false;
+		}
+	}
+
+	// Loaded once alongside the listing so the header can say whether this
+	// bucket has any rules without the editor being opened.
+	$effect(() => {
+		api
+			.bucketCors(bucket)
+			.then((rules) => (corsCount = rules.length))
+			.catch(() => (corsCount = 0));
+	});
 </script>
 
 <svelte:head><title>{bucket} · MonoBucket</title></svelte:head>
@@ -228,11 +378,19 @@
 
 		<div class="flex flex-wrap items-baseline justify-between gap-3">
 			<h1 class="text-2xl font-semibold">{crumbs.at(-1)?.label ?? bucket}</h1>
-			<span class="text-base-content/60 text-xs">
-				{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
-					totalBytes
-				)}{truncated ? ' so far' : ''}
-			</span>
+			<div class="flex items-baseline gap-3">
+				<span class="text-base-content/60 text-xs">
+					{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
+						totalBytes
+					)}{truncated ? ' so far' : ''}
+				</span>
+				<button class="btn btn-ghost btn-xs" onclick={openCors}>
+					CORS
+					{#if corsCount > 0}
+						<span class="badge badge-xs badge-ghost">{corsCount}</span>
+					{/if}
+				</button>
+			</div>
 		</div>
 	</div>
 
@@ -495,6 +653,141 @@
 		<div class="modal-action">
 			<button class="btn btn-sm" type="button" onclick={() => deleteDialog.close()}>Cancel</button>
 			<button class="btn btn-error btn-sm" type="button" onclick={confirmDelete}>Delete</button>
+		</div>
+	</div>
+	<form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog bind:this={corsDialog} class="modal">
+	<div class="modal-box max-w-3xl">
+		<h2 class="text-lg font-medium">Cross-origin access</h2>
+		<p class="text-base-content/70 mt-2 text-sm">
+			Rules are checked top to bottom and the first one that permits the origin, the method
+			<em>and</em> every header the browser asked about is the one that answers. A request no rule permits
+			is still served to a signed client — CORS only decides whether a page's script may read the response.
+		</p>
+
+		{#if corsError}
+			<div role="alert" class="alert alert-error alert-soft mt-4" in:fly={{ y: -6, duration: 200 }}>
+				<span>{corsError}</span>
+			</div>
+		{/if}
+
+		{#if corsLoading}
+			<div class="skeleton rounded-box mt-4 h-48"></div>
+		{:else}
+			<div class="mt-4 flex flex-col gap-4">
+				{#each corsDrafts as draft, index (index)}
+					<div class="border-base-300 rounded-box border p-4" in:fade={{ duration: 120 }}>
+						<div class="flex items-center justify-between gap-3">
+							<span class="text-base-content/60 text-xs">Rule {index + 1}</span>
+							<button
+								class="btn btn-ghost btn-xs text-error"
+								type="button"
+								disabled={corsDrafts.length === 1}
+								onclick={() => (corsDrafts = corsDrafts.filter((_, i) => i !== index))}
+							>
+								Remove
+							</button>
+						</div>
+
+						<div class="mt-2 grid gap-4 sm:grid-cols-2">
+							<fieldset class="fieldset gap-1 p-0 sm:col-span-2">
+								<legend class="fieldset-legend">Allowed origins</legend>
+								<input
+									class="input w-full font-mono text-xs"
+									placeholder="https://app.example.com, https://*.example.com"
+									bind:value={draft.origins}
+								/>
+								<p class="label">
+									Scheme and port are part of the match. One <code class="font-mono">*</code> per entry.
+								</p>
+							</fieldset>
+
+							<fieldset class="fieldset gap-1 p-0 sm:col-span-2">
+								<legend class="fieldset-legend">Allowed methods</legend>
+								<div class="flex flex-wrap gap-3">
+									{#each CORS_METHODS as method (method)}
+										<label class="label cursor-pointer gap-2">
+											<input
+												type="checkbox"
+												class="checkbox checkbox-sm"
+												checked={draft.methods.includes(method)}
+												onchange={(event) =>
+													toggleMethod(draft, method, event.currentTarget.checked)}
+											/>
+											<span class="font-mono text-xs">{method}</span>
+										</label>
+									{/each}
+								</div>
+							</fieldset>
+
+							<fieldset class="fieldset gap-1 p-0">
+								<legend class="fieldset-legend">Allowed request headers</legend>
+								<input
+									class="input w-full font-mono text-xs"
+									placeholder="content-type, x-amz-*"
+									bind:value={draft.headers}
+								/>
+								<p class="label">What the browser may send. Blank permits none.</p>
+							</fieldset>
+
+							<fieldset class="fieldset gap-1 p-0">
+								<legend class="fieldset-legend">Exposed response headers</legend>
+								<input
+									class="input w-full font-mono text-xs"
+									placeholder="ETag"
+									bind:value={draft.expose}
+								/>
+								<p class="label">What a script may read back. ETag is needed to upload in parts.</p>
+							</fieldset>
+
+							<fieldset class="fieldset gap-1 p-0">
+								<legend class="fieldset-legend">Preflight cache (seconds)</legend>
+								<input
+									class="input w-full"
+									type="number"
+									min="0"
+									max="86400"
+									placeholder="browser decides"
+									bind:value={draft.maxAge}
+								/>
+							</fieldset>
+
+							<fieldset class="fieldset gap-1 p-0">
+								<legend class="fieldset-legend">Label</legend>
+								<input class="input w-full" placeholder="optional" bind:value={draft.id} />
+							</fieldset>
+						</div>
+					</div>
+				{/each}
+
+				<button
+					class="btn btn-ghost btn-sm self-start"
+					type="button"
+					onclick={() => (corsDrafts = [...corsDrafts, blankDraft()])}
+				>
+					Add a rule
+				</button>
+			</div>
+		{/if}
+
+		<div class="modal-action">
+			{#if corsSaved}
+				<span class="text-success self-center text-xs" in:fade={{ duration: 150 }}>Saved</span>
+			{/if}
+			<button
+				class="btn btn-ghost btn-sm"
+				type="button"
+				disabled={corsSaving || corsCount === 0}
+				onclick={clearCors}
+			>
+				Turn CORS off
+			</button>
+			<button class="btn btn-sm" type="button" onclick={() => corsDialog.close()}>Close</button>
+			<button class="btn btn-primary btn-sm" type="button" disabled={corsSaving} onclick={saveCors}>
+				{corsSaving ? 'Saving…' : 'Save rules'}
+			</button>
 		</div>
 	</div>
 	<form method="dialog" class="modal-backdrop"><button>close</button></form>

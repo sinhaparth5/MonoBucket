@@ -19,7 +19,10 @@
 #include "core/io_executor.hpp"
 #include "core/logging.hpp"
 #include "monobucket/version.hpp"
+#include "s3/cors.hpp"
+#include "s3/handlers.hpp"
 #include "s3/metrics.hpp"
+#include "s3/s3_error.hpp"
 #include "s3/sigv4.hpp"
 #include "s3/uri.hpp"
 #include "server/metrics_history.hpp"
@@ -214,7 +217,74 @@ nlohmann::json toJson(const BucketRecord& bucket) {
             {"createdAt", toIso8601(bucket.createdAt)},
             {"createdAtMs", bucket.createdAt},
             {"publicRead", bucket.publicRead},
-            {"hasPolicy", !bucket.policy.empty()}};
+            {"hasPolicy", !bucket.policy.empty()},
+            {"corsRules", bucket.cors.size()}};
+}
+
+nlohmann::json toJson(const CorsRule& rule) {
+    // maxAgeSeconds is null rather than 0 when the rule sets none: zero tells a
+    // browser not to cache the preflight, which is a different instruction from
+    // leaving the choice to it, and a form that could not express the
+    // difference would silently change one into the other.
+    return {{"id", rule.id},
+            {"allowedOrigins", rule.allowedOrigins},
+            {"allowedMethods", rule.allowedMethods},
+            {"allowedHeaders", rule.allowedHeaders},
+            {"exposeHeaders", rule.exposeHeaders},
+            {"maxAgeSeconds", rule.maxAgeSeconds >= 0 ? nlohmann::json(rule.maxAgeSeconds)
+                                                      : nlohmann::json(nullptr)}};
+}
+
+/// Reads the rule list a console form submits. Shape errors are reported here;
+/// everything about whether the rules are *acceptable* is left to
+/// s3::validateCorsRules, so the console and the S3 API cannot disagree.
+std::vector<CorsRule> corsRulesFrom(const nlohmann::json& value) {
+    if (!value.is_array()) throw std::invalid_argument("rules must be an array");
+
+    const auto stringList = [](const nlohmann::json& node, const char* field) {
+        std::vector<std::string> out;
+        if (node.is_null()) return out;
+        if (!node.is_array()) throw std::invalid_argument(std::string(field) + " must be an array");
+        for (const auto& entry : node) {
+            if (!entry.is_string()) {
+                throw std::invalid_argument(std::string(field) + " must contain strings");
+            }
+            out.push_back(entry.get<std::string>());
+        }
+        return out;
+    };
+
+    std::vector<CorsRule> rules;
+    for (const auto& node : value) {
+        if (!node.is_object()) throw std::invalid_argument("each rule must be an object");
+
+        CorsRule rule;
+        rule.id             = node.value("id", std::string{});
+        rule.allowedOrigins = stringList(node.value("allowedOrigins", nlohmann::json::array()),
+                                         "allowedOrigins");
+        rule.allowedMethods = stringList(node.value("allowedMethods", nlohmann::json::array()),
+                                         "allowedMethods");
+        rule.allowedHeaders = stringList(node.value("allowedHeaders", nlohmann::json::array()),
+                                         "allowedHeaders");
+        rule.exposeHeaders  = stringList(node.value("exposeHeaders", nlohmann::json::array()),
+                                         "exposeHeaders");
+
+        const auto& maxAge = node.contains("maxAgeSeconds") ? node.at("maxAgeSeconds")
+                                                            : nlohmann::json(nullptr);
+        if (!maxAge.is_null()) {
+            if (!maxAge.is_number_integer()) {
+                throw std::invalid_argument("maxAgeSeconds must be a whole number or null");
+            }
+            const auto seconds = maxAge.get<std::int64_t>();
+            if (seconds < 0 || seconds > 86400) {
+                throw std::invalid_argument("maxAgeSeconds must be between 0 and 86400");
+            }
+            rule.maxAgeSeconds = static_cast<std::int32_t>(seconds);
+        }
+
+        rules.push_back(std::move(rule));
+    }
+    return rules;
 }
 
 nlohmann::json toJson(const ObjectRecord& object) {
@@ -551,8 +621,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/buckets/access",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+        [&storage, &cache, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
@@ -564,8 +634,14 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     return;
                 }
                 const bool publicRead = body.value("publicRead", false);
-                offload(callback, [&storage, name, publicRead]() -> HttpResponsePtr {
+                offload(callback, [&storage, &cache, name, publicRead]() -> HttpResponsePtr {
                     storage.setBucketPublicRead(name, publicRead);
+
+                    // Without this the S3 anonymous path keeps reading the old
+                    // flag until the entry ages out, so making a bucket private
+                    // in the console would not take effect for a whole TTL.
+                    cache.del(s3::bucketCacheKey(name));
+
                     const auto record = storage.getBucket(name);
                     if (!record) {
                         return errorJson("no such bucket", drogon::k404NotFound);
@@ -575,6 +651,77 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             });
         },
         {drogon::Post});
+
+    // GET reads the rules, POST replaces them, DELETE turns CORS off. The same
+    // three verbs the S3 API uses on ?cors, and the same storage call behind
+    // them — the console is a second front door onto one feature, not a second
+    // implementation of it.
+    app.registerHandler(
+        "/_mb/api/buckets/cors",
+        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
+                                           ResponseCallback&& callback) {
+            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+                const std::string method = std::string(req->getMethodString());
+
+                if (method == "GET") {
+                    const std::string name = req->getParameter("bucket");
+                    if (name.empty()) {
+                        callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                        return;
+                    }
+                    offload(callback, [&storage, name]() -> HttpResponsePtr {
+                        const auto record = storage.getBucket(name);
+                        if (!record) return errorJson("no such bucket", drogon::k404NotFound);
+
+                        auto rules = nlohmann::json::array();
+                        for (const CorsRule& rule : record->cors) rules.push_back(toJson(rule));
+                        return jsonResponse({{"bucket", name}, {"rules", rules}});
+                    });
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                const auto name = body.value("name", std::string{});
+                if (name.empty()) {
+                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                    return;
+                }
+
+                std::vector<CorsRule> rules;
+                if (method == "POST") {
+                    try {
+                        rules = s3::validateCorsRules(
+                            corsRulesFrom(body.contains("rules") ? body.at("rules")
+                                                                 : nlohmann::json::array()));
+                    } catch (const s3::S3Exception& error) {
+                        callback(errorJson(error.what(), drogon::k400BadRequest));
+                        return;
+                    } catch (const std::invalid_argument& error) {
+                        callback(errorJson(error.what(), drogon::k400BadRequest));
+                        return;
+                    }
+                }
+
+                offload(callback,
+                        [&storage, &cache, name, rules = std::move(rules)]() -> HttpResponsePtr {
+                    storage.setBucketCors(name, rules);
+
+                    // The S3 read path caches the bucket record, and a stale
+                    // entry would keep answering preflights from the rules the
+                    // console just replaced.
+                    cache.del(s3::bucketCacheKey(name));
+
+                    auto out = nlohmann::json::array();
+                    for (const CorsRule& rule : rules) out.push_back(toJson(rule));
+                    return jsonResponse({{"bucket", name}, {"rules", out}});
+                });
+            });
+        },
+        {drogon::Get, drogon::Post, drogon::Delete});
 
     // --- Objects -----------------------------------------------------------
 

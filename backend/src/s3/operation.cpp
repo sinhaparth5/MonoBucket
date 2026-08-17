@@ -13,8 +13,8 @@ namespace {
 /// Answering GetBucketVersioning and GetBucketAcl is not on this list: clients
 /// probe both routinely and handle a "disabled"/"private" answer, whereas a 501
 /// makes `aws s3 sync` give up.
-constexpr std::array<std::string_view, 18> kUnimplementedSubresources{
-    "accelerate", "analytics",    "cors",           "encryption",   "inventory",
+constexpr std::array<std::string_view, 17> kUnimplementedSubresources{
+    "accelerate", "analytics",    "encryption",   "inventory",
     "lifecycle",  "logging",      "metrics",        "notification", "object-lock",
     "ownership",  "publicAccessBlock", "replication", "requestPayment", "tagging",
     "versions",   "website",      "restore",
@@ -42,6 +42,7 @@ Operation classifyBucket(const S3Request& request) {
         if (request.hasQuery("versioning")) return Operation::GetBucketVersioning;
         if (request.hasQuery("policy"))   return Operation::GetBucketPolicy;
         if (request.hasQuery("acl"))      return Operation::GetBucketAcl;
+        if (request.hasQuery("cors"))     return Operation::GetBucketCors;
 
         const auto listType = request.queryValue("list-type");
         if (listType && *listType == "2") return Operation::ListObjectsV2;
@@ -53,11 +54,13 @@ Operation classifyBucket(const S3Request& request) {
     if (request.method == "PUT") {
         if (request.hasQuery("policy")) return Operation::PutBucketPolicy;
         if (request.hasQuery("acl"))    return Operation::PutBucketAcl;
+        if (request.hasQuery("cors"))   return Operation::PutBucketCors;
         return Operation::CreateBucket;
     }
 
     if (request.method == "DELETE") {
         if (request.hasQuery("policy")) return Operation::DeleteBucketPolicy;
+        if (request.hasQuery("cors"))   return Operation::DeleteBucketCors;
         return Operation::DeleteBucket;
     }
 
@@ -126,6 +129,10 @@ std::string_view toString(Operation operation) noexcept {
         case Operation::DeleteBucketPolicy:      return "DeleteBucketPolicy";
         case Operation::GetBucketAcl:            return "GetBucketAcl";
         case Operation::PutBucketAcl:            return "PutBucketAcl";
+        case Operation::GetBucketCors:           return "GetBucketCors";
+        case Operation::PutBucketCors:           return "PutBucketCors";
+        case Operation::DeleteBucketCors:        return "DeleteBucketCors";
+        case Operation::Preflight:               return "Preflight";
         case Operation::GetObject:               return "GetObject";
         case Operation::HeadObject:              return "HeadObject";
         case Operation::PutObject:               return "PutObject";
@@ -152,6 +159,7 @@ bool isReadOnly(Operation operation) noexcept {
         case Operation::GetBucketVersioning:
         case Operation::GetBucketPolicy:
         case Operation::GetBucketAcl:
+        case Operation::GetBucketCors:
         case Operation::GetObject:
         case Operation::HeadObject:
         case Operation::ListParts:
@@ -162,6 +170,13 @@ bool isReadOnly(Operation operation) noexcept {
 }
 
 Operation classify(const S3Request& request, std::string& unsupported) {
+    // Before the subresource check, and before anything looks at the path: an
+    // OPTIONS is a preflight whatever it points at, and answering it 501
+    // because the real request would have named an unimplemented subresource
+    // would tell the browser the wrong thing about the request it has not sent
+    // yet.
+    if (request.method == "OPTIONS") return Operation::Preflight;
+
     unsupported = firstSubresource(request);
     if (!unsupported.empty()) return Operation::Unsupported;
 

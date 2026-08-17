@@ -297,11 +297,16 @@ The S3 API, on port 9000:
 | DeleteObject, DeleteObjects | `DELETE /{bucket}/{key}`, `POST /{bucket}?delete` |
 | Multipart | `?uploads`, `?uploadId=`, `?partNumber=` — create, upload, list, complete, abort |
 | Bucket policy / ACL / location / versioning | `GET`, `PUT`, `DELETE` on `/{bucket}?policy`, `?acl`, `?location`, `?versioning` |
+| Bucket CORS | `GET`, `PUT`, `DELETE` on `/{bucket}?cors`, plus `OPTIONS` preflights on any path |
 
 Authentication is SigV4, in both header and presigned-query form, including
 `aws-chunked` streaming signatures. Path-style addressing always works;
 virtual-host style (`bucket.s3.example.com`) requires `MONOBUCKET_S3_DOMAIN`.
 Anonymous reads are served only for a bucket whose policy grants them.
+Preflights are answered without a signature, because a browser never attaches
+credentials to one; a bucket with no CORS rules refuses every preflight, and so
+does a bucket that does not exist, so a preflight cannot be used to find out
+which buckets are there.
 
 `CopyObject` and object versioning are not implemented and answer `501`.
 

@@ -23,6 +23,15 @@ const S3ErrorInfo& lookup(S3ErrorCode code) noexcept {
             static constexpr S3ErrorInfo info{"AccessDenied", 403, "Access Denied"};
             return info;
         }
+        case S3ErrorCode::AccessForbidden: {
+            // The code S3 uses for a preflight that no CORS rule permits. It is
+            // distinct from AccessDenied on purpose: nothing about the caller's
+            // credentials is wrong, and telling them to re-sign would send them
+            // looking in the wrong place.
+            static constexpr S3ErrorInfo info{
+                "AccessForbidden", 403, "CORSResponse: This CORS request is not allowed."};
+            return info;
+        }
         case S3ErrorCode::BadDigest: {
             static constexpr S3ErrorInfo info{
                 "BadDigest", 400,
@@ -153,6 +162,12 @@ const S3ErrorInfo& lookup(S3ErrorCode code) noexcept {
         case S3ErrorCode::NoSuchBucketPolicy: {
             static constexpr S3ErrorInfo info{
                 "NoSuchBucketPolicy", 404, "The bucket policy does not exist."};
+            return info;
+        }
+        case S3ErrorCode::NoSuchCORSConfiguration: {
+            static constexpr S3ErrorInfo info{
+                "NoSuchCORSConfiguration", 404,
+                "The CORS configuration does not exist."};
             return info;
         }
         case S3ErrorCode::NoSuchKey: {

@@ -137,6 +137,15 @@ void StorageEngine::setBucketPolicy(std::string_view name, std::string policy, b
     metadata_->updateBucket(*bucket);
 }
 
+void StorageEngine::setBucketCors(std::string_view name, std::vector<CorsRule> rules) {
+    auto bucket = metadata_->getBucket(name);
+    if (!bucket) {
+        throw StorageError(StorageErrorCode::NoSuchBucket, "no such bucket: " + std::string(name));
+    }
+    bucket->cors = std::move(rules);
+    metadata_->updateBucket(*bucket);
+}
+
 // --- Objects ---------------------------------------------------------------
 
 BlobWriter StorageEngine::beginWrite() {

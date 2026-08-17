@@ -76,7 +76,7 @@ TEST_CASE("subresources we do not implement are named rather than misread",
           "[s3][operation]") {
     std::string unsupported;
 
-    for (const char* subresource : {"tagging", "lifecycle", "cors", "replication", "versions",
+    for (const char* subresource : {"tagging", "lifecycle", "replication", "versions",
                                     "website", "encryption", "object-lock"}) {
         const S3Request request = parseRequest("GET", "/photos", subresource, "");
         REQUIRE(classify(request, unsupported) == Operation::Unsupported);
@@ -87,6 +87,31 @@ TEST_CASE("subresources we do not implement are named rather than misread",
     // document that answers a completely different question.
     const S3Request tagging = parseRequest("GET", "/photos", "tagging", "");
     REQUIRE(classify(tagging, unsupported) != Operation::ListObjectsV1);
+}
+
+TEST_CASE("CORS is routed on the subresource and OPTIONS on the method", "[s3][operation]") {
+    REQUIRE(classifyOf("GET", "/photos", "cors") == Operation::GetBucketCors);
+    REQUIRE(classifyOf("PUT", "/photos", "cors") == Operation::PutBucketCors);
+    REQUIRE(classifyOf("DELETE", "/photos", "cors") == Operation::DeleteBucketCors);
+
+    // Without ?cors these are still the plain bucket operations — a stray
+    // subresource must not be able to turn a CreateBucket into a config write.
+    REQUIRE(classifyOf("PUT", "/photos") == Operation::CreateBucket);
+    REQUIRE(classifyOf("DELETE", "/photos") == Operation::DeleteBucket);
+
+    // A preflight is classified by its method alone: the browser sends OPTIONS
+    // against the resource the real request will name, which may be an object,
+    // a bucket, or something carrying a subresource we do not implement.
+    REQUIRE(classifyOf("OPTIONS", "/photos") == Operation::Preflight);
+    REQUIRE(classifyOf("OPTIONS", "/photos/beach.jpg") == Operation::Preflight);
+    REQUIRE(classifyOf("OPTIONS", "/photos", "tagging") == Operation::Preflight);
+    REQUIRE(classifyOf("OPTIONS", "/") == Operation::Preflight);
+
+    // Reading the configuration is a read; the two writes are not, so an
+    // anonymous caller against a public bucket cannot reach them.
+    REQUIRE(isReadOnly(Operation::GetBucketCors));
+    REQUIRE_FALSE(isReadOnly(Operation::PutBucketCors));
+    REQUIRE_FALSE(isReadOnly(Operation::DeleteBucketCors));
 }
 
 TEST_CASE("versioning and ACL probes are answered rather than refused", "[s3][operation]") {

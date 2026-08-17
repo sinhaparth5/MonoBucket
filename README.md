@@ -8,11 +8,11 @@ One binary. One container. No sidecars, no external database.
 > **Status: pre-alpha.** Phases 1–5 are in place: scaffolding and lifecycle, the
 > storage engine, the cache layer, the S3 REST API, and the dashboard with its
 > embedding pipeline. `aws s3`, `boto3` and `rclone` all work against it, and
-> the console port serves a working admin UI — overview graphs, a bucket list, a
-> file browser with drag-and-drop upload, presigned links, and bucket policy and
-> CORS editors. See [ROADMAP.md](ROADMAP.md) for what is still open, notably
-> `io_uring`, `fsck`, and the Phase 7 conformance and benchmark suites. Do not
-> put data you cannot lose in it.
+> the console port serves a working admin UI with overview graphs, a bucket
+> list, a file browser with drag-and-drop upload, presigned links, and bucket
+> policy and CORS editors. See [ROADMAP.md](ROADMAP.md) for what is still open,
+> notably `io_uring`, `fsck`, and the Phase 7 conformance and benchmark suites.
+> Do not put data you cannot lose in it.
 
 ---
 
@@ -27,7 +27,7 @@ MonoBucket/
 │   │   ├── server/     event loop, listeners, system routes, asset store
 │   │   ├── storage/    metadata store + POSIX I/O engine
 │   │   ├── cache/      CacheProvider, sharded LRU, optional Redis
-│   │   └── s3/         Phase 4 — SigV4, routing, XML responses
+│   │   └── s3/         Phase 4: SigV4, routing, XML responses
 │   └── tests/          Catch2 suite
 ├── common/include/     version + protocol constants shared across layers
 ├── frontend/           SvelteKit dashboard (static build, embedded at compile time)
@@ -46,14 +46,15 @@ against, and RocksDB, which holds the metadata. Everything else is fetched and
 pinned by CMake.
 
 Drogon is always built from source, even when one is installed. It is the one
-dependency we patch — its request parser refuses the zero-length body that every
-S3 client sends when writing an empty object, so an unpatched build cannot store
-one (`backend/cmake/patches/`). `-DMONOBUCKET_ALLOW_SYSTEM_DROGON=ON` uses an
-installed copy instead and warns about what that costs.
+dependency we patch because its request parser refuses the zero-length body that
+every S3 client sends when writing an empty object. An unpatched build cannot
+store one (`backend/cmake/patches/`).
+`-DMONOBUCKET_ALLOW_SYSTEM_DROGON=ON` uses an installed copy instead and warns
+about what that costs.
 
-RocksDB is not vendored deliberately — it is a ~40 MB static archive that pulls
-in gflags, snappy, lz4, zstd and bz2, and building it from source would dominate
-both the image build and the toolchain surface.
+RocksDB is deliberately not vendored. Its ~40 MB static archive pulls in gflags,
+snappy, lz4, zstd and bz2, and building it from source would dominate both the
+image build and the toolchain surface.
 
 ```bash
 # Debian / Ubuntu
@@ -132,7 +133,8 @@ cmake --build --preset release
 ```
 
 Without `MONOBUCKET_EMBED_FRONTEND=ON` the binary compiles with an empty asset
-table and the console port returns 404 — useful while working on the engine.
+table and the console port returns 404. This is useful while working on the
+engine.
 
 The embedder also pre-compresses every text asset with `gzip` and `brotli` and
 bakes the variants in beside the original, so the console negotiates on
@@ -209,18 +211,18 @@ A bare number is bytes.
 
 The settings that govern memory behaviour:
 
-- `MONOBUCKET_MAX_MEMORY_BODY_BYTES` — request bodies larger than this spill to
+- `MONOBUCKET_MAX_MEMORY_BODY_BYTES`: request bodies larger than this spill to
   disk instead of being buffered in RAM.
-- `MONOBUCKET_STREAM_CHUNK_BYTES` — the fixed chunk size used by the streaming
+- `MONOBUCKET_STREAM_CHUNK_BYTES`: the fixed chunk size used by the streaming
   I/O engine, which is what keeps resident memory flat during multi-gigabyte
   transfers.
-- `MONOBUCKET_METADATA_MEMORY_BYTES` — one budget covering RocksDB's block
+- `MONOBUCKET_METADATA_MEMORY_BYTES`: one budget covering RocksDB's block
   cache, its write buffers and its index/filter blocks together. Sized
   separately, as RocksDB does by default, the sum is what the container sees.
-- `MONOBUCKET_IO_QUEUE_LIMIT` — how much storage work may queue before requests
+- `MONOBUCKET_IO_QUEUE_LIMIT`: how much storage work may queue before requests
   are refused. Bounded deliberately; an unbounded queue turns a slow disk into
   unbounded memory.
-- `MONOBUCKET_CACHE_MAX_BYTES` — the cache budget, counted as stored bytes plus
+- `MONOBUCKET_CACHE_MAX_BYTES`: the cache budget, counted as stored bytes plus
   per-entry overhead and enforced on every insert rather than trimmed on a
   timer. `0` disables caching.
 
@@ -230,19 +232,19 @@ The settings that govern memory behaviour:
 
 One `CacheProvider` interface, selected by `MONOBUCKET_CACHE_BACKEND`.
 
-**`memory`** (default) is a sharded LRU. Each shard has its own map, intrusive
+`memory` (default) is a sharded LRU. Each shard has its own map, intrusive
 list and `shared_mutex`, and holds an equal slice of the budget. Reads take the
-shared lock and deliberately do *not* reorder the list — promoting on every read
+shared lock and deliberately do *not* reorder the list. Promoting on every read
 would make `get()` a writer and reduce the `shared_mutex` to decoration. A hit
 sets an atomic flag instead, and eviction gives a flagged entry one reprieve
-before taking it. Recency is approximate; concurrency is real.
+before taking it. This trades exact recency for concurrent reads.
 
-**`redis`** (optional, `-DMONOBUCKET_ENABLE_REDIS=ON`) is a shared tier for
+`redis` (optional, `-DMONOBUCKET_ENABLE_REDIS=ON`) is a shared tier for
 several instances, and is arranged as two tiers rather than an either/or: the
 local cache sits in front of it and is written on every `set`, so it is already
 warm if Redis goes away. After a few consecutive failures a circuit breaker
 stops calling Redis entirely, backing off exponentially and letting a single
-probe through per window — retrying a dead socket on every request would satisfy
+probe through per window. Retrying a dead socket on every request would satisfy
 "the cache never fails" while still stalling every request.
 
 The cost of the local tier is coherence: another instance can change a value
@@ -266,9 +268,9 @@ Everything lives under `MONOBUCKET_DATA_DIR`:
 └── tmp/       in-flight writes, linked into objects/ only once durable
 ```
 
-Two rules make the pair recoverable. A payload is written and flushed **before**
-the metadata naming it is committed, and unlinked only **after** that metadata
-is gone — so an interruption leaves either the old state or the new one. And a
+Two rules make the pair recoverable. A payload is written and flushed before
+the metadata naming it is committed, and unlinked only after that metadata
+is gone. An interruption therefore leaves either the old state or the new one. A
 payload is registered in the reclamation log before it is written, so a crash at
 any point leaves a trace that startup can collect in time proportional to what
 leaked rather than to what is stored.
@@ -294,13 +296,13 @@ System routes, on both listeners unless noted:
 | `GET /metrics` | both | Prometheus text format |
 | `GET /_mb/version` | both | Version and build info |
 
-The console API lives under `/_mb/api/*` on the console listener only. It is
-session-authenticated — the root key pair is exchanged for an HttpOnly cookie,
-so the browser never holds an S3 secret — and covers the dashboard's needs:
+The console API lives under `/_mb/api/*` on the console listener only. It uses
+session authentication: the root key pair is exchanged for an HttpOnly cookie,
+so the browser never holds an S3 secret. It covers the dashboard's needs:
 `/session`, `/login`, `/logout`, `/overview`, `/series`, `/config`, `/buckets`
 and its `/access`, `/policy` and `/cors` subresources, `/objects`, `/object`,
-`/upload` and `/presign`. It is not a second S3 API and is not stable; use the
-S3 port for anything programmatic.
+`/upload` and `/presign`. This API is separate from the S3 API and may change;
+use the S3 port for anything programmatic.
 
 The S3 API, on port 9000:
 
@@ -312,7 +314,7 @@ The S3 API, on port 9000:
 | GetObject, HeadObject | `GET` / `HEAD` `/{bucket}/{key}`, with `Range` and conditional headers |
 | PutObject | `PUT /{bucket}/{key}` |
 | DeleteObject, DeleteObjects | `DELETE /{bucket}/{key}`, `POST /{bucket}?delete` |
-| Multipart | `?uploads`, `?uploadId=`, `?partNumber=` — create, upload, list, complete, abort |
+| Multipart | `?uploads`, `?uploadId=`, `?partNumber=`: create, upload, list, complete, abort |
 | Bucket policy / ACL / location / versioning | `GET`, `PUT`, `DELETE` on `/{bucket}?policy`, `?acl`, `?location`, `?versioning` |
 | Bucket CORS | `GET`, `PUT`, `DELETE` on `/{bucket}?cors`, plus `OPTIONS` preflights on any path |
 

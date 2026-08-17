@@ -32,7 +32,27 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 # --- Drogon (HTTP server + event loop + thread pool) -----------------------
-find_package(Drogon 1.9 QUIET)
+#
+# Drogon is the one dependency we patch. Its request parser refuses a
+# zero-length body carrying `Expect: 100-continue`, which is precisely how every
+# S3 client writes an empty object — see
+# cmake/patches/drogon-expect-100-continue.patch. A fetched Drogon gets the
+# patch; a system Drogon cannot, so the two are not interchangeable and the
+# option below decides which failure the operator gets.
+option(MONOBUCKET_ALLOW_SYSTEM_DROGON
+       "Permit an unpatched system Drogon, which cannot store zero-byte objects" OFF)
+
+if(MONOBUCKET_ALLOW_SYSTEM_DROGON)
+    find_package(Drogon 1.9 QUIET)
+    if(Drogon_FOUND)
+        message(WARNING
+            "Using a system Drogon, which does not carry MonoBucket's "
+            "Expect: 100-continue patch.\n"
+            "Zero-byte objects will fail with 400 through boto3 and the AWS CLI. "
+            "See backend/cmake/patches/drogon-expect-100-continue.patch.")
+    endif()
+endif()
+
 if(NOT Drogon_FOUND)
     # Drogon does not vendor jsoncpp or libuuid; both must come from the
     # system even when Drogon itself is fetched. Check up front so the failure
@@ -69,11 +89,17 @@ if(NOT Drogon_FOUND)
     set(BUILD_DOC          OFF CACHE INTERNAL "")
     set(BUILD_BROTLI       ON  CACHE INTERNAL "")
     set(BUILD_YAML_CONFIG  OFF CACHE INTERNAL "")
+    set(MONOBUCKET_DROGON_PATCH
+        "${CMAKE_CURRENT_LIST_DIR}/patches/drogon-expect-100-continue.patch")
+
     FetchContent_Declare(drogon
         GIT_REPOSITORY https://github.com/drogonframework/drogon.git
         GIT_TAG        v1.9.9
         GIT_SHALLOW    TRUE
-        GIT_PROGRESS   TRUE)
+        GIT_PROGRESS   TRUE
+        PATCH_COMMAND  ${CMAKE_COMMAND}
+                       -DPATCH_FILE=${MONOBUCKET_DROGON_PATCH}
+                       -P "${CMAKE_CURRENT_LIST_DIR}/ApplyPatch.cmake")
     # Drogon and Trantor still declare a pre-3.10 policy floor, which CMake
     # reports as a deprecation warning we can do nothing about. Silence it for
     # the vendored configure only, then restore the default so our own

@@ -5,11 +5,11 @@ SvelteKit administration dashboard compiled into the executable.
 
 One binary. One container. No sidecars, no external database.
 
-> **Status: pre-alpha.** Phases 1–3 (scaffolding and lifecycle, the storage
-> engine, the cache layer) and the Phase 5 embedding pipeline are in place. The
-> S3 protocol layer is not — there is no HTTP path to an object yet, so the
-> engine is reachable only from tests. See [ROADMAP.md](ROADMAP.md). Do not put
-> data in it.
+> **Status: pre-alpha.** Phases 1–4 (scaffolding and lifecycle, the storage
+> engine, the cache layer, the S3 REST API) and the Phase 5 embedding pipeline
+> are in place. `aws s3`, `boto3` and `rclone` all work against it. The
+> dashboard itself does not exist yet — the console port serves an empty SPA.
+> See [ROADMAP.md](ROADMAP.md). Do not put data you cannot lose in it.
 
 ---
 
@@ -41,6 +41,12 @@ MonoBucket/
 Three things come from the system: jsoncpp and libuuid, which Drogon links
 against, and RocksDB, which holds the metadata. Everything else is fetched and
 pinned by CMake.
+
+Drogon is always built from source, even when one is installed. It is the one
+dependency we patch — its request parser refuses the zero-length body that every
+S3 client sends when writing an empty object, so an unpatched build cannot store
+one (`backend/cmake/patches/`). `-DMONOBUCKET_ALLOW_SYSTEM_DROGON=ON` uses an
+installed copy instead and warns about what that costs.
 
 RocksDB is not vendored deliberately — it is a ~40 MB static archive that pulls
 in gflags, snappy, lz4, zstd and bz2, and building it from source would dominate
@@ -269,6 +275,8 @@ misreading it.
 
 ## Endpoints available today
 
+System routes, on both listeners unless noted:
+
 | Endpoint | Listener | Purpose |
 | --- | --- | --- |
 | `GET /healthz` | both | Liveness |
@@ -277,7 +285,25 @@ misreading it.
 | `GET /_mb/version` | both | Version and build info |
 | `GET /_mb/config` | console | Resolved configuration, secrets redacted |
 
-The S3 API itself arrives in Phase 4.
+The S3 API, on port 9000:
+
+| Operation | Request |
+| --- | --- |
+| ListBuckets | `GET /` |
+| CreateBucket / DeleteBucket / HeadBucket | `PUT` / `DELETE` / `HEAD` `/{bucket}` |
+| ListObjects, ListObjectsV2 | `GET /{bucket}[?list-type=2]`, with `prefix`, `delimiter`, `max-keys`, `continuation-token` |
+| GetObject, HeadObject | `GET` / `HEAD` `/{bucket}/{key}`, with `Range` and conditional headers |
+| PutObject | `PUT /{bucket}/{key}` |
+| DeleteObject, DeleteObjects | `DELETE /{bucket}/{key}`, `POST /{bucket}?delete` |
+| Multipart | `?uploads`, `?uploadId=`, `?partNumber=` — create, upload, list, complete, abort |
+| Bucket policy / ACL / location / versioning | `GET`, `PUT`, `DELETE` on `/{bucket}?policy`, `?acl`, `?location`, `?versioning` |
+
+Authentication is SigV4, in both header and presigned-query form, including
+`aws-chunked` streaming signatures. Path-style addressing always works;
+virtual-host style (`bucket.s3.example.com`) requires `MONOBUCKET_S3_DOMAIN`.
+Anonymous reads are served only for a bucket whose policy grants them.
+
+`CopyObject` and object versioning are not implemented and answer `501`.
 
 ---
 

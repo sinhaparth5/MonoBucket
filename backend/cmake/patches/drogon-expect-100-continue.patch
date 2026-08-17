@@ -1,0 +1,38 @@
+Answer a zero-length body carrying Expect: 100-continue instead of refusing it.
+
+Drogon's request parser rejects any HTTP/1.1 request that carries
+`Expect: 100-continue` together with `Content-Length: 0`, returning 400 before
+the request reaches a handler. Every S3 client writes a zero-byte object
+exactly that way, so without this patch `boto3.put_object(Body=b"")`,
+`aws s3 cp` of an empty file, and therefore `aws s3 sync` of any tree
+containing one, all fail with an unexplained 400.
+
+RFC 7231 §5.1.1 makes 100-continue an optimisation for withholding a body the
+server may not want. With no body to withhold there is nothing to negotiate,
+and the request is already complete: the only correct action is to handle it.
+
+Present in v1.9.9 and still on upstream master as of 2026-08. Reported
+upstream; drop this patch once a release carries the fix. Should the file move
+or the surrounding lines change, `git apply` fails and the configure step stops
+— which is the intended behaviour, not a nuisance: it forces a look at whether
+the bug is still there.
+
+diff --git a/lib/src/HttpRequestParser.cc b/lib/src/HttpRequestParser.cc
+index a42a83f..aa7a29b 100644
+--- a/lib/src/HttpRequestParser.cc
++++ b/lib/src/HttpRequestParser.cc
+@@ -278,8 +278,12 @@ int HttpRequestParser::parseRequest(MsgBuffer *buf)
+                 {
+                     if (remainContentLength_ == 0)
+                     {
+-                        // error
+-                        return -k400BadRequest;
++                        // There is no body to wait for, so there is nothing to
++                        // withhold: the request is already complete. Fall
++                        // through and let it be handled. Rejecting it breaks
++                        // every S3 client that writes a zero-byte object, all
++                        // of which send Expect: 100-continue with
++                        // Content-Length: 0.
+                     }
+                     else
+                     {

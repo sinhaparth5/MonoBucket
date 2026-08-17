@@ -75,6 +75,64 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
 
 ### Added
 
+<!-- Phase 4 — S3 REST API Protocol -->
+
+- **AWS Signature Version 4 verification** on OpenSSL: canonical request,
+  signed-header selection, query-string (presigned) signing and `aws-chunked`
+  payload signing, with a clock-skew window and constant-time comparison of
+  both the signature and the access key id. The whole engine is expressed over
+  plain strings rather than framework types, because it is the one part of the
+  server where a subtle mistake is a security hole rather than a bug — and
+  because that is what makes it testable against the AWS reference vectors
+  without a socket.
+- **Presigned URL verification**, bounded to S3's own 1-to-604800-second
+  lifetime. Zero is treated as a URL that was already invalid when it was
+  minted, not as "never expires".
+- **Anonymous read for public buckets**, gated on a deliberately narrow reading
+  of one shape of bucket policy. A document the evaluator does not recognise is
+  stored and echoed back unchanged but grants nothing: refusing to guess is the
+  only safe direction to be wrong in. Listing every bucket is never public, and
+  no anonymous request can reach a mutating operation.
+- **The S3 endpoint surface.** ListBuckets; bucket create / delete / head and
+  both listing versions with prefix, delimiter and pagination; object GET
+  (including `Range` and RFC 7232 preconditions), PUT, DELETE, HEAD and
+  `POST ?delete`; the six multipart operations; and the bucket policy, ACL,
+  location and versioning subresources the dashboard's link generator needs.
+- **Operation classification as one pure function.** S3 does not route on the
+  path alone — `GET /bucket`, `GET /bucket?uploads` and `GET /bucket?list-type=2`
+  are three different operations — so the whole routing table lives in
+  `classify()` where it can be tested exhaustively, rather than spread across
+  handlers as a chain of header and query checks.
+- **S3-shaped XML errors with request ids.** The error code string is part of
+  the protocol: the AWS CLI backs off on `SlowDown`, boto3 raises a distinct
+  exception per code, rclone treats `NoSuchKey` differently from `AccessDenied`.
+  Codes and their HTTP statuses therefore travel together in one table and are
+  never assembled at a call site. Unexpected exception text goes to the log, not
+  to the client, since it is as likely to name a path on our disk as anything
+  the caller could act on.
+- **One catch-all route serving both listeners**, dispatching on the listener
+  port. Drogon takes the first matching regex handler, so a separate catch-all
+  for the console and for S3 would shadow each other by registration order;
+  deciding inside a single handler removes the ordering from the question. The
+  bounded I/O pool's rejection now has its wire form: `503 SlowDown` with
+  `Retry-After`, counted separately from 5xx because shedding load is the queue
+  working, not the server failing.
+- **Reserved bucket names.** `healthz`, `readyz`, `metrics` and `_mb` are
+  refused at creation. Drogon matches an exact path before the catch-all, so a
+  bucket with one of those names would exist in the metadata store and be
+  permanently unaddressable — a clear error now beats an unexplainable 404
+  later.
+
+### Changed
+
+- **Drogon is now always built from source unless a system copy is explicitly
+  requested.** It is the one dependency MonoBucket patches (see *Fixed*), and a
+  system Drogon cannot carry the patch — so preferring one silently, as
+  `find_package` first did, would make whether the server can store an empty
+  object depend on which machine built it. `find_package(Drogon)` is now tried
+  only under `-DMONOBUCKET_ALLOW_SYSTEM_DROGON=ON`, which warns about exactly
+  what is given up. Every other dependency keeps the find-first policy.
+
 <!-- Phase 3 — Abstraction & Cache Layer -->
 
 - **`CacheProvider` interface.** `get` / `set` / `del` / `evict` / `clear` plus
@@ -236,6 +294,17 @@ Published to `ghcr.io/sinhaparth5/monobucket`:
   documenting every setting, and this changelog.
 
 ### Fixed
+
+- **Zero-byte objects could not be written by any AWS SDK.** Drogon's request
+  parser rejects an HTTP/1.1 request carrying `Expect: 100-continue` together
+  with `Content-Length: 0`, answering 400 before the request reaches a handler
+  — and that is exactly how boto3, the AWS CLI and the SDKs write an empty
+  object. `put_object(Body=b"")` failed, `aws s3 cp` of an empty file failed,
+  and `aws s3 sync` failed on any tree containing one, all with a bare 400 that
+  named no cause. With no body to withhold there is nothing for 100-continue to
+  negotiate and the request is already complete, so the only correct action is
+  to handle it. Patched in `backend/cmake/patches/`, applied to the fetched
+  source at configure time. Reported upstream; still present on master.
 
 - `StorageEngine::recover()` documented itself as reclaiming every unreferenced
   payload regardless of age, but ran through the ordinary sweep and so honoured

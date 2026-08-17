@@ -6,8 +6,8 @@ dashboard.
 
 **Status legend** — `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Current phase:** Phase 4 — S3 REST API Protocol
-**Last updated:** 2026-08-16
+**Current phase:** Phase 5 — SvelteKit Frontend & Asset Embedding
+**Last updated:** 2026-08-17
 
 ---
 
@@ -154,25 +154,44 @@ in Phase 4, so `monobucket_cache_hits_total` is legitimately 0 today.*
 *Goal: real S3 clients work unmodified.*
 
 ### Router & signature engine
-- [ ] AWS Signature Version 4 validator on OpenSSL: canonical request, signed
+- [x] AWS Signature Version 4 validator on OpenSSL: canonical request, signed
       headers, query-string signing, chunked payload signing
-- [ ] Clock-skew rejection window
-- [ ] Presigned URL verification
-- [ ] Anonymous read paths for public buckets
-- [ ] S3-shaped XML error responses with request IDs
+- [x] Clock-skew rejection window
+- [x] Presigned URL verification
+- [x] Anonymous read paths for public buckets
+- [x] S3-shaped XML error responses with request IDs
 
 ### Endpoints
-- [ ] **Service:** `GET /` (ListBuckets)
-- [ ] **Bucket:** `PUT /{bucket}`, `DELETE /{bucket}`, `HEAD /{bucket}`,
+- [x] **Service:** `GET /` (ListBuckets)
+- [x] **Bucket:** `PUT /{bucket}`, `DELETE /{bucket}`, `HEAD /{bucket}`,
       `GET /{bucket}` (ListObjects + ListObjectsV2, prefix/delimiter/pagination)
-- [ ] **Object:** `GET` (incl. `Range`), `PUT`, `DELETE`, `HEAD`,
+- [x] **Object:** `GET` (incl. `Range`), `PUT`, `DELETE`, `HEAD`,
       `POST ?delete` (DeleteObjects)
-- [ ] **Multipart:** `CreateMultipartUpload`, `UploadPart`, `ListParts`,
+- [x] **Multipart:** `CreateMultipartUpload`, `UploadPart`, `ListParts`,
       `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListMultipartUploads`
-- [ ] Bucket policy / public-access endpoints backing the link generator
+- [x] Bucket policy / public-access endpoints backing the link generator
+
+`CopyObject` is deliberately absent and answers 501 rather than silently
+storing the header's value as an object. It is not on this phase's list; it
+belongs with the dashboard's file operations.
 
 **Exit criteria:** `aws s3 cp/sync`, `boto3` and `rclone` all pass a functional
 smoke suite against a live instance.
+*Met on 2026-08-17. `aws s3 cp/sync` (including a 17 MiB multipart transfer and
+a repeat sync that correctly transfers nothing), boto3 (including the managed
+transfer manager and its paginator), and `rclone copy/sync/check` all pass
+against a live instance; `rclone check` verifies every object's hash. The raw
+protocol surface — SigV4 header and presigned signing, `aws-chunked` streaming
+signatures, ranged and conditional GETs, listing pagination, bucket policy —
+is covered by a separate suite driven straight off the wire.*
+
+*Reaching that took one dependency patch. Drogon's request parser refuses a
+zero-length body sent with `Expect: 100-continue`, which is exactly how every
+S3 client writes an empty object, so `boto3.put_object(Body=b"")` and
+`aws s3 cp` of an empty file failed with a bare 400 raised before any
+MonoBucket code ran. Fixed in `backend/cmake/patches/`; the bug is still on
+upstream master, so a system Drogon is not equivalent and now has to be asked
+for explicitly.*
 
 ---
 

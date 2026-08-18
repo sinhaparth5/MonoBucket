@@ -84,6 +84,15 @@ struct BucketRecord {
     /// latter cannot occur, because an empty CORSConfiguration is refused.
     std::vector<CorsRule> cors;
 
+    /// The bucket's storage allocation, in bytes. Zero means unlimited.
+    ///
+    /// Only the allocation is stored, never what the bucket currently holds:
+    /// usage is re-derived from the objects themselves at startup and
+    /// maintained in memory from then on. A usage counter written beside the
+    /// records it counts is a counter that can disagree with them after any
+    /// interrupted write, and nothing could then say which of the two is right.
+    std::uint64_t quotaBytes = 0;
+
     /// Overrides `MONOBUCKET_DURABILITY` for writes to this bucket.
     ///
     /// Unset means "follow the server", which is deliberately not the same as

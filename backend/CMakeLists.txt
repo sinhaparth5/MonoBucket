@@ -39,6 +39,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/storage/digest.cpp
     src/storage/durability.cpp
     src/storage/keyspace.cpp
+    src/storage/quota.cpp
     src/storage/records.cpp
     src/storage/rocksdb_metadata_store.cpp
     src/storage/storage_engine.cpp

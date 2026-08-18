@@ -27,6 +27,16 @@ enum class StorageErrorCode {
     BucketAlreadyExists,
     BucketNotEmpty,
     InvalidPart,
+
+    /// A write does not fit in what is left of its bucket's allocation.
+    QuotaExceeded,
+
+    /// An allocation would be set below what the bucket already holds.
+    QuotaBelowUsage,
+
+    /// An allocation would put the instance over its allocatable capacity.
+    InsufficientCapacity,
+
     Corruption,
     Io,
     Internal,
@@ -88,6 +98,15 @@ public:
         /// The payload of the object this PUT overwrote, if any. Now
         /// unreferenced and owed to the reclaimer.
         std::optional<std::string> releasedBlobId;
+
+        /// How large that object was, or zero when the key was new.
+        ///
+        /// Reported by the commit that released it rather than read
+        /// separately, because a bucket's usage is the running sum of these
+        /// deltas: a size read outside the lock that committed the change is a
+        /// size another writer may already have replaced, and the drift would
+        /// be permanent.
+        std::uint64_t replacedBytes = 0;
     };
 
     /// Makes the object visible. Throws NoSuchBucket.
@@ -104,6 +123,7 @@ public:
     struct DeleteOutcome {
         bool                       existed = false;
         std::optional<std::string> releasedBlobId;
+        std::uint64_t              releasedBytes = 0;
     };
 
     /// Deleting a key that does not exist is not an error: S3 returns 204
@@ -131,6 +151,7 @@ public:
         /// Re-uploading a part number replaces it; the previous payload is
         /// released here.
         std::optional<std::string> releasedBlobId;
+        std::uint64_t              replacedBytes = 0;
     };
 
     /// Throws NoSuchUpload.
@@ -140,14 +161,27 @@ public:
     /// Ascending by part number. Throws NoSuchUpload.
     virtual std::vector<PartRecord> listParts(std::string_view uploadId) = 0;
 
+    struct AbortOutcome {
+        std::vector<std::string> releasedBlobIds;
+
+        /// The parts' total size, so the bucket's pending charge can be
+        /// dropped by exactly what the same commit released.
+        std::uint64_t releasedBytes = 0;
+
+        /// Which bucket the upload belonged to. The caller has to charge
+        /// somewhere, and after this returns there is no record left to ask.
+        std::string bucket;
+    };
+
     /// Discards the upload and every part. Returns all released payloads.
     /// Throws NoSuchUpload.
-    virtual std::vector<std::string> abortUpload(std::string_view uploadId,
-                                                 Durability       durability) = 0;
+    virtual AbortOutcome abortUpload(std::string_view uploadId, Durability durability) = 0;
 
     struct CompleteOutcome {
         std::optional<std::string> releasedBlobId;  ///< object this replaced
+        std::uint64_t              replacedBytes = 0;
         std::vector<std::string>   releasedPartBlobIds;
+        std::uint64_t              releasedPartBytes = 0;
     };
 
     /// Atomically retires the upload and publishes `object` in its place.
@@ -266,6 +300,18 @@ public:
     /// Counters maintained incrementally, not scanned per call — `/metrics` is
     /// scraped far too often to walk the keyspace.
     virtual UsageStats usage() const = 0;
+
+    /// Stored object bytes and in-progress part bytes per bucket, as of the
+    /// scan this store did when it opened.
+    ///
+    /// Read once, by the quota ledger, which maintains it incrementally from
+    /// then on. Recomputing it per request would mean walking every object to
+    /// answer a question the console asks on every page load.
+    struct BucketCharge {
+        std::uint64_t objectBytes = 0;
+        std::uint64_t partBytes   = 0;
+    };
+    virtual std::vector<std::pair<std::string, BucketCharge>> bucketCharges() const = 0;
 
     /// Engine-specific gauges for `/metrics`, already namespaced by the caller.
     virtual std::vector<std::pair<std::string, std::uint64_t>> engineGauges() const = 0;

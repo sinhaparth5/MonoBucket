@@ -234,6 +234,20 @@ before you rely on it:
   session carries a copy of the role, so changing a user's role or status signs
   them out rather than silently updating the page. S3 access keys need no such
   step — the owner's record is read on every signed request.
+- **Storage allocations are logical, not physical, and are enforced in one
+  process.** A bucket's allocation counts the object bytes it holds; it does not
+  count the copy a multipart completion makes while concatenating parts, the
+  RocksDB metadata beside them, or a payload still in `tmp/`. The allocatable
+  capacity carries a 10% reserve for exactly that, and the reserve is a
+  heuristic rather than a measurement. The tally itself is in memory, rebuilt
+  from the objects at startup — correct for the single writer MonoBucket is, and
+  not a scheme that would survive a second process writing the same directory.
+- **An allocation is not a reservation on disk.** Allocating 500 GiB to a bucket
+  reserves nothing from the filesystem; it only caps what that bucket may store.
+  Allocating more in total than the disk holds is refused, but a disk shared with
+  anything else can still fill under MonoBucket without any bucket reaching its
+  allocation. Set `MONOBUCKET_ALLOCATABLE_BYTES` when the data directory is not
+  alone on its volume.
 - **Object versioning, lifecycle rules, server-side encryption and IAM-style
   policies** beyond the credentials described above do not exist.
 

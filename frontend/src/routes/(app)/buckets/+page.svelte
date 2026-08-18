@@ -3,28 +3,51 @@
 	import { resolve } from '$app/paths';
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type Bucket } from '$lib/api';
-	import { formatTimestamp, plural } from '$lib/format';
+	import { api, ApiError, type Bucket, type Capacity } from '$lib/api';
+	import {
+		fillFraction,
+		formatBytes,
+		formatPercent,
+		formatTimestamp,
+		plural,
+		splitAllocation,
+		type AllocationUnit
+	} from '$lib/format';
 	import { motionDistance, motionDuration } from '$lib/motion';
+	import AllocationField from '$lib/components/AllocationField.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let buckets = $state<Bucket[] | null>(null);
+	let capacity = $state<Capacity | null>(null);
 	let error = $state('');
 	let busy = $state('');
 	let filter = $state('');
 
 	let newName = $state('');
+	let newQuotaBytes = $state(1024 ** 3);
+	let newQuotaAmount = $state(1);
+	let newQuotaUnit = $state<AllocationUnit>('GiB');
 	let createError = $state('');
 	let creating = $state(false);
 	let createDialog: HTMLDialogElement;
 	let nameField = $state<HTMLInputElement | undefined>();
+
+	let pendingQuota = $state<Bucket | null>(null);
+	let quotaAmount = $state(1);
+	let quotaUnit = $state<AllocationUnit>('GiB');
+	let quotaBytes = $state(1024 ** 3);
+	let quotaError = $state('');
+	let savingQuota = $state(false);
+	let quotaDialog: HTMLDialogElement;
 
 	let pendingDelete = $state<Bucket | null>(null);
 	let deleteDialog: HTMLDialogElement;
 
 	async function load() {
 		try {
-			buckets = await api.buckets();
+			const answer = await api.bucketsWithCapacity();
+			buckets = answer.buckets;
+			capacity = answer.capacity;
 			error = '';
 		} catch (cause) {
 			if (cause instanceof ApiError && cause.unauthorized) {
@@ -43,6 +66,12 @@
 		(buckets ?? []).filter((bucket) => bucket.name.includes(filter.trim().toLowerCase()))
 	);
 
+	// null when the instance names no overall capacity: there is then nothing to
+	// count down from, and the field says so rather than drawing an empty gauge.
+	const available = $derived(
+		capacity && capacity.allocatableBytes > 0 ? capacity.remainingBytes : null
+	);
+
 	function openCreate() {
 		createError = '';
 		createDialog.showModal();
@@ -56,7 +85,7 @@
 		createError = '';
 		creating = true;
 		try {
-			await api.createBucket(newName.trim());
+			await api.createBucket(newName.trim(), newQuotaBytes);
 			newName = '';
 			createDialog.close();
 			await load();
@@ -98,6 +127,37 @@
 			error = cause instanceof ApiError ? cause.message : 'could not change bucket access';
 		} finally {
 			busy = '';
+		}
+	}
+
+	function openQuota(bucket: Bucket) {
+		pendingQuota = bucket;
+		quotaError = '';
+		// Seeded from the current allocation, or from what the bucket holds when
+		// it has none — an unlimited bucket being given a figure for the first
+		// time should not start below its own contents.
+		const seed = bucket.quotaBytes > 0 ? bucket.quotaBytes : Math.max(bucket.usedBytes, 1024 ** 3);
+		const split = splitAllocation(seed);
+		quotaAmount = split.amount;
+		quotaUnit = split.unit;
+		quotaBytes = seed;
+		quotaDialog.showModal();
+	}
+
+	async function saveQuota(event: SubmitEvent) {
+		event.preventDefault();
+		if (!pendingQuota) return;
+		quotaError = '';
+		savingQuota = true;
+		try {
+			await api.setBucketQuota(pendingQuota.name, quotaBytes);
+			quotaDialog.close();
+			pendingQuota = null;
+			await load();
+		} catch (cause) {
+			quotaError = cause instanceof ApiError ? cause.message : 'could not change the allocation';
+		} finally {
+			savingQuota = false;
 		}
 	}
 
@@ -166,6 +226,41 @@
 		</div>
 	{/if}
 
+	{#if capacity && capacity.allocatableBytes > 0}
+		<div class="panel flex flex-col gap-3 p-4 sm:p-5">
+			<div class="flex flex-wrap items-baseline justify-between gap-2">
+				<span class="eyebrow">Instance capacity</span>
+				<span class="text-base-content/60 text-xs">
+					{formatBytes(capacity.allocatedBytes)} allocated of
+					{formatBytes(capacity.allocatableBytes)}
+					· {formatBytes(capacity.remainingBytes)} free to allocate
+				</span>
+			</div>
+			<div
+				class="bg-base-300 h-2 w-full overflow-hidden rounded-full"
+				role="meter"
+				aria-label="Allocated capacity"
+				aria-valuenow={capacity.allocatedBytes}
+				aria-valuemin={0}
+				aria-valuemax={capacity.allocatableBytes}
+			>
+				<div
+					class="bg-primary h-full rounded-full transition-[width] duration-500"
+					style="width: {formatPercent(
+						fillFraction(capacity.allocatedBytes, capacity.allocatableBytes),
+						2
+					)}"
+				></div>
+			</div>
+			{#if capacity.unlimitedBuckets > 0}
+				<p class="text-base-content/55 text-xs">
+					{plural(capacity.unlimitedBuckets, 'bucket')} carry no allocation, so what is free to allocate
+					is an upper bound — those buckets can still grow.
+				</p>
+			{/if}
+		</div>
+	{/if}
+
 	{#if !buckets}
 		<div class="skeleton rounded-box h-48" out:fade={{ duration: motionDuration(100) }}></div>
 	{:else if buckets.length === 0}
@@ -202,6 +297,7 @@
 				<thead>
 					<tr class="border-base-300">
 						<th>Name</th>
+						<th class="w-56">Storage</th>
 						<th class="w-52">Created</th>
 						<th class="w-40">Anonymous read</th>
 						<th class="w-0"></th>
@@ -239,6 +335,42 @@
 										</span>
 									</span>
 								</a>
+							</td>
+							<td>
+								<button
+									class="group/quota flex w-full flex-col gap-1 text-left"
+									onclick={() => openQuota(bucket)}
+									aria-label="Change the allocation for {bucket.name}"
+								>
+									<span class="text-base-content/70 flex items-center gap-1 text-xs">
+										{formatBytes(bucket.usedBytes)}
+										{#if bucket.quotaBytes > 0}
+											/ {formatBytes(bucket.quotaBytes)}
+										{:else}
+											<span class="badge badge-xs badge-ghost">unlimited</span>
+										{/if}
+										<Icon
+											name="edit"
+											class="size-3 opacity-0 transition-opacity group-hover/quota:opacity-60"
+										/>
+									</span>
+									{#if bucket.quotaBytes > 0}
+										<span class="bg-base-300 block h-1.5 w-full overflow-hidden rounded-full">
+											<span
+												class="block h-full rounded-full transition-[width] duration-500 {fillFraction(
+													bucket.usedBytes + bucket.pendingBytes,
+													bucket.quotaBytes
+												) > 0.9
+													? 'bg-warning'
+													: 'bg-success'}"
+												style="width: {formatPercent(
+													fillFraction(bucket.usedBytes + bucket.pendingBytes, bucket.quotaBytes),
+													2
+												)}"
+											></span>
+										</span>
+									{/if}
+								</button>
 							</td>
 							<td class="text-base-content/60">{formatTimestamp(bucket.createdAtMs)}</td>
 							<td>
@@ -332,6 +464,17 @@
 				</p>
 			</fieldset>
 
+			<!-- Required, not optional. A bucket created here without a figure
+			     would be an unlimited bucket nobody meant to make, and the point
+			     of dividing the instance up is that every share is chosen. -->
+			<AllocationField
+				bind:bytes={newQuotaBytes}
+				bind:amount={newQuotaAmount}
+				bind:unit={newQuotaUnit}
+				availableBytes={available}
+				disabled={creating}
+			/>
+
 			{#if createError}
 				<div
 					role="alert"
@@ -373,6 +516,50 @@
 			<button class="btn btn-sm" type="button" onclick={() => deleteDialog.close()}>Cancel</button>
 			<button class="btn btn-error btn-sm" type="button" onclick={confirmDelete}>Delete</button>
 		</div>
+	</div>
+	<form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog bind:this={quotaDialog} class="modal">
+	<div class="modal-box max-w-md">
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
+				<Icon name="bucket" class="size-4" />
+			</span>
+			Allocation for {pendingQuota?.name}
+		</h2>
+
+		<form class="mt-4 flex flex-col gap-4" onsubmit={saveQuota}>
+			<AllocationField
+				bind:bytes={quotaBytes}
+				bind:amount={quotaAmount}
+				bind:unit={quotaUnit}
+				availableBytes={available === null || !pendingQuota
+					? available
+					: available + pendingQuota.quotaBytes}
+				usedBytes={pendingQuota ? pendingQuota.usedBytes + pendingQuota.pendingBytes : 0}
+				disabled={savingQuota}
+			/>
+
+			{#if quotaError}
+				<div
+					role="alert"
+					class="alert alert-error alert-soft text-sm"
+					in:fly={{ y: motionDistance(-4), duration: motionDuration(180) }}
+				>
+					<Icon name="warning" class="size-4" />
+					<span>{quotaError}</span>
+				</div>
+			{/if}
+
+			<div class="modal-action">
+				<button class="btn btn-sm" type="button" onclick={() => quotaDialog.close()}>Cancel</button>
+				<button class="btn btn-primary btn-sm" type="submit" disabled={savingQuota}>
+					{#if savingQuota}<span class="loading loading-spinner loading-xs"></span>{/if}
+					Save
+				</button>
+			</div>
+		</form>
 	</div>
 	<form method="dialog" class="modal-backdrop"><button>close</button></form>
 </dialog>

@@ -178,7 +178,11 @@ drogon::HttpResponsePtr handleCreateBucket(const S3Context& context, const S3Req
     }
 
     try {
-        context.storage.createBucket(request.bucket);
+        // CreateBucket has no field for a storage allocation, so the bucket
+        // gets whatever the server hands to buckets that could not ask.
+        // Inventing a query parameter for it would be a deviation clients
+        // cannot discover; the console is where an allocation is chosen.
+        context.storage.createBucketWithDefaultQuota(request.bucket);
     } catch (const StorageError& error) {
         if (error.code() != StorageErrorCode::BucketAlreadyExists) throw;
 

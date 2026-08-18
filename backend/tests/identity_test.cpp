@@ -35,6 +35,7 @@ constexpr Expected kMatrix[] = {
     {Role::Administrator, Permission::ObjectRead, true},
     {Role::Administrator, Permission::ObjectWrite, true},
     {Role::Administrator, Permission::SettingsRead, true},
+    {Role::Administrator, Permission::CapacityWrite, true},
     {Role::Administrator, Permission::CredentialRead, true},
     {Role::Administrator, Permission::CredentialWrite, true},
     {Role::Administrator, Permission::UserRead, true},
@@ -47,6 +48,9 @@ constexpr Expected kMatrix[] = {
     {Role::Operator, Permission::ObjectRead, true},
     {Role::Operator, Permission::ObjectWrite, true},
     {Role::Operator, Permission::SettingsRead, true},
+    // Sizing the bucket you are creating is BucketWrite; moving capacity
+    // between buckets that already exist is not an operator's decision.
+    {Role::Operator, Permission::CapacityWrite, false},
     {Role::Operator, Permission::CredentialRead, true},
     {Role::Operator, Permission::CredentialWrite, true},
     {Role::Operator, Permission::UserRead, false},
@@ -59,6 +63,7 @@ constexpr Expected kMatrix[] = {
     {Role::ReadOnly, Permission::ObjectRead, true},
     {Role::ReadOnly, Permission::ObjectWrite, false},
     {Role::ReadOnly, Permission::SettingsRead, true},
+    {Role::ReadOnly, Permission::CapacityWrite, false},
     {Role::ReadOnly, Permission::CredentialRead, true},
     {Role::ReadOnly, Permission::CredentialWrite, false},
     {Role::ReadOnly, Permission::UserRead, false},
@@ -85,6 +90,7 @@ TEST_CASE("every role is decided for every permission", "[identity]") {
 TEST_CASE("only the administrator can manage users or read the audit log", "[identity]") {
     for (const Role role : kRoles) {
         const bool isAdmin = role == Role::Administrator;
+        CHECK(allows(role, Permission::CapacityWrite) == isAdmin);
         CHECK(allows(role, Permission::UserRead) == isAdmin);
         CHECK(allows(role, Permission::UserWrite) == isAdmin);
         CHECK(allows(role, Permission::AuditRead) == isAdmin);

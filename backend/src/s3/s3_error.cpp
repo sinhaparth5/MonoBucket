@@ -110,6 +110,17 @@ const S3ErrorInfo& lookup(S3ErrorCode code) noexcept {
                 "number."};
             return info;
         }
+        case S3ErrorCode::InsufficientCapacity: {
+            // 507, which is not an S3 code — S3 has no notion of an instance
+            // running out of capacity to allocate, because AWS does not run
+            // out. It is deliberately distinct from QuotaExceeded: one says
+            // this bucket is full, the other says the server has nothing left
+            // to give a new bucket, and the operator's next step differs.
+            static constexpr S3ErrorInfo info{
+                "InsufficientCapacity", 507,
+                "The server has no remaining allocatable capacity for this bucket."};
+            return info;
+        }
         case S3ErrorCode::InvalidRange: {
             static constexpr S3ErrorInfo info{
                 "InvalidRange", 416, "The requested range is not satisfiable."};
@@ -195,6 +206,16 @@ const S3ErrorInfo& lookup(S3ErrorCode code) noexcept {
                 "At least one of the preconditions you specified did not hold."};
             return info;
         }
+        case S3ErrorCode::QuotaExceeded: {
+            // 403 rather than 507, matching what other S3-compatible servers
+            // return for a bucket over its quota. It is terminal: a client
+            // that retries will be refused again, and the AWS CLI treats 403
+            // as a reason to stop rather than to back off.
+            static constexpr S3ErrorInfo info{
+                "QuotaExceeded", 403,
+                "The write exceeds the storage allocation of the specified bucket."};
+            return info;
+        }
         case S3ErrorCode::RequestTimeTooSkewed: {
             static constexpr S3ErrorInfo info{
                 "RequestTimeTooSkewed", 403,
@@ -249,6 +270,13 @@ S3ErrorCode fromStorage(StorageErrorCode code) noexcept {
         case StorageErrorCode::BucketAlreadyExists: return S3ErrorCode::BucketAlreadyExists;
         case StorageErrorCode::BucketNotEmpty:      return S3ErrorCode::BucketNotEmpty;
         case StorageErrorCode::InvalidPart:         return S3ErrorCode::InvalidPart;
+        case StorageErrorCode::QuotaExceeded:       return S3ErrorCode::QuotaExceeded;
+        // A reduction below what is stored can only come from the console,
+        // which never signs an S3 request; if one ever reaches here it is a
+        // bad argument, not a full bucket.
+        case StorageErrorCode::QuotaBelowUsage:     return S3ErrorCode::InvalidArgument;
+        case StorageErrorCode::InsufficientCapacity:
+            return S3ErrorCode::InsufficientCapacity;
         // Corruption, Io and Internal are all "the server broke", and the
         // client's recourse is identical: retry, then report it. Distinguishing
         // them on the wire would only tell an attacker about our disk.

@@ -18,6 +18,39 @@ export function formatBytes(bytes: number, digits = 1): string {
 	return `${value.toFixed(unit === 0 ? 0 : digits)} ${BINARY_UNITS[unit]}`;
 }
 
+/// The units an allocation is entered in. Binary throughout, so the figure the
+/// operator types is the figure the server enforces — a "100 GB" that became
+/// 93.1 GiB in the bucket list would look like a bug in the arithmetic.
+export const ALLOCATION_UNITS = [
+	{ label: 'MiB', bytes: 1024 ** 2 },
+	{ label: 'GiB', bytes: 1024 ** 3 },
+	{ label: 'TiB', bytes: 1024 ** 4 }
+] as const;
+
+export type AllocationUnit = (typeof ALLOCATION_UNITS)[number]['label'];
+
+/// Splits a byte count into the largest unit that leaves a whole number, so an
+/// allocation set as "2 TiB" comes back out of the form as 2 TiB rather than
+/// 2048 GiB.
+export function splitAllocation(bytes: number): { amount: number; unit: AllocationUnit } {
+	for (const { label, bytes: scale } of [...ALLOCATION_UNITS].reverse()) {
+		if (bytes >= scale && bytes % scale === 0) return { amount: bytes / scale, unit: label };
+	}
+	return { amount: Math.max(1, Math.round(bytes / ALLOCATION_UNITS[0].bytes)), unit: 'MiB' };
+}
+
+export function allocationBytes(amount: number, unit: AllocationUnit): number {
+	const scale = ALLOCATION_UNITS.find((entry) => entry.label === unit)?.bytes ?? 1;
+	return Math.round(amount * scale);
+}
+
+/// How full something is, clamped to 0..1. An allocation reduced to below what
+/// is stored would otherwise draw a bar past the end of its own track.
+export function fillFraction(used: number, total: number): number {
+	if (!Number.isFinite(total) || total <= 0) return 0;
+	return Math.min(1, Math.max(0, used / total));
+}
+
 const COUNT = new Intl.NumberFormat(undefined);
 
 export function formatCount(value: number): string {

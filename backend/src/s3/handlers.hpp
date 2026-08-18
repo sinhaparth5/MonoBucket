@@ -55,6 +55,13 @@ public:
 
     std::string_view raw() const noexcept { return raw_; }
 
+    /// How many bytes the payload decodes to: what the client declared for a
+    /// chunked body, and what arrived for a plain one. What a storage
+    /// allocation is checked against before the body is written anywhere.
+    std::uint64_t decodedLength() const noexcept {
+        return chunked_ ? decodedLength_ : raw_.size();
+    }
+
 private:
     std::string_view raw_;
     const AuthOutcome& auth_;

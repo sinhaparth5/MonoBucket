@@ -6,6 +6,7 @@
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
+#include <unordered_map>
 
 #include <rocksdb/cache.h>
 #include <rocksdb/db.h>
@@ -105,6 +106,11 @@ std::string encodeBucket(const BucketRecord& bucket) {
     writer.boolean(bucket.durability.has_value());
     writer.u8(bucket.durability ? static_cast<std::uint8_t>(*bucket.durability)
                                 : static_cast<std::uint8_t>(Durability::Relaxed));
+    // The allocation, and only the allocation. What the bucket currently holds
+    // is not stored beside it: a usage counter written next to the objects it
+    // counts is a counter that can disagree with them after any interrupted
+    // write, and nothing could then say which of the two was right.
+    writer.varint(bucket.quotaBytes);
     return out;
 }
 
@@ -138,6 +144,10 @@ BucketRecord decodeBucket(std::string_view name, std::string_view stored) {
             }
             bucket.durability = static_cast<Durability>(level);
         }
+
+        // Appended again, on the same terms. A bucket written before storage
+        // allocations existed reads back with none, which is what it had.
+        if (!reader.exhausted()) bucket.quotaBytes = reader.varint();
     }
 
     return bucket;
@@ -611,6 +621,7 @@ public:
         PutOutcome outcome;
         if (auto previous = loadObject(storedKey, object.key)) {
             outcome.releasedBlobId = previous->blobId;
+            outcome.replacedBytes  = previous->size;
             bytes_.fetch_sub(previous->size, std::memory_order_relaxed);
         } else {
             objects_.fetch_add(1, std::memory_order_relaxed);
@@ -655,6 +666,7 @@ public:
 
         outcome.existed        = true;
         outcome.releasedBlobId = existing->blobId;
+        outcome.releasedBytes  = existing->size;
 
         rocksdb::WriteBatch batch;
         batch.Delete(toSlice(storedKey));
@@ -806,7 +818,9 @@ public:
         std::string    existing;
         const auto     status = db_->Get(readOptions_, toSlice(storedKey), &existing);
         if (status.ok()) {
-            outcome.releasedBlobId = decodePart(part.partNumber, existing).blobId;
+            const PartRecord previous = decodePart(part.partNumber, existing);
+            outcome.releasedBlobId    = previous.blobId;
+            outcome.replacedBytes     = previous.size;
         } else if (!status.IsNotFound()) {
             check(status, "reading part " + std::to_string(part.partNumber));
         }
@@ -833,8 +847,7 @@ public:
         return collectParts(uploadId);
     }
 
-    std::vector<std::string> abortUpload(std::string_view uploadId,
-                                         Durability       durability) override {
+    AbortOutcome abortUpload(std::string_view uploadId, Durability durability) override {
         const auto upload = loadUpload(uploadId);
         if (!upload) fail(StorageErrorCode::NoSuchUpload, "no such upload: " + std::string(uploadId));
 
@@ -842,16 +855,19 @@ public:
 
         const auto parts = collectParts(uploadId);
 
-        rocksdb::WriteBatch      batch;
-        std::vector<std::string> released;
-        released.reserve(parts.size());
+        rocksdb::WriteBatch batch;
+
+        AbortOutcome outcome;
+        outcome.bucket = upload->bucket;
+        outcome.releasedBlobIds.reserve(parts.size());
 
         for (const auto& part : parts) {
             batch.Delete(toSlice(keys::part(uploadId, part.partNumber)));
             // Released, not deleted: the payload outlives the metadata by
             // design, and the reclaimer unlinks it after this batch commits.
             batch.Put(toSlice(keys::orphan(part.blobId)), toSlice(orphanValue()));
-            released.push_back(part.blobId);
+            outcome.releasedBlobIds.push_back(part.blobId);
+            outcome.releasedBytes += part.size;
         }
 
         batch.Delete(toSlice(keys::uploadById(uploadId)));
@@ -861,8 +877,8 @@ public:
               "aborting upload " + std::string(uploadId));
 
         uploads_.fetch_sub(1, std::memory_order_relaxed);
-        orphans_.fetch_add(released.size(), std::memory_order_relaxed);
-        return released;
+        orphans_.fetch_add(outcome.releasedBlobIds.size(), std::memory_order_relaxed);
+        return outcome;
     }
 
     CompleteOutcome completeUpload(std::string_view bucket, std::string_view uploadId,
@@ -880,6 +896,7 @@ public:
         CompleteOutcome outcome;
         if (auto previous = loadObject(storedKey, object.key)) {
             outcome.releasedBlobId = previous->blobId;
+            outcome.replacedBytes  = previous->size;
             bytes_.fetch_sub(previous->size, std::memory_order_relaxed);
         } else {
             objects_.fetch_add(1, std::memory_order_relaxed);
@@ -899,6 +916,7 @@ public:
             batch.Delete(toSlice(keys::part(uploadId, part.partNumber)));
             batch.Put(toSlice(keys::orphan(part.blobId)), toSlice(orphanValue()));
             outcome.releasedPartBlobIds.push_back(part.blobId);
+            outcome.releasedPartBytes += part.size;
         }
 
         batch.Delete(toSlice(keys::uploadById(uploadId)));
@@ -977,6 +995,10 @@ public:
         stats.uploads     = uploads_.load(std::memory_order_relaxed);
         stats.orphanBlobs = orphans_.load(std::memory_order_relaxed);
         return stats;
+    }
+
+    std::vector<std::pair<std::string, BucketCharge>> bucketCharges() const override {
+        return {charges_.begin(), charges_.end()};
     }
 
     std::vector<std::pair<std::string, std::uint64_t>> engineGauges() const override {
@@ -1101,27 +1123,71 @@ private:
         std::uint64_t uploads = 0;
         std::uint64_t orphans = 0;
 
+        // Part rows are keyed by upload id, not by bucket, so the two are
+        // collected apart and joined once the scan is done. Joining as we go
+        // would make the result depend on whether `U` sorts before `p`, which
+        // is true today and is not something the accounting should rest on.
+        std::unordered_map<std::string, std::uint64_t> partBytesByUpload;
+        std::unordered_map<std::string, std::string>   bucketByUpload;
+
         std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(readOptions_));
         for (it->SeekToFirst(); it->Valid(); it->Next()) {
             const auto stored = toView(it->key());
             if (stored.empty()) continue;
 
             switch (stored.front()) {
-                case keys::kBucket: ++buckets; break;
-                case keys::kUploadById: ++uploads; break;
+                case keys::kBucket: {
+                    ++buckets;
+                    // Seeded at zero so that a bucket holding nothing still
+                    // appears in the ledger with its allocation. Left out, an
+                    // empty bucket would look unallocated and its allocation
+                    // would go missing from the instance total.
+                    charges_[std::string(stored.substr(1))];
+                    break;
+                }
+                case keys::kUploadById: {
+                    ++uploads;
+                    const auto uploadId = std::string(stored.substr(1));
+                    bucketByUpload[uploadId] =
+                        decodeUpload(uploadId, toView(it->value())).bucket;
+                    break;
+                }
                 case keys::kOrphan: ++orphans; break;
+                case keys::kPart: {
+                    const auto separator = stored.find(keys::kSeparator, 1);
+                    if (separator == std::string_view::npos) break;
+                    codec::Reader reader(toView(it->value()));
+                    expectVersion(reader, "part");
+                    reader.string();  // blobId
+                    partBytesByUpload[std::string(stored.substr(1, separator - 1))] +=
+                        reader.varint();
+                    break;
+                }
                 case keys::kObject: {
                     ++objects;
+                    const auto separator = stored.find(keys::kSeparator, 1);
                     codec::Reader reader(toView(it->value()));
                     expectVersion(reader, "object");
                     reader.string();  // blobId
-                    bytes += reader.varint();
+                    const std::uint64_t size = reader.varint();
+                    bytes += size;
+                    if (separator != std::string_view::npos) {
+                        charges_[std::string(stored.substr(1, separator - 1))].objectBytes += size;
+                    }
                     break;
                 }
                 default: break;
             }
         }
         check(it->status(), "scanning the metadata store at startup");
+
+        for (const auto& [uploadId, partBytes] : partBytesByUpload) {
+            const auto owner = bucketByUpload.find(uploadId);
+            // An upload row that is gone while its parts remain is the residue
+            // of an interrupted abort; the parts are already orphaned and no
+            // bucket is answerable for them.
+            if (owner != bucketByUpload.end()) charges_[owner->second].partBytes += partBytes;
+        }
 
         seedAuditSequence();
 
@@ -1341,6 +1407,12 @@ private:
     std::mutex    auditLock_;
     std::uint64_t auditSequence_ = 0;
 
+    /// What each bucket held when the store opened. Written once, by
+    /// seedCounters, and read once, by the quota ledger that takes over
+    /// maintaining it. Not kept current here: two places incrementing the same
+    /// tally is two places that can disagree.
+    std::unordered_map<std::string, BucketCharge> charges_;
+
     std::atomic<std::uint64_t> buckets_{0};
     std::atomic<std::uint64_t> objects_{0};
     std::atomic<std::uint64_t> bytes_{0};
@@ -1358,6 +1430,9 @@ std::string_view toString(StorageErrorCode code) {
         case StorageErrorCode::BucketAlreadyExists: return "BucketAlreadyExists";
         case StorageErrorCode::BucketNotEmpty:      return "BucketNotEmpty";
         case StorageErrorCode::InvalidPart:         return "InvalidPart";
+        case StorageErrorCode::QuotaExceeded:       return "QuotaExceeded";
+        case StorageErrorCode::QuotaBelowUsage:     return "QuotaBelowUsage";
+        case StorageErrorCode::InsufficientCapacity:return "InsufficientCapacity";
         case StorageErrorCode::Corruption:          return "Corruption";
         case StorageErrorCode::Io:                  return "Io";
         case StorageErrorCode::Internal:            return "Internal";

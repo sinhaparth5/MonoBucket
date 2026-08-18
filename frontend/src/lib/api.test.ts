@@ -414,3 +414,90 @@ describe('the activity log', () => {
 		expect(failure.unauthorized).toBe(false);
 	});
 });
+
+describe('storage allocations', () => {
+	it('sends an allocation with every bucket it creates', async () => {
+		respondWith({ status: 201, body: { name: 'photos', quotaBytes: 1073741824 } });
+
+		await api.createBucket('photos', 1073741824);
+
+		expect(calls[0].url).toBe('/_mb/api/buckets');
+		expect(calls[0].init.method).toBe('POST');
+		// The server refuses a create with no allocation, so a console that
+		// omitted the field would fail every creation — asserted here rather
+		// than discovered there.
+		expect(bodyOf(calls[0])).toEqual({ name: 'photos', quotaBytes: 1073741824 });
+	});
+
+	it('reads the bucket list and the instance capacity from one call', async () => {
+		respondWith({
+			status: 200,
+			body: {
+				buckets: [{ name: 'photos', quotaBytes: 100, usedBytes: 40, remainingBytes: 60 }],
+				capacity: {
+					allocatableBytes: 1000,
+					allocatedBytes: 100,
+					remainingBytes: 900,
+					usedBytes: 40,
+					unlimitedBuckets: 0
+				}
+			}
+		});
+
+		const answer = await api.bucketsWithCapacity();
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe('/_mb/api/buckets');
+		expect(answer.buckets[0].name).toBe('photos');
+		expect(answer.capacity.remainingBytes).toBe(900);
+	});
+
+	it('posts a changed allocation to the quota route', async () => {
+		respondWith({
+			status: 200,
+			body: {
+				bucket: { name: 'photos', quotaBytes: 2048 },
+				capacity: { allocatableBytes: 4096, allocatedBytes: 2048, remainingBytes: 2048 }
+			}
+		});
+
+		const saved = await api.setBucketQuota('photos', 2048);
+
+		expect(calls[0].url).toBe('/_mb/api/buckets/quota');
+		expect(calls[0].init.method).toBe('POST');
+		expect(bodyOf(calls[0])).toEqual({ name: 'photos', quotaBytes: 2048 });
+		// The response carries the new instance total, so the page that made the
+		// change does not have to re-list to find out what is left.
+		expect(saved.capacity.remainingBytes).toBe(2048);
+	});
+
+	it('surfaces the server refusal rather than pre-empting it', async () => {
+		respondWith({ status: 409, body: { error: 'bucket already holds more than that' } });
+
+		await expect(api.setBucketQuota('photos', 1)).rejects.toBeInstanceOf(ApiError);
+	});
+
+	it('leaves zero meaning unlimited on the way back', async () => {
+		respondWith({
+			status: 200,
+			body: {
+				buckets: [{ name: 'legacy', quotaBytes: 0, usedBytes: 5, remainingBytes: null }],
+				capacity: {
+					allocatableBytes: 100,
+					allocatedBytes: 0,
+					remainingBytes: 100,
+					usedBytes: 5,
+					unlimitedBuckets: 1
+				}
+			}
+		});
+
+		const answer = await api.bucketsWithCapacity();
+
+		expect(answer.buckets[0].quotaBytes).toBe(0);
+		// null, not zero: there is no remainder to draw for a bucket with no
+		// allocation, and a zero would render as a full progress bar.
+		expect(answer.buckets[0].remainingBytes).toBeNull();
+		expect(answer.capacity.unlimitedBuckets).toBe(1);
+	});
+});

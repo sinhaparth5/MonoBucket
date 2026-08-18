@@ -144,7 +144,7 @@ bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
     return config.consoleEnabled && req->getLocalAddr().toPort() == config.consolePort;
 }
 
-nlohmann::json toJson(const BucketRecord& bucket) {
+nlohmann::json toJson(const BucketRecord& bucket, const BucketCapacity& capacity) {
     return {{"name", bucket.name},
             {"createdAt", toIso8601(bucket.createdAt)},
             {"createdAtMs", bucket.createdAt},
@@ -156,7 +156,30 @@ nlohmann::json toJson(const BucketRecord& bucket) {
             // a form that saves it back pin the bucket to it by accident.
             {"durability", bucket.durability
                                ? nlohmann::json(std::string(toString(*bucket.durability)))
-                               : nlohmann::json(nullptr)}};
+                               : nlohmann::json(nullptr)},
+            // Zero means unlimited, and the console renders it as such. A
+            // separate boolean would be a second thing to keep in step with the
+            // number it describes.
+            {"quotaBytes", bucket.quotaBytes},
+            {"usedBytes", capacity.usedBytes},
+            {"pendingBytes", capacity.pendingBytes},
+            // null for an unlimited bucket rather than a large number: there is
+            // no remainder to report, and any figure invented here would be
+            // rendered as a progress bar that means nothing.
+            {"remainingBytes", capacity.remainingBytes()
+                                   ? nlohmann::json(*capacity.remainingBytes())
+                                   : nlohmann::json(nullptr)}};
+}
+
+nlohmann::json toJson(const InstanceCapacity& capacity) {
+    return {{"allocatableBytes", capacity.allocatableBytes},
+            {"allocatedBytes", capacity.allocatedBytes},
+            {"remainingBytes", capacity.remainingBytes()},
+            {"usedBytes", capacity.usedBytes},
+            // Named so the console can say that the remainder is an upper
+            // bound: a bucket with no allocation can consume capacity that
+            // nothing has reserved against it.
+            {"unlimitedBuckets", capacity.unlimitedBuckets}};
 }
 
 nlohmann::json toJson(const UserRecord& user) {
@@ -372,6 +395,14 @@ drogon::HttpStatusCode statusFor(StorageErrorCode code) {
         case StorageErrorCode::BucketNotEmpty:
         case StorageErrorCode::InvalidPart:
             return drogon::k409Conflict;
+        case StorageErrorCode::QuotaExceeded:
+        case StorageErrorCode::QuotaBelowUsage:
+            // 409, not 507: the request conflicts with what the bucket already
+            // holds, and the operator's fix is to change the number or delete
+            // objects — neither of which is "come back later".
+            return drogon::k409Conflict;
+        case StorageErrorCode::InsufficientCapacity:
+            return drogon::k507InsufficientStorage;
         default:
             return drogon::k500InternalServerError;
     }
@@ -1201,6 +1232,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                         {"diskTotalBytes", stats.space.totalBytes},
                                         {"diskAvailableBytes", stats.space.availableBytes},
                                         {"engineGauges", gauges}}},
+                        {"capacity", toJson(storage.capacity())},
                         {"io",
                          nlohmann::json{{"queued", ioStats.queued},
                                         {"active", ioStats.active},
@@ -1274,9 +1306,15 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     offload(callback, [&storage]() -> HttpResponsePtr {
                         nlohmann::json buckets = nlohmann::json::array();
                         for (const auto& bucket : storage.listBuckets()) {
-                            buckets.push_back(toJson(bucket));
+                            buckets.push_back(
+                                toJson(bucket, storage.bucketCapacity(bucket.name)));
                         }
-                        return jsonResponse({{"buckets", std::move(buckets)}});
+                        // The instance figures travel with the list because the
+                        // page that renders one renders the other: a bucket's
+                        // allocation only means something beside what is left
+                        // to allocate.
+                        return jsonResponse({{"buckets", std::move(buckets)},
+                                             {"capacity", toJson(storage.capacity())}});
                     });
                     return;
                 }
@@ -1292,10 +1330,29 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         callback(errorJson("a bucket name is required", drogon::k400BadRequest));
                         return;
                     }
-                    offload(callback, [&storage, name]() -> HttpResponsePtr {
-                        storage.createBucket(name);
+                    if (!body.contains("quotaBytes") || !body["quotaBytes"].is_number_unsigned()) {
+                        callback(errorJson(
+                            "a storage allocation is required; send quotaBytes as a whole number "
+                            "of bytes",
+                            drogon::k400BadRequest));
+                        return;
+                    }
+                    const auto quotaBytes = body["quotaBytes"].get<std::uint64_t>();
+                    // Zero is unlimited over S3, where nothing can name a
+                    // figure. Here something can, so zero is a mistake rather
+                    // than a request — and a console that quietly created an
+                    // unlimited bucket would defeat the point of asking.
+                    if (quotaBytes == 0) {
+                        callback(errorJson(
+                            "a storage allocation must be greater than zero",
+                            drogon::k400BadRequest));
+                        return;
+                    }
+                    offload(callback, [&storage, name, quotaBytes]() -> HttpResponsePtr {
+                        storage.createBucket(name, quotaBytes);
                         const auto record = storage.getBucket(name);
-                        return jsonResponse(record ? toJson(*record) : nlohmann::json{{"name", name}},
+                        return jsonResponse(record ? toJson(*record, storage.bucketCapacity(name))
+                                                   : nlohmann::json{{"name", name}},
                                             drogon::k201Created);
                     });
                     return;
@@ -1368,11 +1425,83 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     if (!record) {
                         return errorJson("no such bucket", drogon::k404NotFound);
                     }
-                    return jsonResponse(toJson(*record));
+                    return jsonResponse(toJson(*record, storage.bucketCapacity(name)));
                 });
             });
         },
         {drogon::Post});
+
+    // Changing an allocation is an administrator's decision, not a bucket
+    // owner's: it moves capacity between buckets that other people are using,
+    // and the instance total is the thing being divided up.
+    app.registerHandler(
+        "/_mb/api/buckets/quota",
+        [&storage, guard, offload, audit](const HttpRequestPtr& req,
+                                          ResponseCallback&& callback) {
+            // Reading how capacity is divided is part of reading the server;
+            // moving it between buckets is not.
+            const Permission needed = req->method() == drogon::Get ? Permission::SettingsRead
+                                                                   : Permission::CapacityWrite;
+            guard(req, callback, needed,
+                  [&storage, req, callback, offload, audit](const Principal& principal) {
+                if (req->method() == drogon::Get) {
+                    offload(callback, [&storage]() -> HttpResponsePtr {
+                        nlohmann::json buckets = nlohmann::json::array();
+                        for (const auto& [name, capacity] : storage.bucketCapacities()) {
+                            buckets.push_back(
+                                {{"name", name},
+                                 {"quotaBytes", capacity.quotaBytes},
+                                 {"usedBytes", capacity.usedBytes},
+                                 {"pendingBytes", capacity.pendingBytes},
+                                 {"remainingBytes", capacity.remainingBytes()
+                                                        ? nlohmann::json(*capacity.remainingBytes())
+                                                        : nlohmann::json(nullptr)}});
+                        }
+                        return jsonResponse(
+                            {{"capacity", toJson(storage.capacity())},
+                             {"defaultBucketQuotaBytes", storage.defaultBucketQuotaBytes()},
+                             {"buckets", std::move(buckets)}});
+                    });
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                const auto name = body.value("name", std::string{});
+                if (name.empty()) {
+                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                    return;
+                }
+                if (!body.contains("quotaBytes") || !body["quotaBytes"].is_number_unsigned()) {
+                    callback(errorJson("quotaBytes must be a whole number of bytes",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+                const auto quotaBytes = body["quotaBytes"].get<std::uint64_t>();
+
+                offload(callback, [&storage, audit, name, quotaBytes,
+                                   actor = principal.username]() -> HttpResponsePtr {
+                    // Both refusals — below what is stored, or over what the
+                    // instance has left — come back from the ledger as a
+                    // StorageError and are turned into a status by statusFor.
+                    // Duplicating the arithmetic here to phrase the message
+                    // better would be a second answer that could disagree.
+                    storage.setBucketQuota(name, quotaBytes);
+                    audit(actor, "bucket.quota", name, true,
+                          quotaBytes == 0 ? std::string("unlimited")
+                                          : std::to_string(quotaBytes) + " bytes");
+
+                    const auto record = storage.getBucket(name);
+                    if (!record) return errorJson("no such bucket", drogon::k404NotFound);
+                    return jsonResponse({{"bucket", toJson(*record, storage.bucketCapacity(name))},
+                                         {"capacity", toJson(storage.capacity())}});
+                });
+            });
+        },
+        {drogon::Get, drogon::Post});
 
     // GET reads the rules, POST replaces them, DELETE turns CORS off. The same
     // three verbs the S3 API uses on ?cors, and the same storage call behind
@@ -1702,12 +1831,18 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     const std::string_view payload = req->getBody();
                     const std::size_t chunk = std::max<std::size_t>(config.streamChunkBytes, 1);
 
+                    // The whole body is already here, so the claim is exact and
+                    // a bucket that is full refuses before anything is written
+                    // into the payload tree.
+                    auto reservation = storage.reserveSpace(bucket, payload.size());
+
                     BlobWriter writer = storage.beginWrite();
                     for (std::size_t at = 0; at < payload.size(); at += chunk) {
                         writer.write(payload.substr(at, chunk));
                     }
 
-                    const ObjectRecord record = storage.finishWrite(put, std::move(writer));
+                    const ObjectRecord record =
+                        storage.finishWrite(put, std::move(writer), std::move(reservation));
 
                     // After the write, never before: a failed upload must not
                     // drop a cached entry that is still the current one.

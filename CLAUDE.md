@@ -39,7 +39,7 @@ ctest --preset dev -R sigv4                      # by discovered test name
 ```
 
 Tags in use: `[assets] [blob] [cache] [codec] [config] [credentials] [digest] [engine] [env] [io]
-[keyspace] [metadata] [password] [session] [sigv4]`, plus the S3 suites (`s3_*_test.cpp`).
+[keyspace] [metadata] [password] [quota] [session] [sigv4]`, plus the S3 suites (`s3_*_test.cpp`).
 
 Redis integration tests are skipped without a live server:
 
@@ -216,6 +216,41 @@ ascending iteration.
 
 On-disk layout under `MONOBUCKET_DATA_DIR`: `meta/` (RocksDB), `objects/<aa>/<bb>/<blobId>`, `tmp/`.
 
+### Storage allocations (`storage/quota.cpp`)
+
+Every bucket carries a `quotaBytes` in its record; zero means unlimited, which is
+what a bucket created before this existed and a bucket created by plain S3
+`CreateBucket` (with no `MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES` set) both read
+back as.
+
+`QuotaLedger` — not RocksDB — is the authority on whether a write is admitted.
+Checking a bucket's charge and then committing has to happen without another
+writer slipping between them, RocksDB has no compare-and-commit spanning a
+payload write, and there is exactly one writer process by design; a mutex over an
+in-memory tally is the only thing here that is actually atomic. Nothing in the
+ledger is persisted: allocations live in the bucket records, and the charges are
+re-derived at startup from the scan `seedCounters()` already does over every
+object and part.
+
+A write takes a `QuotaLedger::Reservation` — RAII, because every write path
+throws — before the body is read, and `finishWrite`/`finishPart` raise it to what
+actually arrived and settle it. Settlement releases the claim and applies the
+charge *under one lock*: releasing first would let a second writer into space the
+first is about to occupy. Every delta (`replacedBytes`, `releasedBytes`,
+`releasedPartBytes`) is returned by the commit that caused it, never read
+separately, so an overwrite cannot drift.
+
+Parts are charged as `pendingBytes` the moment they are stored and released in
+full on abort; completion moves them to `usedBytes` without a fresh admission,
+because a bucket at its allocation must still be able to finish an upload it was
+already charged for. An overwrite is admitted as if the key were new — both
+payloads are on disk until the commit.
+
+`MONOBUCKET_ALLOCATABLE_BYTES` unset means "derive from the filesystem, less
+`MONOBUCKET_CAPACITY_RESERVE_PERCENT`". Changing an existing bucket's allocation
+is `Permission::CapacityWrite` (administrator only); sizing the bucket you are
+creating is `BucketWrite`, because that is bounded by what is unallocated.
+
 ### Cache (`cache/`)
 
 One `CacheProvider` interface selected by `MONOBUCKET_CACHE_BACKEND`. `memory` is a sharded LRU where
@@ -257,6 +292,10 @@ icon package and no emoji.
 
 ## Project conventions
 
+- **Allocations are logical and single-process.** A bucket's allocation counts
+  object bytes, not the concatenation copy a multipart completion makes, the
+  RocksDB files beside them, or a payload still in `tmp/`. The reserve percent
+  covers those and is a heuristic. Recorded in *Known limitations*.
 - **Two credential kinds, kept apart.** User accounts are for people and the console; S3 access
   keys are for programs and the S3 listener. Neither authenticates against the other's surface. A
   change that lets one do the other's job is a regression regardless of how convenient it is.

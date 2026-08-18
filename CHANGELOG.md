@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.2] — 2026-08-18
+
 ### Breaking
 
 - **The single administrator account is now one of many user accounts.** The

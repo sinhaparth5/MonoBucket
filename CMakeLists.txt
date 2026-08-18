@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.25)
 # ---------------------------------------------------------------------------
 set(MONOBUCKET_VERSION_YEAR  2026)
 set(MONOBUCKET_VERSION_MONTH 08)
-set(MONOBUCKET_VERSION_MICRO 1)
+set(MONOBUCKET_VERSION_MICRO 2)
 set(MONOBUCKET_VERSION "${MONOBUCKET_VERSION_YEAR}.${MONOBUCKET_VERSION_MONTH}.${MONOBUCKET_VERSION_MICRO}")
 
 # The padded month is correct in the version *string* but is an invalid octal
@@ -17,7 +17,7 @@ set(MONOBUCKET_VERSION "${MONOBUCKET_VERSION_YEAR}.${MONOBUCKET_VERSION_MONTH}.$
 string(REGEX REPLACE "^0+(.)" "\\1" MONOBUCKET_VERSION_MONTH_INT "${MONOBUCKET_VERSION_MONTH}")
 
 project(MonoBucket
-        VERSION 2026.8.1
+        VERSION 2026.8.2
         DESCRIPTION "Single-binary S3-compatible object storage with an embedded admin dashboard"
         HOMEPAGE_URL "https://github.com/sinhaparth5/MonoBucket"
         LANGUAGES CXX)

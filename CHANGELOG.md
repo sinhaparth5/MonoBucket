@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.1] — 2026-08-18
+
 ### Breaking
 
 - **The console no longer accepts S3 credentials as a login.** Sign-in takes an

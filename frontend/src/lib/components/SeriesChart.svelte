@@ -5,6 +5,7 @@
 	import { Area, Axis, Chart, Highlight, Svg, Tooltip } from 'layerchart';
 	import { fade } from 'svelte/transition';
 	import { formatClock } from '$lib/format';
+	import { motionDuration } from '$lib/motion';
 	import Icon, { type IconName } from './Icon.svelte';
 
 	interface Point {
@@ -103,7 +104,7 @@
 			'unavailable'}."
 	>
 		{#if ready}
-			<div class="h-full w-full" in:fade={{ duration: 200 }}>
+			<div class="h-full w-full" in:fade={{ duration: motionDuration(200) }}>
 				<Chart
 					data={points}
 					x="t"

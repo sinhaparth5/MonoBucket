@@ -5,6 +5,7 @@
 	import { fade, fly } from 'svelte/transition';
 	import { api, ApiError, type Bucket } from '$lib/api';
 	import { formatTimestamp, plural } from '$lib/format';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let buckets = $state<Bucket[] | null>(null);
@@ -155,17 +156,22 @@
 	</header>
 
 	{#if error}
-		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+		<div
+			role="alert"
+			class="alert alert-error alert-soft"
+			in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+		>
 			<Icon name="warning" />
 			<span>{error}</span>
 		</div>
 	{/if}
 
 	{#if !buckets}
-		<div class="skeleton rounded-box h-48"></div>
+		<div class="skeleton rounded-box h-48" out:fade={{ duration: motionDuration(100) }}></div>
 	{:else if buckets.length === 0}
 		<div
 			class="panel surface-raised grid items-center gap-6 overflow-hidden p-6 sm:p-8 lg:grid-cols-[14rem_1fr]"
+			in:fly={{ y: motionDistance(10), duration: motionDuration(240), opacity: 0.5 }}
 		>
 			<img
 				src="/images/empty-bucket.webp"
@@ -205,8 +211,8 @@
 					{#each visible as bucket (bucket.name)}
 						<tr
 							class="hover:bg-base-200/70 transition-colors"
-							animate:flip={{ duration: 200 }}
-							in:fade={{ duration: 150 }}
+							animate:flip={{ duration: motionDuration(200) }}
+							in:fade={{ duration: motionDuration(150) }}
 						>
 							<td>
 								<a class="group flex items-center gap-3" href={resolve(`/buckets/${bucket.name}`)}>
@@ -281,15 +287,30 @@
 </div>
 
 <dialog bind:this={createDialog} class="modal">
-	<div class="modal-box max-w-md">
-		<h2 class="flex items-center gap-2 text-lg font-medium">
-			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
-				<Icon name="bucket" class="size-4" />
-			</span>
-			Create bucket
-		</h2>
+	<div class="modal-box max-w-md overflow-hidden p-0">
+		<div class="surface-raised grid grid-cols-[1fr_7.5rem] items-center overflow-hidden">
+			<div class="flex flex-col gap-1 p-6 pr-2">
+				<span class="eyebrow">New storage space</span>
+				<h2 class="text-xl font-semibold tracking-tight">Create bucket</h2>
+				<p class="text-base-content/55 text-xs">Give your objects a durable home.</p>
+			</div>
+			<div class="relative h-32 overflow-hidden">
+				<img
+					src="/images/bucket-create.webp"
+					alt="Colourful storage rings assembling into a new bucket"
+					width="480"
+					height="480"
+					loading="lazy"
+					decoding="async"
+					class="absolute inset-0 size-full object-cover"
+				/>
+				<div
+					class="from-base-100/70 pointer-events-none absolute inset-0 bg-gradient-to-r from-base-100/70 to-transparent"
+				></div>
+			</div>
+		</div>
 
-		<form class="mt-4 flex flex-col gap-4" onsubmit={create}>
+		<form class="flex flex-col gap-4 p-6" onsubmit={create}>
 			<fieldset class="fieldset gap-1 p-0">
 				<legend class="fieldset-legend">Name</legend>
 				<input
@@ -312,7 +333,11 @@
 			</fieldset>
 
 			{#if createError}
-				<div role="alert" class="alert alert-error alert-soft text-sm" in:fly={{ y: -4 }}>
+				<div
+					role="alert"
+					class="alert alert-error alert-soft text-sm"
+					in:fly={{ y: motionDistance(-4), duration: motionDuration(180) }}
+				>
 					<Icon name="warning" class="size-4" />
 					<span>{createError}</span>
 				</div>

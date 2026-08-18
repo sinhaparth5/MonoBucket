@@ -12,6 +12,7 @@
 	import { fly } from 'svelte/transition';
 	import { api, ApiError, type ServerConfig, type Setting } from '$lib/api';
 	import { formatBytes, formatDuration, plural } from '$lib/format';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 
 	let config = $state<ServerConfig | null>(null);
@@ -159,16 +160,43 @@
 <svelte:head><title>Settings · MonoBucket</title></svelte:head>
 
 <div class="flex flex-col gap-6">
-	<header class="flex flex-col gap-1">
-		<span class="eyebrow">Runtime configuration</span>
-		<h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Settings</h1>
-		<p class="text-base-content/55 text-sm">
-			The configuration this process resolved at startup, and the variable behind each value.
-		</p>
+	<header
+		class="panel surface-raised grid min-h-56 overflow-hidden lg:grid-cols-[minmax(0,1fr)_20rem]"
+	>
+		<div class="flex flex-col justify-center gap-3 p-6 sm:p-8">
+			<span class="eyebrow">Runtime configuration</span>
+			<div class="flex flex-col gap-1">
+				<h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Settings</h1>
+				<p class="text-base-content/60 max-w-xl text-sm">
+					The configuration this process resolved at startup, and the variable behind each value.
+				</p>
+			</div>
+			<span class="badge badge-info badge-soft w-fit gap-1.5">
+				<Icon name="settings" class="size-3.5" />
+				Read-only runtime snapshot
+			</span>
+		</div>
+		<div class="relative min-h-44 overflow-hidden lg:min-h-full">
+			<img
+				src="/images/settings-runtime.webp"
+				alt="Colourful configuration controls orbiting a storage core"
+				width="900"
+				height="600"
+				decoding="async"
+				class="absolute inset-0 size-full object-cover object-center"
+			/>
+			<div
+				class="from-base-100/80 pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-base-100/80 lg:bg-gradient-to-r lg:from-base-100/85 lg:via-transparent lg:to-transparent"
+			></div>
+		</div>
 	</header>
 
 	{#if error}
-		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+		<div
+			role="alert"
+			class="alert alert-error alert-soft"
+			in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+		>
 			<Icon name="warning" />
 			<span>{error}</span>
 		</div>
@@ -208,93 +236,98 @@
 			{/each}
 		</div>
 	{:else}
-		{#if config.cacheBackendActive !== byKey.get('cacheBackend')?.value}
-			<div role="alert" class="alert alert-warning alert-soft">
-				<Icon name="cache" />
-				<span>
-					The configured cache backend is
-					<code class="font-mono">{byKey.get('cacheBackend')?.value}</code>, but
-					<code class="font-mono">{config.cacheBackendActive}</code>
-					is serving. A backend that cannot be reached falls back to the local tier rather than failing
-					requests.
-				</span>
-			</div>
-		{/if}
+		<div
+			class="flex flex-col gap-6"
+			in:fly={{ y: motionDistance(10), duration: motionDuration(240), opacity: 0.5 }}
+		>
+			{#if config.cacheBackendActive !== byKey.get('cacheBackend')?.value}
+				<div role="alert" class="alert alert-warning alert-soft">
+					<Icon name="cache" />
+					<span>
+						The configured cache backend is
+						<code class="font-mono">{byKey.get('cacheBackend')?.value}</code>, but
+						<code class="font-mono">{config.cacheBackendActive}</code>
+						is serving. A backend that cannot be reached falls back to the local tier rather than failing
+						requests.
+					</span>
+				</div>
+			{/if}
 
-		<div class="grid gap-4 lg:grid-cols-2">
-			{#each GROUPS as group (group.title)}
-				{@const rows = group.keys.map((key) => byKey.get(key)).filter((row) => row !== undefined)}
-				{#if rows.length > 0}
-					<section class="panel flex flex-col overflow-hidden">
-						<header class="surface-raised border-base-300 flex items-start gap-3 border-b p-5">
-							<span
-								class="bg-primary/10 text-primary grid size-9 shrink-0 place-items-center rounded-lg"
-							>
-								<Icon name={group.icon} class="size-4.5" />
-							</span>
-							<div class="flex flex-col gap-0.5">
-								<h2 class="font-medium">{group.title}</h2>
-								<p class="text-base-content/55 text-xs">{group.blurb}</p>
-							</div>
-						</header>
-
-						<dl class="divide-base-300 divide-y">
-							{#each rows as setting (setting.key)}
-								<div
-									class="hover:bg-base-200/60 flex items-start gap-3 px-4 py-2.5 transition-colors"
+			<div class="grid gap-4 lg:grid-cols-2">
+				{#each GROUPS as group (group.title)}
+					{@const rows = group.keys.map((key) => byKey.get(key)).filter((row) => row !== undefined)}
+					{#if rows.length > 0}
+						<section class="panel flex flex-col overflow-hidden">
+							<header class="surface-raised border-base-300 flex items-start gap-3 border-b p-5">
+								<span
+									class="bg-primary/10 text-primary grid size-9 shrink-0 place-items-center rounded-lg"
 								>
-									<dt class="flex min-w-0 flex-1 flex-col gap-0.5">
-										<span class="text-sm">{setting.key}</span>
-										{#if setting.env}
-											<button
-												class="text-base-content/45 hover:text-primary flex items-center gap-1 self-start font-mono text-[0.6875rem] transition-colors"
-												title="Copy {setting.env}=… "
-												onclick={() => copyEnv(setting)}
-											>
-												<Icon name={copied === setting.key ? 'check' : 'copy'} class="size-3" />
-												{setting.env}
-											</button>
-										{/if}
-									</dt>
-									<dd class="flex shrink-0 flex-col items-end gap-0.5 text-right">
-										<span class="font-mono text-sm break-all">{render(setting)}</span>
-										{#if annotate(setting)}
-											<span class="text-base-content/45 text-[0.6875rem]">
-												{annotate(setting)}
-											</span>
-										{/if}
-									</dd>
+									<Icon name={group.icon} class="size-4.5" />
+								</span>
+								<div class="flex flex-col gap-0.5">
+									<h2 class="font-medium">{group.title}</h2>
+									<p class="text-base-content/55 text-xs">{group.blurb}</p>
 								</div>
-							{/each}
-						</dl>
-					</section>
-				{/if}
-			{/each}
+							</header>
+
+							<dl class="divide-base-300 divide-y">
+								{#each rows as setting (setting.key)}
+									<div
+										class="hover:bg-base-200/60 flex items-start gap-3 px-4 py-2.5 transition-colors"
+									>
+										<dt class="flex min-w-0 flex-1 flex-col gap-0.5">
+											<span class="text-sm">{setting.key}</span>
+											{#if setting.env}
+												<button
+													class="text-base-content/45 hover:text-primary flex items-center gap-1 self-start font-mono text-[0.6875rem] transition-colors"
+													title="Copy {setting.env}=… "
+													onclick={() => copyEnv(setting)}
+												>
+													<Icon name={copied === setting.key ? 'check' : 'copy'} class="size-3" />
+													{setting.env}
+												</button>
+											{/if}
+										</dt>
+										<dd class="flex shrink-0 flex-col items-end gap-0.5 text-right">
+											<span class="font-mono text-sm break-all">{render(setting)}</span>
+											{#if annotate(setting)}
+												<span class="text-base-content/45 text-[0.6875rem]">
+													{annotate(setting)}
+												</span>
+											{/if}
+										</dd>
+									</div>
+								{/each}
+							</dl>
+						</section>
+					{/if}
+				{/each}
+			</div>
+
+			{#if ungrouped.length > 0}
+				<section class="panel flex flex-col overflow-hidden">
+					<header class="surface-raised border-base-300 border-b p-4">
+						<h2 class="font-medium">Other</h2>
+						<p class="text-base-content/55 text-xs">
+							{plural(ungrouped.length, 'setting')} the server reports that this panel has no group for.
+						</p>
+					</header>
+					<dl class="divide-base-300 divide-y">
+						{#each ungrouped as setting (setting.key)}
+							<div class="flex items-center justify-between gap-3 px-4 py-2.5">
+								<dt class="text-sm">{setting.key}</dt>
+								<dd class="font-mono text-sm break-all">{render(setting)}</dd>
+							</div>
+						{/each}
+					</dl>
+				</section>
+			{/if}
+
+			<p class="text-base-content/45 text-xs">
+				Secrets are redacted by the server before they reach this page. API keys beyond the root
+				pair, and per-bucket overrides of these values, are not implemented — see the roadmap rather
+				than assuming they are hidden somewhere.
+			</p>
 		</div>
-
-		{#if ungrouped.length > 0}
-			<section class="panel flex flex-col overflow-hidden">
-				<header class="surface-raised border-base-300 border-b p-4">
-					<h2 class="font-medium">Other</h2>
-					<p class="text-base-content/55 text-xs">
-						{plural(ungrouped.length, 'setting')} the server reports that this panel has no group for.
-					</p>
-				</header>
-				<dl class="divide-base-300 divide-y">
-					{#each ungrouped as setting (setting.key)}
-						<div class="flex items-center justify-between gap-3 px-4 py-2.5">
-							<dt class="text-sm">{setting.key}</dt>
-							<dd class="font-mono text-sm break-all">{render(setting)}</dd>
-						</div>
-					{/each}
-				</dl>
-			</section>
-		{/if}
-
-		<p class="text-base-content/45 text-xs">
-			Secrets are redacted by the server before they reach this page. API keys beyond the root pair,
-			and per-bucket overrides of these values, are not implemented — see the roadmap rather than
-			assuming they are hidden somewhere.
-		</p>
 	{/if}
 </div>

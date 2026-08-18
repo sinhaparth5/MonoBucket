@@ -12,6 +12,7 @@
 		type StoredObject
 	} from '$lib/api';
 	import { formatBytes, formatTimestamp, leafName, plural } from '$lib/format';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
 	import Icon from '$lib/components/Icon.svelte';
 	import Uploader from '$lib/components/Uploader.svelte';
@@ -506,85 +507,105 @@
 <svelte:head><title>{bucket} · MonoBucket</title></svelte:head>
 
 <div class="flex flex-col gap-5">
-	<div class="flex flex-col gap-3">
-		<div class="breadcrumbs py-0 text-sm">
-			<ul>
-				<li><a class="link-hover" href={resolve('/buckets')}>Buckets</a></li>
-				<li>
-					<button class="link link-hover" onclick={() => navigate('')}>{bucket}</button>
-				</li>
-				{#each crumbs as crumb (crumb.prefix)}
+	<section class="panel surface-raised grid overflow-hidden lg:grid-cols-[minmax(0,1fr)_18rem]">
+		<div class="flex flex-col gap-4 p-5 sm:p-6">
+			<div class="breadcrumbs py-0 text-sm">
+				<ul>
+					<li><a class="link-hover" href={resolve('/buckets')}>Buckets</a></li>
 					<li>
-						<button class="link link-hover" onclick={() => navigate(crumb.prefix)}>
-							{crumb.label}
-						</button>
+						<button class="link link-hover" onclick={() => navigate('')}>{bucket}</button>
 					</li>
-				{/each}
-			</ul>
-		</div>
+					{#each crumbs as crumb (crumb.prefix)}
+						<li>
+							<button class="link link-hover" onclick={() => navigate(crumb.prefix)}>
+								{crumb.label}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			</div>
 
-		<div class="flex flex-wrap items-center justify-between gap-3">
-			<div class="flex min-w-0 items-center gap-3">
-				<span
-					class="bg-primary/10 text-primary grid size-10 shrink-0 place-items-center rounded-xl"
-				>
-					<Icon name={prefix ? 'folder' : 'bucket'} class="size-5" />
-				</span>
-				<div class="flex min-w-0 flex-col gap-0.5">
-					<h1 class="truncate text-2xl font-semibold tracking-tight">
-						{crumbs.at(-1)?.label ?? bucket}
-					</h1>
-					<p class="text-base-content/55 text-xs">
-						{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
-							totalBytes
-						)}{truncated ? ' so far' : ''}
-					</p>
+			<div class="flex flex-wrap items-center justify-between gap-3">
+				<div class="flex min-w-0 items-center gap-3">
+					<span
+						class="bg-primary/10 text-primary grid size-10 shrink-0 place-items-center rounded-xl"
+					>
+						<Icon name={prefix ? 'folder' : 'bucket'} class="size-5" />
+					</span>
+					<div class="flex min-w-0 flex-col gap-0.5">
+						<h1 class="truncate text-2xl font-semibold tracking-tight">
+							{crumbs.at(-1)?.label ?? bucket}
+						</h1>
+						<p class="text-base-content/55 text-xs">
+							{plural(prefixes.length, 'folder')} · {plural(objects.length, 'object')} · {formatBytes(
+								totalBytes
+							)}{truncated ? ' so far' : ''}
+						</p>
+					</div>
+				</div>
+
+				<div class="flex flex-wrap items-center gap-2">
+					{#if publicRead}
+						<span class="badge badge-sm badge-success badge-soft gap-1">
+							<Icon name="globe" class="size-3" />
+							anonymous read
+						</span>
+					{/if}
+
+					<button
+						class="btn btn-sm gap-1.5 {hasPolicy ? 'btn-ghost' : 'btn-ghost'}"
+						onclick={openPolicy}
+					>
+						<Icon name="shield" class="size-3.5" />
+						Policy
+						{#if hasPolicy}<span class="badge badge-xs badge-primary"></span>{/if}
+					</button>
+
+					<button class="btn btn-ghost btn-sm gap-1.5" onclick={openCors}>
+						<Icon name="globe" class="size-3.5" />
+						CORS
+						{#if corsCount > 0}<span class="badge badge-xs badge-ghost">{corsCount}</span>{/if}
+					</button>
+
+					<button
+						class="btn btn-sm gap-1.5 {uploadOpen ? 'btn-neutral' : 'btn-primary'}"
+						onclick={() => (uploadOpen = !uploadOpen)}
+					>
+						<Icon name={uploadOpen ? 'close' : 'upload'} class="size-3.5" />
+						{uploadOpen ? 'Close' : 'Upload'}
+					</button>
 				</div>
 			</div>
-
-			<div class="flex flex-wrap items-center gap-2">
-				{#if publicRead}
-					<span class="badge badge-sm badge-success badge-soft gap-1">
-						<Icon name="globe" class="size-3" />
-						anonymous read
-					</span>
-				{/if}
-
-				<button
-					class="btn btn-sm gap-1.5 {hasPolicy ? 'btn-ghost' : 'btn-ghost'}"
-					onclick={openPolicy}
-				>
-					<Icon name="shield" class="size-3.5" />
-					Policy
-					{#if hasPolicy}<span class="badge badge-xs badge-primary"></span>{/if}
-				</button>
-
-				<button class="btn btn-ghost btn-sm gap-1.5" onclick={openCors}>
-					<Icon name="globe" class="size-3.5" />
-					CORS
-					{#if corsCount > 0}<span class="badge badge-xs badge-ghost">{corsCount}</span>{/if}
-				</button>
-
-				<button
-					class="btn btn-sm gap-1.5 {uploadOpen ? 'btn-neutral' : 'btn-primary'}"
-					onclick={() => (uploadOpen = !uploadOpen)}
-				>
-					<Icon name={uploadOpen ? 'close' : 'upload'} class="size-3.5" />
-					{uploadOpen ? 'Close' : 'Upload'}
-				</button>
-			</div>
 		</div>
-	</div>
+
+		<div class="relative min-h-32 overflow-hidden sm:min-h-40 lg:min-h-full">
+			<img
+				src="/images/bucket-workspace.webp"
+				alt="Colourful folders flowing into an object storage gateway"
+				width="1200"
+				height="545"
+				decoding="async"
+				class="absolute inset-0 size-full object-cover object-[70%_center]"
+			/>
+			<div
+				class="from-base-100/70 pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-base-100/70 lg:bg-gradient-to-r lg:from-base-100/85 lg:via-transparent lg:to-transparent"
+			></div>
+		</div>
+	</section>
 
 	{#if error}
-		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+		<div
+			role="alert"
+			class="alert alert-error alert-soft"
+			in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+		>
 			<Icon name="warning" />
 			<span>{error}</span>
 		</div>
 	{/if}
 
 	{#if uploadOpen}
-		<div transition:fly={{ y: -8, duration: 200 }}>
+		<div transition:fly={{ y: motionDistance(-8), duration: motionDuration(200) }}>
 			<Uploader {bucket} {prefix} onfinished={() => loadFirstPage(bucket, prefix)} />
 		</div>
 	{/if}
@@ -631,7 +652,10 @@
 				</thead>
 				<tbody>
 					{#each prefixes as folder (folder)}
-						<tr class="hover:bg-base-200/70 transition-colors" in:fade={{ duration: 120 }}>
+						<tr
+							class="hover:bg-base-200/70 transition-colors"
+							in:fade={{ duration: motionDuration(120) }}
+						>
 							<td colspan="3">
 								<button
 									class="group flex items-center gap-2.5 font-medium"
@@ -654,7 +678,10 @@
 					{/each}
 
 					{#each objects as object (object.key)}
-						<tr class="hover:bg-base-200/70 transition-colors" in:fade={{ duration: 120 }}>
+						<tr
+							class="hover:bg-base-200/70 transition-colors"
+							in:fade={{ duration: motionDuration(120) }}
+						>
 							<td class="max-w-md">
 								<button
 									class="group flex w-full items-center gap-2.5 text-left"
@@ -787,7 +814,10 @@
 				{#if signError}
 					<p class="text-error text-xs">{signError}</p>
 				{:else if signed}
-					<div class="join w-full" transition:fly={{ y: -4, duration: 150 }}>
+					<div
+						class="join w-full"
+						transition:fly={{ y: motionDistance(-4), duration: motionDuration(150) }}
+					>
 						<input
 							bind:this={signedField}
 							class="input join-item w-full font-mono text-xs"
@@ -895,7 +925,11 @@
 		</p>
 
 		{#if corsError}
-			<div role="alert" class="alert alert-error alert-soft mt-4" in:fly={{ y: -6, duration: 200 }}>
+			<div
+				role="alert"
+				class="alert alert-error alert-soft mt-4"
+				in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+			>
 				<span>{corsError}</span>
 			</div>
 		{/if}
@@ -905,7 +939,10 @@
 		{:else}
 			<div class="mt-4 flex flex-col gap-4">
 				{#each corsDrafts as draft, index (index)}
-					<div class="border-base-300 rounded-box border p-4" in:fade={{ duration: 120 }}>
+					<div
+						class="border-base-300 rounded-box border p-4"
+						in:fade={{ duration: motionDuration(120) }}
+					>
 						<div class="flex items-center justify-between gap-3">
 							<span class="text-base-content/60 text-xs">Rule {index + 1}</span>
 							<button
@@ -1004,7 +1041,9 @@
 
 		<div class="modal-action">
 			{#if corsSaved}
-				<span class="text-success self-center text-xs" in:fade={{ duration: 150 }}>Saved</span>
+				<span class="text-success self-center text-xs" in:fade={{ duration: motionDuration(150) }}
+					>Saved</span
+				>
 			{/if}
 			<button
 				class="btn btn-ghost btn-sm"
@@ -1041,7 +1080,11 @@
 		</p>
 
 		{#if policyError}
-			<div role="alert" class="alert alert-error alert-soft mt-4" in:fly={{ y: -6, duration: 200 }}>
+			<div
+				role="alert"
+				class="alert alert-error alert-soft mt-4"
+				in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+			>
 				<Icon name="warning" />
 				<span>{policyError}</span>
 			</div>
@@ -1106,7 +1149,9 @@
 
 		<div class="modal-action">
 			{#if policySaved}
-				<span class="text-success self-center text-xs" in:fade={{ duration: 150 }}>Saved</span>
+				<span class="text-success self-center text-xs" in:fade={{ duration: motionDuration(150) }}
+					>Saved</span
+				>
 			{/if}
 			<button
 				class="btn btn-ghost btn-sm"

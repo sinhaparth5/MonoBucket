@@ -11,6 +11,7 @@
 	import { fly } from 'svelte/transition';
 	import { ApiError, uploadObject, type UploadHandle } from '$lib/api';
 	import { formatBytes, plural } from '$lib/format';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon from './Icon.svelte';
 
 	interface Props {
@@ -202,7 +203,10 @@
 	</div>
 
 	{#if transfers.length > 0}
-		<div class="panel flex flex-col overflow-hidden" transition:fly={{ y: -6, duration: 200 }}>
+		<div
+			class="panel flex flex-col overflow-hidden"
+			transition:fly={{ y: motionDistance(-6), duration: motionDuration(200) }}
+		>
 			<div class="border-base-300 flex flex-wrap items-center gap-3 border-b px-4 py-2.5">
 				<span class="text-sm font-medium">
 					{#if active.length > 0}

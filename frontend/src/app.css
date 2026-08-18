@@ -298,10 +298,60 @@
 		transform: translateY(-2px);
 	}
 
+	/* DaisyUI owns component shape and colour; these rules add a shared physical
+	   response without changing layout. Hover lift is restricted to precise
+	   pointers, while the pressed state works for mouse, keyboard and touch. */
+	.btn,
+	.menu a,
+	.menu button {
+		transition:
+			background-color 180ms ease-out,
+			border-color 180ms ease-out,
+			color 180ms ease-out,
+			box-shadow 180ms ease-out,
+			opacity 180ms ease-out,
+			transform 180ms ease-out;
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.btn:not(:disabled):hover {
+			transform: translateY(-1px);
+		}
+
+		.menu a:hover {
+			transform: translateX(2px);
+		}
+	}
+
+	/* Keep this after hover so a pressed mouse button gets the tactile state too. */
+	.btn:not(:disabled):active,
+	.menu a:active,
+	.menu button:active {
+		transform: scale(0.98);
+	}
+
 	@media (max-width: 48rem) {
 		.btn-sm,
 		.btn-xs {
 			min-height: 2.75rem;
 		}
+	}
+}
+
+/* Svelte transitions opt out through `$lib/motion`; this is the matching
+   safety net for DaisyUI and CSS animations. Loading still resolves normally,
+   but decorative travel and repeated motion disappear. */
+@media (prefers-reduced-motion: reduce) {
+	html {
+		scroll-behavior: auto;
+	}
+
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
 	}
 }

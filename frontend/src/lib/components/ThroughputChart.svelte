@@ -2,6 +2,7 @@
 	import { Area, Axis, Chart, Highlight, Spline, Svg, Tooltip } from 'layerchart';
 	import { fade } from 'svelte/transition';
 	import { formatBytes, formatClock } from '$lib/format';
+	import { motionDuration } from '$lib/motion';
 	import Icon from './Icon.svelte';
 
 	interface Point {
@@ -68,7 +69,7 @@
 			: 'unavailable'} and latest ingress is {latest ? rate(latest.ingress) : 'unavailable'}."
 	>
 		{#if ready}
-			<div class="h-full w-full" in:fade={{ duration: 200 }}>
+			<div class="h-full w-full" in:fade={{ duration: motionDuration(200) }}>
 				<Chart
 					data={points}
 					x="t"

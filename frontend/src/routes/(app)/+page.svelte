@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { fly } from 'svelte/transition';
+	import { fade, fly } from 'svelte/transition';
 	import { api, ApiError, type Overview, type Sample, type Series } from '$lib/api';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import {
 		formatBytes,
 		formatClock,
@@ -189,283 +190,301 @@
 	</header>
 
 	{#if error}
-		<div role="alert" class="alert alert-error alert-soft" in:fly={{ y: -6, duration: 200 }}>
+		<div
+			role="alert"
+			class="alert alert-error alert-soft"
+			in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+		>
 			<Icon name="warning" />
 			<span>{error}</span>
 		</div>
 	{/if}
 
 	{#if !overview}
-		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-			{#each TILE_PLACEHOLDERS as index (index)}
-				<div class="skeleton rounded-box h-24"></div>
-			{/each}
-		</div>
-		<div class="skeleton rounded-box h-32"></div>
-		<div class="grid gap-4 lg:grid-cols-3">
-			{#each CHART_PLACEHOLDERS as index (index)}
-				<div class="skeleton rounded-box h-72"></div>
-			{/each}
+		<div class="flex flex-col gap-6" out:fade={{ duration: motionDuration(100) }}>
+			<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+				{#each TILE_PLACEHOLDERS as index (index)}
+					<div class="skeleton rounded-box h-24"></div>
+				{/each}
+			</div>
+			<div class="skeleton rounded-box h-32"></div>
+			<div class="grid gap-4 lg:grid-cols-3">
+				{#each CHART_PLACEHOLDERS as index (index)}
+					<div class="skeleton rounded-box h-72"></div>
+				{/each}
+			</div>
 		</div>
 	{:else}
-		<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Key storage metrics">
-			<StatTile
-				label="Objects"
-				icon="file"
-				tone="primary"
-				value={overview.storage.objects}
-				format={formatCount}
-				hint="{plural(overview.storage.buckets, 'bucket')} · {formatBytes(overview.storage.bytes)}"
-			/>
-			<StatTile
-				label="Connections"
-				icon="plug"
-				tone="secondary"
-				value={overview.server.connections}
-				format={formatCount}
-				hint="all listeners · {overview.server.workerThreads} workers"
-			/>
-			<StatTile
-				label="Cache hit rate"
-				icon="cache"
-				tone={overview.cache.healthy ? 'accent' : 'warning'}
-				value={overview.cache.hitRatio}
-				format={(value) => formatPercent(value)}
-				hint="{overview.cache.backend} · {formatBytes(overview.cache.bytes)} of {formatBytes(
-					overview.cache.limitBytes
-				)}"
-				valueClass={overview.cache.healthy ? '' : 'text-warning'}
-			/>
-			<StatTile
-				label="Resident memory"
-				icon="memory"
-				tone="info"
-				value={overview.server.residentBytes}
-				format={formatBytes}
-				hint="{overview.io.threads} I/O threads · {plural(
-					overview.storage.uploads,
-					'upload'
-				)} in flight"
-			/>
-		</section>
-
-		<section
-			class="panel surface-raised flex flex-col gap-4 p-5"
-			aria-labelledby="disk-capacity-heading"
+		<div
+			class="flex flex-col gap-6"
+			in:fly={{ y: motionDistance(10), duration: motionDuration(240), opacity: 0.45 }}
 		>
-			<div class="flex flex-wrap items-center justify-between gap-2">
-				<h2
-					id="disk-capacity-heading"
-					class="text-base-content/70 flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase"
-				>
-					<Icon name="disk" class="size-3.5" />
-					Disk capacity
-				</h2>
-				<span class="text-base-content/60 text-xs tabular-nums">
-					{formatBytes(overview.storage.diskTotalBytes - overview.storage.diskAvailableBytes)} used of
-					{formatBytes(overview.storage.diskTotalBytes)}
-					<span class="text-base-content/40">({formatPercent(diskUsedFraction, 0)})</span>
-				</span>
-			</div>
-			<progress
-				class="progress {diskUsedFraction > 0.9
-					? 'progress-error'
-					: diskUsedFraction > 0.75
-						? 'progress-warning'
-						: 'progress-primary'} h-2 w-full"
-				value={diskUsedFraction * 100}
-				max="100"
-			></progress>
-			<div class="text-base-content/50 flex flex-wrap gap-x-6 gap-y-1 text-xs">
-				<span>{formatBytes(overview.storage.bytes)} in object payloads</span>
-				<span
-					class={overview.storage.orphanBlobs > 0 ? 'text-warning' : ''}
-					title="A number that only climbs means reclamation has stalled."
-				>
-					{plural(overview.storage.orphanBlobs, 'payload')} awaiting reclamation
-				</span>
-				<span>{formatBytes(overview.storage.diskAvailableBytes)} available</span>
-			</div>
-		</section>
+			<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Key storage metrics">
+				<StatTile
+					label="Objects"
+					icon="file"
+					tone="primary"
+					value={overview.storage.objects}
+					format={formatCount}
+					hint="{plural(overview.storage.buckets, 'bucket')} · {formatBytes(
+						overview.storage.bytes
+					)}"
+				/>
+				<StatTile
+					label="Connections"
+					icon="plug"
+					tone="secondary"
+					value={overview.server.connections}
+					format={formatCount}
+					hint="all listeners · {overview.server.workerThreads} workers"
+				/>
+				<StatTile
+					label="Cache hit rate"
+					icon="cache"
+					tone={overview.cache.healthy ? 'accent' : 'warning'}
+					value={overview.cache.hitRatio}
+					format={(value) => formatPercent(value)}
+					hint="{overview.cache.backend} · {formatBytes(overview.cache.bytes)} of {formatBytes(
+						overview.cache.limitBytes
+					)}"
+					valueClass={overview.cache.healthy ? '' : 'text-warning'}
+				/>
+				<StatTile
+					label="Resident memory"
+					icon="memory"
+					tone="info"
+					value={overview.server.residentBytes}
+					format={formatBytes}
+					hint="{overview.io.threads} I/O threads · {plural(
+						overview.storage.uploads,
+						'upload'
+					)} in flight"
+				/>
+			</section>
 
-		<section class="grid gap-4 xl:grid-cols-3" aria-label="Traffic charts">
-			<div class="xl:col-span-2">
-				<ThroughputChart points={throughput} />
-			</div>
-			<SeriesChart
-				label="Request rate"
-				icon="overview"
-				points={requestRate}
-				headline={latest ? formatRate(rate(latest, latest.requests)) : '0/s'}
-				hint="S3 listener"
-				format={(value) => formatRate(value)}
-				height="h-64 sm:h-72"
-				featured
-			/>
-		</section>
-
-		<section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4" aria-label="Runtime charts">
-			<SeriesChart
-				label="Cache hit ratio"
-				icon="cache"
-				points={hitRatio}
-				headline={formatPercent(overview.cache.hitRatio)}
-				hint="per sample"
-				accentClass="text-success"
-				lineClass="stroke-success"
-				areaClass="fill-success/15"
-				format={(value) => formatPercent(value, 0)}
-			/>
-			<SeriesChart
-				label="Resident memory"
-				icon="memory"
-				points={resident}
-				headline={formatBytes(overview.server.residentBytes)}
-				hint="process RSS"
-				accentClass="text-secondary"
-				lineClass="stroke-secondary"
-				areaClass="fill-secondary/15"
-				format={(value) => formatBytes(value, 0)}
-				minTop={1024 * 1024}
-			/>
-			<SeriesChart
-				label="Connections"
-				icon="plug"
-				points={connections}
-				headline={formatCount(overview.server.connections)}
-				hint="all listeners"
-				accentClass="text-primary"
-				lineClass="stroke-primary"
-				areaClass="fill-primary/15"
-				format={(value) => formatCount(value)}
-				integerTicks
-			/>
-			<SeriesChart
-				label="Storage queue"
-				icon="disk"
-				points={queueDepth}
-				headline={formatCount(overview.io.queued + overview.io.active)}
-				hint="depth {overview.io.limit} before shedding"
-				accentClass="text-warning"
-				lineClass="stroke-warning"
-				areaClass="fill-warning/15"
-				format={(value) => formatCount(value)}
-				integerTicks
-			/>
-		</section>
-
-		<section class="grid gap-4 lg:grid-cols-2">
-			<div class="panel flex flex-col gap-4 p-5">
-				<h2
-					class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
-				>
-					<Icon name="overview" class="size-3.5" />
-					Responses since start
-				</h2>
-
-				{#if mixTotal === 0}
-					<div
-						class="border-base-300 bg-base-200/35 grid min-h-36 overflow-hidden rounded-xl border border-dashed sm:grid-cols-[9rem_1fr]"
+			<section
+				class="panel surface-raised flex flex-col gap-4 p-5"
+				aria-labelledby="disk-capacity-heading"
+			>
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<h2
+						id="disk-capacity-heading"
+						class="text-base-content/70 flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase"
 					>
-						<img
-							src="/images/telemetry-idle.webp"
-							alt="A quiet telemetry beacon waiting for its first signal"
-							width="560"
-							height="560"
-							class="h-36 w-full object-cover sm:h-full"
-							loading="lazy"
-							decoding="async"
-						/>
-						<div class="flex flex-col items-start justify-center gap-2 p-5">
-							<span class="badge badge-primary badge-soft badge-sm gap-1.5">
-								<span class="bg-primary size-1.5 rounded-full"></span>
-								Listening
-							</span>
-							<div>
-								<h3 class="font-semibold">Waiting for the first S3 request</h3>
-								<p class="text-base-content/55 mt-1 text-sm leading-5">
-									Response health will appear here as traffic reaches the listener.
-								</p>
-							</div>
-						</div>
-					</div>
-				{:else}
-					<div
-						class="bg-base-300 flex h-3 w-full gap-0.5 overflow-hidden rounded-full"
-						role="img"
-						aria-label="Response mix: {responseMix
-							.map((part) => `${part.label} ${formatCount(part.value)}`)
-							.join(', ')}"
-					>
-						{#each responseMix as part (part.label)}
-							{#if part.value > 0}
-								<span
-									class="{part.tone} h-full transition-all duration-500"
-									style="width: {(part.value / mixTotal) * 100}%"
-									title="{part.label}: {formatCount(part.value)}"
-									aria-hidden="true"
-								></span>
-							{/if}
-						{/each}
-					</div>
-					<div class="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-						{#each responseMix as part (part.label)}
-							<div class="flex flex-col">
-								<span class="text-base-content/60 flex items-center gap-1.5 text-xs">
-									<span class="{part.tone} size-2 rounded-full"></span>
-									{part.label}
-								</span>
-								<span class="text-lg font-semibold tabular-nums {part.value > 0 ? part.text : ''}">
-									{formatCount(part.value)}
-								</span>
-							</div>
-						{/each}
-					</div>
-				{/if}
-
-				<div
-					class="border-base-300 text-base-content/50 flex flex-wrap gap-x-6 gap-y-1 border-t pt-3 text-xs"
-				>
-					<span>{formatCount(overview.s3.authFailures)} auth failures</span>
-					<span>{formatCount(overview.s3.anonymous)} anonymous</span>
-					<span>
-						{formatBytes(overview.s3.bytesIn)} in / {formatBytes(overview.s3.bytesOut)} out
+						<Icon name="disk" class="size-3.5" />
+						Disk capacity
+					</h2>
+					<span class="text-base-content/60 text-xs tabular-nums">
+						{formatBytes(overview.storage.diskTotalBytes - overview.storage.diskAvailableBytes)} used
+						of
+						{formatBytes(overview.storage.diskTotalBytes)}
+						<span class="text-base-content/40">({formatPercent(diskUsedFraction, 0)})</span>
 					</span>
 				</div>
-			</div>
-
-			<div class="panel flex flex-col gap-4 p-5">
-				<h2
-					class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
-				>
-					<Icon name="disk" class="size-3.5" />
-					Metadata engine
-				</h2>
-				<div class="overflow-x-auto">
-					<table class="table table-xs">
-						<tbody>
-							{#each Object.entries(overview.storage.engineGauges) as [name, value] (name)}
-								<tr class="hover:bg-base-200/60">
-									<td class="text-base-content/70 font-mono text-xs">
-										{name.replaceAll('_', ' ')}
-									</td>
-									<td class="text-right font-medium">{formatBytes(value)}</td>
-								</tr>
-							{/each}
-							<tr class="hover:bg-base-200/60">
-								<td class="text-base-content/70 font-mono text-xs">io completed</td>
-								<td class="text-right font-medium">{formatCount(overview.io.completed)}</td>
-							</tr>
-							<tr class="hover:bg-base-200/60">
-								<td class="text-base-content/70 font-mono text-xs">io rejected</td>
-								<td class="text-right font-medium {overview.io.rejected > 0 ? 'text-warning' : ''}">
-									{formatCount(overview.io.rejected)}
-								</td>
-							</tr>
-						</tbody>
-					</table>
+				<progress
+					class="progress {diskUsedFraction > 0.9
+						? 'progress-error'
+						: diskUsedFraction > 0.75
+							? 'progress-warning'
+							: 'progress-primary'} h-2 w-full"
+					value={diskUsedFraction * 100}
+					max="100"
+				></progress>
+				<div class="text-base-content/50 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+					<span>{formatBytes(overview.storage.bytes)} in object payloads</span>
+					<span
+						class={overview.storage.orphanBlobs > 0 ? 'text-warning' : ''}
+						title="A number that only climbs means reclamation has stalled."
+					>
+						{plural(overview.storage.orphanBlobs, 'payload')} awaiting reclamation
+					</span>
+					<span>{formatBytes(overview.storage.diskAvailableBytes)} available</span>
 				</div>
-			</div>
-		</section>
+			</section>
+
+			<section class="grid gap-4 xl:grid-cols-3" aria-label="Traffic charts">
+				<div class="xl:col-span-2">
+					<ThroughputChart points={throughput} />
+				</div>
+				<SeriesChart
+					label="Request rate"
+					icon="overview"
+					points={requestRate}
+					headline={latest ? formatRate(rate(latest, latest.requests)) : '0/s'}
+					hint="S3 listener"
+					format={(value) => formatRate(value)}
+					height="h-64 sm:h-72"
+					featured
+				/>
+			</section>
+
+			<section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4" aria-label="Runtime charts">
+				<SeriesChart
+					label="Cache hit ratio"
+					icon="cache"
+					points={hitRatio}
+					headline={formatPercent(overview.cache.hitRatio)}
+					hint="per sample"
+					accentClass="text-success"
+					lineClass="stroke-success"
+					areaClass="fill-success/15"
+					format={(value) => formatPercent(value, 0)}
+				/>
+				<SeriesChart
+					label="Resident memory"
+					icon="memory"
+					points={resident}
+					headline={formatBytes(overview.server.residentBytes)}
+					hint="process RSS"
+					accentClass="text-secondary"
+					lineClass="stroke-secondary"
+					areaClass="fill-secondary/15"
+					format={(value) => formatBytes(value, 0)}
+					minTop={1024 * 1024}
+				/>
+				<SeriesChart
+					label="Connections"
+					icon="plug"
+					points={connections}
+					headline={formatCount(overview.server.connections)}
+					hint="all listeners"
+					accentClass="text-primary"
+					lineClass="stroke-primary"
+					areaClass="fill-primary/15"
+					format={(value) => formatCount(value)}
+					integerTicks
+				/>
+				<SeriesChart
+					label="Storage queue"
+					icon="disk"
+					points={queueDepth}
+					headline={formatCount(overview.io.queued + overview.io.active)}
+					hint="depth {overview.io.limit} before shedding"
+					accentClass="text-warning"
+					lineClass="stroke-warning"
+					areaClass="fill-warning/15"
+					format={(value) => formatCount(value)}
+					integerTicks
+				/>
+			</section>
+
+			<section class="grid gap-4 lg:grid-cols-2">
+				<div class="panel flex flex-col gap-4 p-5">
+					<h2
+						class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
+					>
+						<Icon name="overview" class="size-3.5" />
+						Responses since start
+					</h2>
+
+					{#if mixTotal === 0}
+						<div
+							class="border-base-300 bg-base-200/35 grid min-h-36 overflow-hidden rounded-xl border border-dashed sm:grid-cols-[9rem_1fr]"
+						>
+							<img
+								src="/images/telemetry-idle.webp"
+								alt="A quiet telemetry beacon waiting for its first signal"
+								width="560"
+								height="560"
+								class="h-36 w-full object-cover sm:h-full"
+								loading="lazy"
+								decoding="async"
+							/>
+							<div class="flex flex-col items-start justify-center gap-2 p-5">
+								<span class="badge badge-primary badge-soft badge-sm gap-1.5">
+									<span class="bg-primary size-1.5 rounded-full"></span>
+									Listening
+								</span>
+								<div>
+									<h3 class="font-semibold">Waiting for the first S3 request</h3>
+									<p class="text-base-content/55 mt-1 text-sm leading-5">
+										Response health will appear here as traffic reaches the listener.
+									</p>
+								</div>
+							</div>
+						</div>
+					{:else}
+						<div
+							class="bg-base-300 flex h-3 w-full gap-0.5 overflow-hidden rounded-full"
+							role="img"
+							aria-label="Response mix: {responseMix
+								.map((part) => `${part.label} ${formatCount(part.value)}`)
+								.join(', ')}"
+						>
+							{#each responseMix as part (part.label)}
+								{#if part.value > 0}
+									<span
+										class="{part.tone} h-full transition-all duration-300 ease-out"
+										style="width: {(part.value / mixTotal) * 100}%"
+										title="{part.label}: {formatCount(part.value)}"
+										aria-hidden="true"
+									></span>
+								{/if}
+							{/each}
+						</div>
+						<div class="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+							{#each responseMix as part (part.label)}
+								<div class="flex flex-col">
+									<span class="text-base-content/60 flex items-center gap-1.5 text-xs">
+										<span class="{part.tone} size-2 rounded-full"></span>
+										{part.label}
+									</span>
+									<span
+										class="text-lg font-semibold tabular-nums {part.value > 0 ? part.text : ''}"
+									>
+										{formatCount(part.value)}
+									</span>
+								</div>
+							{/each}
+						</div>
+					{/if}
+
+					<div
+						class="border-base-300 text-base-content/50 flex flex-wrap gap-x-6 gap-y-1 border-t pt-3 text-xs"
+					>
+						<span>{formatCount(overview.s3.authFailures)} auth failures</span>
+						<span>{formatCount(overview.s3.anonymous)} anonymous</span>
+						<span>
+							{formatBytes(overview.s3.bytesIn)} in / {formatBytes(overview.s3.bytesOut)} out
+						</span>
+					</div>
+				</div>
+
+				<div class="panel flex flex-col gap-4 p-5">
+					<h2
+						class="text-base-content/70 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase"
+					>
+						<Icon name="disk" class="size-3.5" />
+						Metadata engine
+					</h2>
+					<div class="overflow-x-auto">
+						<table class="table table-xs">
+							<tbody>
+								{#each Object.entries(overview.storage.engineGauges) as [name, value] (name)}
+									<tr class="hover:bg-base-200/60">
+										<td class="text-base-content/70 font-mono text-xs">
+											{name.replaceAll('_', ' ')}
+										</td>
+										<td class="text-right font-medium">{formatBytes(value)}</td>
+									</tr>
+								{/each}
+								<tr class="hover:bg-base-200/60">
+									<td class="text-base-content/70 font-mono text-xs">io completed</td>
+									<td class="text-right font-medium">{formatCount(overview.io.completed)}</td>
+								</tr>
+								<tr class="hover:bg-base-200/60">
+									<td class="text-base-content/70 font-mono text-xs">io rejected</td>
+									<td
+										class="text-right font-medium {overview.io.rejected > 0 ? 'text-warning' : ''}"
+									>
+										{formatCount(overview.io.rejected)}
+									</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</section>
+		</div>
 	{/if}
 </div>

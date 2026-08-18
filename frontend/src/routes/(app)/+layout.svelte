@@ -2,8 +2,9 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
-	import { fade } from 'svelte/transition';
+	import { fly, scale } from 'svelte/transition';
 	import { api } from '$lib/api';
+	import { motionDistance, motionDuration } from '$lib/motion';
 	import { theme, type ThemeChoice } from '$lib/theme.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 	import logo from '$lib/assets/monobucket-logo.svg';
@@ -107,7 +108,14 @@
 						aria-label="Appearance"
 						title="Appearance"
 					>
-						<Icon name={theme.choice === 'dark' ? 'moon' : 'sun'} />
+						{#key theme.choice}
+							<span
+								class="grid place-items-center"
+								in:scale={{ start: 0.86, duration: motionDuration(180) }}
+							>
+								<Icon name={theme.choice === 'dark' ? 'moon' : 'sun'} />
+							</span>
+						{/key}
 					</div>
 					<ul
 						class="dropdown-content menu menu-sm bg-base-100 rounded-box border-base-300 z-30 mt-2 w-52 border p-1 shadow-lg"
@@ -150,7 +158,13 @@
 		<main id="main-content" class="min-w-0 flex-1 p-4 sm:p-6 lg:p-8">
 			<div class="mx-auto w-full max-w-7xl">
 				{#key page.url.pathname}
-					<div in:fade={{ duration: 150 }}>
+					<div
+						in:fly={{
+							y: motionDistance(8),
+							opacity: 0.55,
+							duration: motionDuration(220)
+						}}
+					>
 						{@render children()}
 					</div>
 				{/key}

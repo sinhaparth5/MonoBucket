@@ -9,8 +9,9 @@
 	// framework default that nobody got to.
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { fly } from 'svelte/transition';
+	import { fade, fly } from 'svelte/transition';
 	import { api, ApiError } from '$lib/api';
+	import { motionDelay, motionDistance, motionDuration } from '$lib/motion';
 	import Icon from '$lib/components/Icon.svelte';
 	import logo from '$lib/assets/monobucket-logo.svg';
 
@@ -50,7 +51,10 @@
 			class="bg-primary/10 pointer-events-none absolute -top-32 -left-32 size-80 rounded-full blur-3xl"
 		></div>
 
-		<div class="relative mx-auto w-full max-w-md" in:fly={{ y: 12, duration: 300 }}>
+		<div
+			class="relative mx-auto w-full max-w-md"
+			in:fly={{ y: motionDistance(12), duration: motionDuration(280), opacity: 0.5 }}
+		>
 			<div class="mb-10 flex items-center gap-3">
 				<img src={logo} alt="" class="size-12" width="48" height="48" />
 				<div class="flex flex-col leading-tight">
@@ -111,7 +115,11 @@
 				</fieldset>
 
 				{#if error}
-					<div role="alert" class="alert alert-error alert-soft text-sm" in:fly={{ y: -6 }}>
+					<div
+						role="alert"
+						class="alert alert-error alert-soft text-sm"
+						in:fly={{ y: motionDistance(-6), duration: motionDuration(180) }}
+					>
 						<Icon name="warning" class="size-4" />
 						<span>{error}</span>
 					</div>
@@ -133,7 +141,10 @@
 		</div>
 	</section>
 
-	<aside class="relative hidden min-h-dvh overflow-hidden p-4 lg:block">
+	<aside
+		class="relative hidden min-h-dvh overflow-hidden p-4 lg:block"
+		in:fade={{ delay: motionDelay(70), duration: motionDuration(320) }}
+	>
 		<img
 			src="/images/console-login.webp"
 			alt="Abstract file objects flowing into a colourful storage vessel"

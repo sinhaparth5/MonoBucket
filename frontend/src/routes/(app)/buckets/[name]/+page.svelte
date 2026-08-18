@@ -6,14 +6,26 @@
 	import {
 		api,
 		ApiError,
+		type Bucket,
+		type Capacity,
 		type CorsRule,
 		type ObjectDetail,
 		type Presigned,
 		type StoredObject
 	} from '$lib/api';
-	import { formatBytes, formatTimestamp, leafName, plural } from '$lib/format';
+	import {
+		fillFraction,
+		formatBytes,
+		formatPercent,
+		formatTimestamp,
+		leafName,
+		plural,
+		splitAllocation,
+		type AllocationUnit
+	} from '$lib/format';
 	import { motionDistance, motionDuration } from '$lib/motion';
 	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
+	import AllocationField from '$lib/components/AllocationField.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Uploader from '$lib/components/Uploader.svelte';
 
@@ -47,6 +59,73 @@
 	// URL below actually does, so it is shown next to it rather than left for
 	// someone to discover with a 403.
 	let publicRead = $state(false);
+
+	// The bucket's own allocation, and the instance figure it was drawn from.
+	// Both come from the bucket list rather than from the object listing: the
+	// listing answers "what is in this prefix", which is a different question
+	// and would go stale for a different reason.
+	let allocation = $state<Bucket | null>(null);
+	let capacity = $state<Capacity | null>(null);
+	let quotaAmount = $state(1);
+	let quotaUnit = $state<AllocationUnit>('GiB');
+	let quotaBytes = $state(1024 ** 3);
+	let quotaError = $state('');
+	let savingQuota = $state(false);
+	let quotaDialog: HTMLDialogElement;
+
+	async function loadAllocation(currentBucket: string) {
+		if (!currentBucket) return;
+		try {
+			const answer = await api.bucketsWithCapacity();
+			allocation = answer.buckets.find((entry) => entry.name === currentBucket) ?? null;
+			capacity = answer.capacity;
+		} catch {
+			// The allocation panel is supplementary; a failure here must not take
+			// the object listing down with it.
+			allocation = null;
+			capacity = null;
+		}
+	}
+
+	$effect(() => {
+		loadAllocation(bucket);
+	});
+
+	// What this bucket could be raised to: what is unallocated, plus whatever it
+	// already holds a claim on. null when the instance sets no ceiling.
+	const availableForBucket = $derived(
+		capacity && capacity.allocatableBytes > 0
+			? capacity.remainingBytes + (allocation?.quotaBytes ?? 0)
+			: null
+	);
+
+	function openQuota() {
+		if (!allocation) return;
+		quotaError = '';
+		const seed =
+			allocation.quotaBytes > 0 ? allocation.quotaBytes : Math.max(allocation.usedBytes, 1024 ** 3);
+		const split = splitAllocation(seed);
+		quotaAmount = split.amount;
+		quotaUnit = split.unit;
+		quotaBytes = seed;
+		quotaDialog.showModal();
+	}
+
+	async function saveQuota(event: SubmitEvent) {
+		event.preventDefault();
+		quotaError = '';
+		savingQuota = true;
+		try {
+			const saved = await api.setBucketQuota(bucket, quotaBytes);
+			allocation = saved.bucket;
+			capacity = saved.capacity;
+			quotaDialog.close();
+		} catch (cause) {
+			quotaError = cause instanceof ApiError ? cause.message : 'could not change the allocation';
+		} finally {
+			savingQuota = false;
+		}
+	}
 
 	let urlField = $state<HTMLInputElement | undefined>();
 	let copied = $state(false);
@@ -567,6 +646,13 @@
 						{#if corsCount > 0}<span class="badge badge-xs badge-ghost">{corsCount}</span>{/if}
 					</button>
 
+					{#if allocation}
+						<button class="btn btn-ghost btn-sm gap-1.5" onclick={openQuota}>
+							<Icon name="disk" class="size-3.5" />
+							Allocation
+						</button>
+					{/if}
+
 					<button
 						class="btn btn-sm gap-1.5 {uploadOpen ? 'btn-neutral' : 'btn-primary'}"
 						onclick={() => (uploadOpen = !uploadOpen)}
@@ -576,6 +662,56 @@
 					</button>
 				</div>
 			</div>
+
+			{#if allocation}
+				<!-- Used against allocated, not against the disk: the disk is shared
+				     with every other bucket and says nothing about what this one may
+				     still write. -->
+				<div class="flex flex-col gap-1.5">
+					<div class="flex flex-wrap items-baseline justify-between gap-2 text-xs">
+						<span class="text-base-content/70">
+							{formatBytes(allocation.usedBytes)} stored
+							{#if allocation.pendingBytes > 0}
+								· {formatBytes(allocation.pendingBytes)} in open uploads
+							{/if}
+						</span>
+						<span class="text-base-content/55">
+							{#if allocation.quotaBytes > 0}
+								{formatBytes(allocation.remainingBytes ?? 0)} of
+								{formatBytes(allocation.quotaBytes)} left
+							{:else}
+								no allocation — this bucket is unlimited
+							{/if}
+						</span>
+					</div>
+					{#if allocation.quotaBytes > 0}
+						<div
+							class="bg-base-300 h-1.5 w-full overflow-hidden rounded-full"
+							role="meter"
+							aria-label="Storage used against this bucket's allocation"
+							aria-valuenow={allocation.usedBytes + allocation.pendingBytes}
+							aria-valuemin={0}
+							aria-valuemax={allocation.quotaBytes}
+						>
+							<div
+								class="h-full rounded-full transition-[width] duration-500 {fillFraction(
+									allocation.usedBytes + allocation.pendingBytes,
+									allocation.quotaBytes
+								) > 0.9
+									? 'bg-warning'
+									: 'bg-success'}"
+								style="width: {formatPercent(
+									fillFraction(
+										allocation.usedBytes + allocation.pendingBytes,
+										allocation.quotaBytes
+									),
+									2
+								)}"
+							></div>
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 
 		<div class="relative min-h-32 overflow-hidden sm:min-h-40 lg:min-h-full">
@@ -1171,6 +1307,44 @@
 				{policySaving ? 'Saving…' : 'Save policy'}
 			</button>
 		</div>
+	</div>
+	<form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog bind:this={quotaDialog} class="modal">
+	<div class="modal-box max-w-md">
+		<h2 class="flex items-center gap-2 text-lg font-medium">
+			<span class="bg-primary/10 text-primary grid size-8 place-items-center rounded-lg">
+				<Icon name="disk" class="size-4" />
+			</span>
+			Allocation for {bucket}
+		</h2>
+
+		<form class="mt-4 flex flex-col gap-4" onsubmit={saveQuota}>
+			<AllocationField
+				bind:bytes={quotaBytes}
+				bind:amount={quotaAmount}
+				bind:unit={quotaUnit}
+				availableBytes={availableForBucket}
+				usedBytes={allocation ? allocation.usedBytes + allocation.pendingBytes : 0}
+				disabled={savingQuota}
+			/>
+
+			{#if quotaError}
+				<div role="alert" class="alert alert-error alert-soft text-sm">
+					<Icon name="warning" class="size-4" />
+					<span>{quotaError}</span>
+				</div>
+			{/if}
+
+			<div class="modal-action">
+				<button class="btn btn-sm" type="button" onclick={() => quotaDialog.close()}>Cancel</button>
+				<button class="btn btn-primary btn-sm" type="submit" disabled={savingQuota}>
+					{#if savingQuota}<span class="loading loading-spinner loading-xs"></span>{/if}
+					Save
+				</button>
+			</div>
+		</form>
 	</div>
 	<form method="dialog" class="modal-backdrop"><button>close</button></form>
 </dialog>

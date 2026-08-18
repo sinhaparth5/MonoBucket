@@ -202,6 +202,11 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
 
+    // Claimed before a byte is written to the tree, so a bucket that is full
+    // refuses the request instead of storing a payload it will then have to
+    // reclaim. finishWrite settles the claim against what actually arrived.
+    auto reservation = context.storage.reserveSpace(request.bucket, body.decodedLength());
+
     BlobWriter writer = context.storage.beginWrite();
     std::uint64_t written = 0;
 
@@ -212,7 +217,8 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
         written += chunk.size();
     });
 
-    const ObjectRecord record = context.storage.finishWrite(put, std::move(writer));
+    const ObjectRecord record =
+        context.storage.finishWrite(put, std::move(writer), std::move(reservation));
 
     // After the write, not before: a failed PUT must not invalidate a cached
     // entry that is still the current one.

@@ -38,6 +38,28 @@ std::string_view unquote(std::string_view etag) {
 
 }  // namespace
 
+namespace {
+
+/// What this instance may allocate to buckets in total.
+///
+/// Derived from the filesystem rather than defaulted to a constant, and
+/// deliberately less than the whole of it: the payload tree is not the only
+/// thing on that disk. RocksDB's log and SST files live there, a streaming
+/// write occupies a temporary before it is linked in, and a multipart
+/// completion holds the parts and the assembled object at once. Handing out
+/// every byte would make the first of those the thing that breaks.
+std::uint64_t allocatableFrom(const StorageEngine::Options& options, const BlobStore& blobs) {
+    if (options.allocatableBytes > 0) return options.allocatableBytes;
+
+    const std::uint64_t total = blobs.space().totalBytes;
+    if (total == 0) return 0;
+
+    const std::uint32_t reserve = std::min<std::uint32_t>(options.capacityReservePercent, 100);
+    return total / 100 * (100 - reserve);
+}
+
+}  // namespace
+
 StorageEngine::Options StorageEngine::optionsFrom(const Config& config) {
     Options options;
     options.dataDir             = config.dataDir;
@@ -46,12 +68,20 @@ StorageEngine::Options StorageEngine::optionsFrom(const Config& config) {
     options.metadataMemoryBytes = config.metadataMemoryBytes;
     options.maxOpenFiles        = static_cast<int>(config.metadataMaxOpenFiles);
     options.reclaimGraceMs      = static_cast<std::int64_t>(config.reclaimGraceSeconds) * 1000;
+    options.allocatableBytes        = config.allocatableBytes;
+    options.capacityReservePercent  = config.capacityReservePercent;
+    options.defaultBucketQuotaBytes = config.defaultBucketQuotaBytes;
     return options;
 }
 
 StorageEngine::StorageEngine(Options options)
     : options_(std::move(options)),
-      blobs_(options_.dataDir, options_.durability, options_.chunkBytes) {
+      blobs_(options_.dataDir, options_.durability, options_.chunkBytes),
+      quotas_(allocatableFrom(options_, blobs_)) {
+    // Recorded so that everything downstream reports the figure that is
+    // actually enforced, not the zero that asked for it to be derived.
+    options_.allocatableBytes = quotas_.allocatableBytes();
+
     MetadataStoreOptions metadataOptions;
     metadataOptions.path              = (options_.dataDir / "meta").string();
     metadataOptions.memoryBudgetBytes = options_.metadataMemoryBytes;
@@ -60,9 +90,39 @@ StorageEngine::StorageEngine(Options options)
     metadataOptions.syncWrites = options_.durability == Durability::Strict;
 
     metadata_ = openRocksMetadataStore(metadataOptions);
+    seedQuotas();
 
     log::info("storage engine ready: durability=", toString(options_.durability),
               ", chunk=", options_.chunkBytes / 1024, " KiB");
+}
+
+void StorageEngine::seedQuotas() {
+    // The store counted every object as it opened, so the ledger starts from
+    // what is actually on disk rather than from a number somebody wrote down
+    // last time. Everything after this is a delta reported by the commit that
+    // caused it.
+    const auto scanned = metadata_->bucketCharges();
+    const std::unordered_map<std::string, MetadataStore::BucketCharge> charges(scanned.begin(),
+                                                                              scanned.end());
+
+    std::uint64_t allocated = 0;
+    std::size_t   allocatedBuckets = 0;
+    for (const BucketRecord& bucket : metadata_->listBuckets()) {
+        const auto charge = charges.find(bucket.name);
+        quotas_.seed(bucket.name, bucket.quotaBytes,
+                     charge == charges.end() ? 0 : charge->second.objectBytes,
+                     charge == charges.end() ? 0 : charge->second.partBytes);
+        if (bucket.quotaBytes != 0) {
+            allocated += bucket.quotaBytes;
+            ++allocatedBuckets;
+        }
+    }
+
+    if (options_.allocatableBytes > 0) {
+        log::info("storage allocations: ", allocatedBuckets, " of ",
+                  metadata_->usage().buckets, " buckets hold ", allocated, " of ",
+                  options_.allocatableBytes, " allocatable bytes");
+    }
 }
 
 StorageEngine::~StorageEngine() = default;
@@ -98,12 +158,26 @@ StorageEngine::RecoveryReport StorageEngine::recover() {
 
 // --- Buckets ---------------------------------------------------------------
 
-void StorageEngine::createBucket(std::string_view name) {
+void StorageEngine::createBucket(std::string_view name, std::uint64_t quotaBytes) {
+    // Checked before the record is written and again as the ledger takes the
+    // allocation, so a refusal never leaves a bucket that exists with an
+    // allocation the instance cannot back.
+    quotas_.admitAllocation(quotaBytes);
+
     BucketRecord bucket;
-    bucket.name      = std::string(name);
-    bucket.createdAt = nowMs();
+    bucket.name       = std::string(name);
+    bucket.createdAt  = nowMs();
+    bucket.quotaBytes = quotaBytes;
     metadata_->createBucket(bucket);
-    log::info("created bucket '", name, '\'');
+    quotas_.track(bucket.name, quotaBytes);
+
+    log::info("created bucket '", name, '\'',
+              quotaBytes > 0 ? " with an allocation of " + std::to_string(quotaBytes) + " bytes"
+                             : std::string(" with no allocation"));
+}
+
+void StorageEngine::createBucketWithDefaultQuota(std::string_view name) {
+    createBucket(name, options_.defaultBucketQuotaBytes);
 }
 
 std::optional<BucketRecord> StorageEngine::getBucket(std::string_view name) {
@@ -113,7 +187,11 @@ std::optional<BucketRecord> StorageEngine::getBucket(std::string_view name) {
 std::vector<BucketRecord> StorageEngine::listBuckets() { return metadata_->listBuckets(); }
 
 void StorageEngine::deleteBucket(std::string_view name) {
+    // The store refuses a bucket that still holds anything, so by the time this
+    // returns the bucket's charges are zero and dropping its tally cannot lose
+    // an accounted byte.
     metadata_->deleteBucket(name);
+    quotas_.forget(name);
     log::info("deleted bucket '", name, '\'');
 }
 
@@ -166,6 +244,41 @@ void StorageEngine::setBucketDurability(std::string_view              name,
     bucket->durability = durability;
     metadata_->updateBucket(*bucket);
 }
+
+void StorageEngine::setBucketQuota(std::string_view name, std::uint64_t quotaBytes) {
+    auto bucket = metadata_->getBucket(name);
+    if (!bucket) {
+        throw StorageError(StorageErrorCode::NoSuchBucket, "no such bucket: " + std::string(name));
+    }
+
+    const std::uint64_t previous = bucket->quotaBytes;
+
+    // The ledger decides first, because it is the one that has to be right: it
+    // is what every concurrent write is being admitted against, and it knows
+    // about reservations the record cannot see. If the record then fails to
+    // write, the ledger is put back — a bucket enforcing an allocation nobody
+    // asked for would be far harder to explain than a failed request.
+    quotas_.setQuota(name, quotaBytes);
+    try {
+        bucket->quotaBytes = quotaBytes;
+        metadata_->updateBucket(*bucket);
+    } catch (...) {
+        quotas_.setQuota(name, previous);
+        throw;
+    }
+
+    log::info("bucket '", name, "' allocation set to ", quotaBytes, " bytes");
+}
+
+BucketCapacity StorageEngine::bucketCapacity(std::string_view name) const {
+    return quotas_.capacity(name);
+}
+
+std::vector<std::pair<std::string, BucketCapacity>> StorageEngine::bucketCapacities() const {
+    return quotas_.all();
+}
+
+InstanceCapacity StorageEngine::capacity() const { return quotas_.instance(); }
 
 // --- Identity ---------------------------------------------------------------
 
@@ -229,7 +342,13 @@ BlobWriter StorageEngine::beginWrite() {
     return writer;
 }
 
-ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter writer) {
+QuotaLedger::Reservation StorageEngine::reserveSpace(std::string_view bucket,
+                                                     std::uint64_t    bytes) {
+    return quotas_.reserve(bucket, bytes);
+}
+
+ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter writer,
+                                        QuotaLedger::Reservation reservation) {
     if (request.key.empty() || request.key.size() > limits::kMaxKeyLength) {
         throw StorageError(StorageErrorCode::Internal,
                            "object key must be between 1 and " +
@@ -244,6 +363,17 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
     // completing before putObject is called.
     const BlobWriter::Committed committed = writer.commit(durability);
 
+    // Now that the size is known for certain, the claim is raised to cover it.
+    // A body whose length was declared has already been admitted and this
+    // costs nothing; one that arrived chunked is admitted here, and a refusal
+    // still lands before the metadata commit — so the object never becomes
+    // visible and the payload is left to reclamation.
+    //
+    // An overwrite is admitted as if the key were new, deliberately: both
+    // payloads are on disk until the commit, so the bytes the old object will
+    // release are not available to the new one yet.
+    quotas_.extend(reservation, request.bucket, committed.size);
+
     ObjectRecord record;
     record.key          = request.key;
     record.blobId       = committed.blobId;
@@ -255,6 +385,8 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
     record.userMetadata = request.userMetadata;
 
     const auto outcome = metadata_->putObject(request.bucket, record, durability);
+    quotas_.recordObject(request.bucket, std::move(reservation), record.size,
+                         outcome.replacedBytes);
     if (outcome.releasedBlobId) reclaimNow(*outcome.releasedBlobId);
 
     return record;
@@ -284,6 +416,7 @@ std::optional<ObjectRecord> StorageEngine::statObject(std::string_view bucket,
 
 bool StorageEngine::deleteObject(std::string_view bucket, std::string_view key) {
     const auto outcome = metadata_->deleteObject(bucket, key, durabilityFor(bucket));
+    quotas_.recordDeletion(bucket, outcome.releasedBytes);
     if (outcome.releasedBlobId) reclaimNow(*outcome.releasedBlobId);
     return outcome.existed;
 }
@@ -320,7 +453,7 @@ std::vector<UploadRecord> StorageEngine::listUploads(std::string_view bucket,
 }
 
 PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t partNumber,
-                                     BlobWriter writer) {
+                                     BlobWriter writer, QuotaLedger::Reservation reservation) {
     // A part belongs to its upload's bucket, so it inherits that bucket's
     // level. Parts are payloads like any other and a strict bucket wants them
     // on disk before the part row that names them exists.
@@ -332,6 +465,7 @@ PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t pa
     const Durability durability = durabilityFor(upload->bucket);
 
     const BlobWriter::Committed committed = writer.commit(durability);
+    quotas_.extend(reservation, upload->bucket, committed.size);
 
     PartRecord part;
     part.partNumber = partNumber;
@@ -341,6 +475,7 @@ PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t pa
     part.uploadedAt = nowMs();
 
     const auto outcome = metadata_->putPart(uploadId, part, durability);
+    quotas_.recordPart(upload->bucket, std::move(reservation), part.size, outcome.replacedBytes);
     if (outcome.releasedBlobId) reclaimNow(*outcome.releasedBlobId);
 
     return part;
@@ -353,7 +488,14 @@ std::vector<PartRecord> StorageEngine::listParts(std::string_view uploadId) {
 void StorageEngine::abortUpload(std::string_view uploadId) {
     const auto       upload     = metadata_->getUpload(uploadId);
     const Durability durability = upload ? durabilityFor(upload->bucket) : options_.durability;
-    reclaimNow(metadata_->abortUpload(uploadId, durability));
+
+    const auto outcome = metadata_->abortUpload(uploadId, durability);
+    // The parts were charged as pending from the moment each was stored, so an
+    // abandoned upload gives its bucket's allocation back in full and leaves
+    // nothing in used bytes — an upload that never completed never produced an
+    // object to account for.
+    quotas_.recordUploadAborted(outcome.bucket, outcome.releasedBytes);
+    reclaimNow(outcome.releasedBlobIds);
 }
 
 ObjectRecord StorageEngine::completeUpload(std::string_view                  uploadId,
@@ -438,6 +580,12 @@ ObjectRecord StorageEngine::completeUpload(std::string_view                  upl
     record.userMetadata = upload->userMetadata;
 
     const auto outcome = metadata_->completeUpload(upload->bucket, uploadId, record, durability);
+    // No fresh admission: the parts have been charged since they were stored,
+    // and the assembled object is the same bytes under a different heading. A
+    // bucket at its allocation must still be able to finish an upload it was
+    // already charged for.
+    quotas_.recordUploadCompleted(upload->bucket, record.size, outcome.replacedBytes,
+                                  outcome.releasedPartBytes);
     if (outcome.releasedBlobId) reclaimNow(*outcome.releasedBlobId);
     reclaimNow(outcome.releasedPartBlobIds);
 

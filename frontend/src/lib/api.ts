@@ -90,6 +90,7 @@ export type PermissionName =
 	| 'object:read'
 	| 'object:write'
 	| 'settings:read'
+	| 'capacity:write'
 	| 'credential:read'
 	| 'credential:write'
 	| 'user:read'
@@ -199,6 +200,7 @@ export interface Overview {
 		diskAvailableBytes: number;
 		engineGauges: Record<string, number>;
 	};
+	capacity: Capacity;
 	io: {
 		queued: number;
 		active: number;
@@ -267,6 +269,27 @@ export interface Bucket {
 	publicRead: boolean;
 	hasPolicy: boolean;
 	corsRules: number;
+	/// The bucket's storage allocation. Zero means unlimited — buckets made by
+	/// plain S3 CreateBucket land there unless the server sets a default.
+	quotaBytes: number;
+	usedBytes: number;
+	/// Multipart parts stored against an upload that has not completed. Charged
+	/// to the allocation, but not yet part of any object.
+	pendingBytes: number;
+	/// null for an unlimited bucket: there is no remainder to draw.
+	remainingBytes: number | null;
+}
+
+/// What the instance may hand out, and what it already has.
+export interface Capacity {
+	allocatableBytes: number;
+	allocatedBytes: number;
+	remainingBytes: number;
+	usedBytes: number;
+	/// Buckets with no allocation. While any exist, `remainingBytes` is an
+	/// upper bound rather than a promise — those buckets can consume capacity
+	/// nothing has reserved against them.
+	unlimitedBuckets: number;
 }
 
 export interface CorsRule {
@@ -383,8 +406,18 @@ export const api = {
 
 	buckets: () => request<{ buckets: Bucket[] }>('/buckets').then((r) => r.buckets),
 
-	createBucket: (name: string) =>
-		request<Bucket>('/buckets', { method: 'POST', body: JSON.stringify({ name }) }),
+	/// The list and the instance capacity arrive together, because a bucket's
+	/// allocation only means something beside what is left to allocate.
+	bucketsWithCapacity: () => request<{ buckets: Bucket[]; capacity: Capacity }>('/buckets'),
+
+	createBucket: (name: string, quotaBytes: number) =>
+		request<Bucket>('/buckets', { method: 'POST', body: JSON.stringify({ name, quotaBytes }) }),
+
+	setBucketQuota: (name: string, quotaBytes: number) =>
+		request<{ bucket: Bucket; capacity: Capacity }>('/buckets/quota', {
+			method: 'POST',
+			body: JSON.stringify({ name, quotaBytes })
+		}),
 
 	deleteBucket: (name: string) =>
 		request<{ deleted: string }>(`/buckets?name=${encodeURIComponent(name)}`, {

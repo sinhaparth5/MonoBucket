@@ -61,6 +61,15 @@ TEST_CASE("codes carry the status and spelling clients branch on", "[s3][error]"
     // The wire code carries the "Error" suffix. Not a typo — clients match it
     // literally.
     REQUIRE(std::string(describe(S3ErrorCode::KeyTooLong).code) == "KeyTooLongError");
+
+    // 403 rather than 507: a bucket over its allocation is terminal, and 403 is
+    // what stops the AWS CLI instead of making it back off and retry.
+    REQUIRE(describe(S3ErrorCode::QuotaExceeded).status == 403);
+    REQUIRE(std::string(describe(S3ErrorCode::QuotaExceeded).code) == "QuotaExceeded");
+
+    // Distinct from QuotaExceeded on purpose: one says this bucket is full, the
+    // other says the server has nothing left to give a new bucket.
+    REQUIRE(describe(S3ErrorCode::InsufficientCapacity).status == 507);
 }
 
 TEST_CASE("every storage condition maps to a code a client can act on",
@@ -72,6 +81,16 @@ TEST_CASE("every storage condition maps to a code a client can act on",
             S3ErrorCode::BucketAlreadyExists);
     REQUIRE(fromStorage(StorageErrorCode::BucketNotEmpty) == S3ErrorCode::BucketNotEmpty);
     REQUIRE(fromStorage(StorageErrorCode::InvalidPart) == S3ErrorCode::InvalidPart);
+
+    REQUIRE(fromStorage(StorageErrorCode::QuotaExceeded) == S3ErrorCode::QuotaExceeded);
+    REQUIRE(fromStorage(StorageErrorCode::InsufficientCapacity) ==
+            S3ErrorCode::InsufficientCapacity);
+
+    // A reduction below what is stored can only come from the console, which
+    // never signs an S3 request. If one ever reaches here it is a bad argument,
+    // not a full bucket, and saying "QuotaExceeded" would send the reader off
+    // to delete objects that were never the problem.
+    REQUIRE(fromStorage(StorageErrorCode::QuotaBelowUsage) == S3ErrorCode::InvalidArgument);
 
     // Corruption, Io and Internal are all "the server broke" and the client's
     // recourse is identical; distinguishing them on the wire would only tell an

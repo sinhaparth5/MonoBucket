@@ -55,6 +55,17 @@ enum class Permission {
     ObjectRead,       ///< Read object data and metadata, and presign a GET
     ObjectWrite,      ///< Upload and delete objects
     SettingsRead,     ///< The resolved configuration and the server overview
+
+    /// Change an existing bucket's storage allocation.
+    ///
+    /// Separate from BucketWrite because it is not a decision about one
+    /// bucket: allocations are drawn from one instance-wide capacity, so
+    /// raising this bucket's is taking it away from whoever asks next. Anyone
+    /// who may create a bucket may size the one they are creating — that is
+    /// bounded by what is unallocated — but moving capacity between buckets
+    /// that already exist is an administrator's call.
+    CapacityWrite,
+
     CredentialRead,   ///< List S3 access keys
     CredentialWrite,  ///< Issue, rotate and revoke S3 access keys
     UserRead,         ///< List users and their roles

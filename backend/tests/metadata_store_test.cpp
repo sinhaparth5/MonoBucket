@@ -463,7 +463,11 @@ TEST_CASE("aborting an upload releases every part", "[metadata][multipart]") {
     }
 
     const auto released = store->abortUpload("UPLOAD1", monobucket::Durability::None);
-    CHECK(released.size() == 3);
+    CHECK(released.releasedBlobIds.size() == 3);
+    // The bytes come back from the same commit that released the payloads, so
+    // the bucket's pending charge can be dropped by exactly what was freed.
+    CHECK(released.releasedBytes == 3 * 1024);
+    CHECK(released.bucket == "b");
     CHECK_FALSE(store->getUpload("UPLOAD1").has_value());
     CHECK(store->usage().uploads == 0);
 

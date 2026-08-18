@@ -127,6 +127,12 @@ Config Config::fromEnvironment() {
     cfg.reclaimIntervalSeconds = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_RECLAIM_INTERVAL_SECONDS", cfg.reclaimIntervalSeconds));
 
+    cfg.allocatableBytes = env::bytes("MONOBUCKET_ALLOCATABLE_BYTES", cfg.allocatableBytes);
+    cfg.capacityReservePercent = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_CAPACITY_RESERVE_PERCENT", cfg.capacityReservePercent));
+    cfg.defaultBucketQuotaBytes =
+        env::bytes("MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES", cfg.defaultBucketQuotaBytes);
+
     cfg.ioThreads    = static_cast<unsigned>(env::number("MONOBUCKET_IO_THREADS", cfg.ioThreads));
     cfg.ioQueueLimit = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_IO_QUEUE_LIMIT", cfg.ioQueueLimit));
@@ -320,6 +326,20 @@ void Config::validate() const {
             "payload that an upload is still writing to");
     }
 
+    // A reserve of 100% would derive an allocatable capacity of zero, which
+    // refuses every allocation and reads as a broken instance rather than as a
+    // setting. Refusing it here says which setting is at fault.
+    if (capacityReservePercent > 90) {
+        throw ConfigError(
+            "MONOBUCKET_CAPACITY_RESERVE_PERCENT must not exceed 90; set "
+            "MONOBUCKET_ALLOCATABLE_BYTES instead of reserving nearly the whole disk");
+    }
+    if (allocatableBytes > 0 && defaultBucketQuotaBytes > allocatableBytes) {
+        throw ConfigError(
+            "MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES exceeds MONOBUCKET_ALLOCATABLE_BYTES, so the "
+            "first bucket created over S3 could never be allocated");
+    }
+
     static constexpr std::string_view kLevels[] = {"trace", "debug", "info", "warn", "error"};
     if (std::find(std::begin(kLevels), std::end(kLevels), logLevel) == std::end(kLevels)) {
         throw ConfigError("MONOBUCKET_LOG_LEVEL must be one of trace/debug/info/warn/error, got '" +
@@ -389,6 +409,9 @@ nlohmann::json Config::toJson() const {
         {"metadataMaxOpenFiles", metadataMaxOpenFiles},
         {"reclaimGraceSeconds", reclaimGraceSeconds},
         {"reclaimIntervalSeconds", reclaimIntervalSeconds},
+        {"allocatableBytes", allocatableBytes},
+        {"capacityReservePercent", capacityReservePercent},
+        {"defaultBucketQuotaBytes", defaultBucketQuotaBytes},
         {"ioThreads", ioThreads},
         {"ioQueueLimit", ioQueueLimit},
         {"rootAccessKey", rootAccessKey},

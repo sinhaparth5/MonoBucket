@@ -95,7 +95,9 @@ drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Reque
                                          const S3Body& body) {
     const std::string  uploadId   = requireUploadId(request);
     const std::uint32_t partNumber = parsePartNumber(request);
-    requireUpload(context, request, uploadId);
+    const UploadRecord  upload     = requireUpload(context, request, uploadId);
+
+    auto reservation = context.storage.reserveSpace(upload.bucket, body.decodedLength());
 
     BlobWriter    writer  = context.storage.beginWrite();
     std::uint64_t written = 0;
@@ -105,7 +107,8 @@ drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Reque
         written += chunk.size();
     });
 
-    const PartRecord part = context.storage.finishPart(uploadId, partNumber, std::move(writer));
+    const PartRecord part =
+        context.storage.finishPart(uploadId, partNumber, std::move(writer), std::move(reservation));
     context.metrics.bytesIn.fetch_add(written, std::memory_order_relaxed);
 
     auto response = emptyResponse(200);

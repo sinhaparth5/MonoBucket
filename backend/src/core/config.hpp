@@ -74,6 +74,30 @@ struct Config {
     /// reclamation to the deletion path and to startup recovery.
     std::uint32_t reclaimIntervalSeconds = 300;
 
+    // --- Storage allocations -----------------------------------------------
+
+    /// What may be allocated across every bucket. Zero derives it from the
+    /// filesystem holding the data directory, less `capacityReservePercent`.
+    ///
+    /// Set it when the data directory shares a filesystem with anything else,
+    /// or when the volume is larger than this instance is meant to fill: the
+    /// derived figure assumes the disk is MonoBucket's.
+    std::uint64_t allocatableBytes = 0;
+
+    /// The share of a derived capacity held back for the storage engine —
+    /// RocksDB's files, streaming temporaries, and the second copy a multipart
+    /// completion makes. Ignored when `allocatableBytes` is set explicitly.
+    std::uint32_t capacityReservePercent = 10;
+
+    /// The allocation a bucket receives when it is created by something that
+    /// cannot name one: plain S3 CreateBucket, which has no field for it.
+    ///
+    /// Zero leaves such buckets unlimited. That is the default because it is
+    /// what every bucket was before allocations existed, and an upgrade that
+    /// silently started refusing writes to buckets an operator never sized
+    /// would be indistinguishable from a bug.
+    std::uint64_t defaultBucketQuotaBytes = 0;
+
     // --- I/O ---------------------------------------------------------------
     /// 0 means "match the worker thread count". Blocking filesystem work runs
     /// here so it never occupies an event loop thread.

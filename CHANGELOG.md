@@ -102,6 +102,53 @@ Nothing yet.
 
 ---
 
+## [2026.08.3] — 2026-08-18
+
+### Added
+
+- **Per-bucket storage allocations.** Every bucket carries an allocation, and
+  writes are refused once it is exhausted. The console requires one when a
+  bucket is created and shows what the instance has left to hand out; the S3
+  listener, which has no field to ask for one, gives new buckets
+  `MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES`.
+- `MONOBUCKET_ALLOCATABLE_BYTES`, `MONOBUCKET_CAPACITY_RESERVE_PERCENT` and
+  `MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES`. Left unset, the allocatable capacity
+  is the filesystem holding the data directory less a 10% operational reserve —
+  set it explicitly when the data directory shares its disk.
+- `POST /_mb/api/buckets` now requires `quotaBytes`; `GET` returns each bucket's
+  allocation, usage and remainder alongside an instance `capacity` block.
+- `GET`/`POST /_mb/api/buckets/quota` reads the whole division of capacity and
+  changes one bucket's allocation. Reading it is `settings:read`; changing it is
+  the new `capacity:write` permission, which only an administrator holds.
+- `/metrics` gains `monobucket_allocatable_bytes`, `monobucket_allocated_bytes`,
+  `monobucket_unallocated_buckets`, and per-bucket
+  `monobucket_bucket_quota_bytes`, `monobucket_bucket_used_bytes` and
+  `monobucket_bucket_pending_bytes`.
+- Two S3 error codes: `QuotaExceeded` (403) when a write does not fit the
+  bucket's allocation, and `InsufficientCapacity` (507) when the instance cannot
+  back a new bucket's allocation at all.
+
+### Changed
+
+- Multipart parts are charged to their bucket's allocation as soon as they are
+  stored, and released in full when the upload is aborted. An open upload holds
+  bytes on disk, so it holds allocation; a failed one never becomes usage.
+- An overwrite is admitted against the bucket's remaining allocation as if the
+  key were new. Both payloads are on disk until the metadata commits, so the
+  bytes the old object will release are not available to the new one yet — the
+  settled figure afterwards is the true delta.
+
+### Compatibility
+
+- The bucket record gains a trailing allocation field. Older records read back
+  with no allocation, which is what they had; a bucket written by this release
+  is read by 2026.08.2 as one whose trailing bytes it ignores.
+- Nothing about an existing deployment starts refusing writes on upgrade:
+  buckets that predate allocations are unlimited, and
+  `MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES` defaults to zero.
+
+---
+
 ## [2026.08.2] — 2026-08-18
 
 ### Breaking

@@ -8,9 +8,9 @@ namespace monobucket {
 const std::vector<Permission>& allPermissions() {
     static const std::vector<Permission> kAll{
         Permission::BucketRead,      Permission::BucketWrite,     Permission::ObjectRead,
-        Permission::ObjectWrite,     Permission::SettingsRead,    Permission::CredentialRead,
-        Permission::CredentialWrite, Permission::UserRead,        Permission::UserWrite,
-        Permission::AuditRead,
+        Permission::ObjectWrite,     Permission::SettingsRead,    Permission::CapacityWrite,
+        Permission::CredentialRead,  Permission::CredentialWrite, Permission::UserRead,
+        Permission::UserWrite,       Permission::AuditRead,
     };
     return kAll;
 }
@@ -31,6 +31,7 @@ std::string_view toString(Permission permission) noexcept {
         case Permission::ObjectRead:      return "object:read";
         case Permission::ObjectWrite:     return "object:write";
         case Permission::SettingsRead:    return "settings:read";
+        case Permission::CapacityWrite:   return "capacity:write";
         case Permission::CredentialRead:  return "credential:read";
         case Permission::CredentialWrite: return "credential:write";
         case Permission::UserRead:        return "user:read";
@@ -80,6 +81,7 @@ bool allows(Role role, Permission permission) noexcept {
                 case Permission::CredentialRead:
                 case Permission::CredentialWrite:
                     return true;
+                case Permission::CapacityWrite:
                 case Permission::UserRead:
                 case Permission::UserWrite:
                 case Permission::AuditRead:
@@ -96,6 +98,7 @@ bool allows(Role role, Permission permission) noexcept {
                     return true;
                 case Permission::BucketWrite:
                 case Permission::ObjectWrite:
+                case Permission::CapacityWrite:
                 case Permission::CredentialWrite:
                 case Permission::UserRead:
                 case Permission::UserWrite:

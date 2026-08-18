@@ -9,6 +9,7 @@
 
 #include "storage/blob_store.hpp"
 #include "storage/metadata_store.hpp"
+#include "storage/quota.hpp"
 #include "storage/records.hpp"
 
 namespace monobucket {
@@ -33,6 +34,26 @@ public:
         /// sweeper may reclaim it. Must exceed the longest upload a client
         /// could still be in the middle of.
         std::int64_t reclaimGraceMs = 60 * 60 * 1000;
+
+        /// What may be allocated across every bucket. Zero means "derive it
+        /// from the filesystem holding the data directory", which is what the
+        /// server does unless an operator names a figure — a number taken from
+        /// the disk is the only one that is still true after the disk changes.
+        std::uint64_t allocatableBytes = 0;
+
+        /// The share of the derived capacity held back for the storage engine
+        /// itself: RocksDB's log and SST files, the temporary a streaming write
+        /// occupies before it is linked in, and the second copy a multipart
+        /// completion makes while it concatenates. Ignored when
+        /// `allocatableBytes` is set, because an explicit figure is already the
+        /// operator's answer to this question.
+        std::uint32_t capacityReservePercent = 10;
+
+        /// The allocation a bucket gets when it is created by something that
+        /// cannot ask for one — plain S3 CreateBucket. Zero leaves such a
+        /// bucket unlimited, which is what every bucket was before allocations
+        /// existed and therefore what an upgrade must not change.
+        std::uint64_t defaultBucketQuotaBytes = 0;
     };
 
     static Options optionsFrom(const Config& config);
@@ -57,7 +78,17 @@ public:
 
     // --- Buckets -----------------------------------------------------------
 
-    void                        createBucket(std::string_view name);
+    /// Creates a bucket with a storage allocation. Zero leaves it unlimited.
+    ///
+    /// Throws `InsufficientCapacity` when the allocation does not fit in what
+    /// the instance has left to hand out — checked before the record is
+    /// written, so a refused allocation leaves no bucket behind.
+    void createBucket(std::string_view name, std::uint64_t quotaBytes = 0);
+
+    /// Creates a bucket with whatever allocation the server hands to buckets
+    /// that could not ask for one. What S3 CreateBucket calls.
+    void createBucketWithDefaultQuota(std::string_view name);
+
     std::optional<BucketRecord> getBucket(std::string_view name);
     std::vector<BucketRecord>   listBuckets();
     void                        deleteBucket(std::string_view name);
@@ -75,6 +106,28 @@ public:
     /// override so the bucket follows the server again.
     void setBucketDurability(std::string_view name, std::optional<Durability> durability);
 
+    /// Replaces a bucket's storage allocation. Zero makes it unlimited.
+    ///
+    /// Throws `QuotaBelowUsage` when the bucket already holds more than the
+    /// new allocation, and `InsufficientCapacity` when the instance cannot
+    /// cover it. The ledger is updated first and rolled back if the record
+    /// cannot be written, so the two never disagree about what was allowed.
+    void setBucketQuota(std::string_view name, std::uint64_t quotaBytes);
+
+    /// What one bucket has allocated and what it holds.
+    BucketCapacity bucketCapacity(std::string_view name) const;
+
+    /// Every tracked bucket's capacity, ordered by name.
+    std::vector<std::pair<std::string, BucketCapacity>> bucketCapacities() const;
+
+    /// The instance's allocatable capacity and how much of it is spoken for.
+    InstanceCapacity capacity() const;
+
+    /// The allocation a bucket created through plain S3 CreateBucket receives.
+    std::uint64_t defaultBucketQuotaBytes() const noexcept {
+        return options_.defaultBucketQuotaBytes;
+    }
+
     /// The level writes to `bucket` are held to: its override if it set one,
     /// otherwise `MONOBUCKET_DURABILITY`.
     Durability durabilityFor(std::string_view bucket);
@@ -85,6 +138,15 @@ public:
     /// that a crash at any later point still leaves a recoverable trace.
     BlobWriter beginWrite();
 
+    /// Claims `bytes` of a bucket's remaining allocation before a body is read.
+    ///
+    /// Throws `QuotaExceeded`. Handed to `finishWrite` or `finishPart`, which
+    /// settle it against what actually arrived — and which take the claim
+    /// themselves when none was made, so the enforcement does not depend on
+    /// every caller remembering to ask first.
+    [[nodiscard]] QuotaLedger::Reservation reserveSpace(std::string_view bucket,
+                                                        std::uint64_t    bytes);
+
     struct PutRequest {
         std::string  bucket;
         std::string  key;
@@ -92,8 +154,9 @@ public:
         UserMetadata userMetadata;
     };
 
-    /// Publishes a streamed payload. Consumes the writer.
-    ObjectRecord finishWrite(const PutRequest& request, BlobWriter writer);
+    /// Publishes a streamed payload. Consumes the writer and the claim.
+    ObjectRecord finishWrite(const PutRequest& request, BlobWriter writer,
+                             QuotaLedger::Reservation reservation = {});
 
     /// Convenience for small payloads that are already in memory — the settings
     /// panel, tests, and anything under the in-memory body threshold.
@@ -123,8 +186,14 @@ public:
     std::optional<UploadRecord> getUpload(std::string_view uploadId);
     std::vector<UploadRecord>   listUploads(std::string_view bucket, std::uint32_t maxUploads);
 
-    /// Publishes one part. Consumes the writer.
-    PartRecord finishPart(std::string_view uploadId, std::uint32_t partNumber, BlobWriter writer);
+    /// Publishes one part. Consumes the writer and the claim.
+    ///
+    /// Parts are charged to their bucket as *pending* the moment they are
+    /// stored, because the bytes are on disk from then on and an upload nobody
+    /// completes holds them indefinitely. They become used bytes only when the
+    /// upload completes, and are given back when it is aborted.
+    PartRecord finishPart(std::string_view uploadId, std::uint32_t partNumber, BlobWriter writer,
+                          QuotaLedger::Reservation reservation = {});
 
     std::vector<PartRecord> listParts(std::string_view uploadId);
 
@@ -299,9 +368,17 @@ private:
     /// upload is still writing to.
     std::size_t reclaimOlderThan(std::size_t limit, TimestampMs cutoff);
 
+    /// Establishes the ledger from the store's opening scan. Called once, from
+    /// the constructor, before anything can write.
+    void seedQuotas();
+
     Options                        options_;
     BlobStore                      blobs_;
     std::unique_ptr<MetadataStore> metadata_;
+
+    /// Declared after `metadata_` and seeded from it: the ledger is only
+    /// meaningful once the store has counted what is already there.
+    QuotaLedger quotas_;
 };
 
 /// Renders a finding kind for logs and the `--fsck` report.

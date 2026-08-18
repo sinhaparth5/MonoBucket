@@ -111,6 +111,45 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
        << "# TYPE monobucket_disk_available_bytes gauge\n"
        << "monobucket_disk_available_bytes " << stats.space.availableBytes << '\n';
 
+    const auto capacity = storage.capacity();
+    os << "# HELP monobucket_allocatable_bytes Storage this instance may allocate to buckets.\n"
+       << "# TYPE monobucket_allocatable_bytes gauge\n"
+       << "monobucket_allocatable_bytes " << capacity.allocatableBytes << '\n';
+
+    os << "# HELP monobucket_allocated_bytes Sum of every bucket's storage allocation.\n"
+       << "# TYPE monobucket_allocated_bytes gauge\n"
+       << "monobucket_allocated_bytes " << capacity.allocatedBytes << '\n';
+
+    os << "# HELP monobucket_unallocated_buckets Buckets with no storage allocation.\n"
+       << "# TYPE monobucket_unallocated_buckets gauge\n"
+       << "monobucket_unallocated_buckets " << capacity.unlimitedBuckets << '\n';
+
+    // Per-bucket series, which is the pair an alert is actually written
+    // against: a bucket approaching its allocation is the thing an operator
+    // wants to hear about, and the instance total cannot say which one.
+    // Cardinality is the bucket count — people-scale, not object-scale.
+    const auto capacities = storage.bucketCapacities();
+    os << "# HELP monobucket_bucket_quota_bytes A bucket's storage allocation; 0 is unlimited.\n"
+       << "# TYPE monobucket_bucket_quota_bytes gauge\n";
+    for (const auto& [name, bucket] : capacities) {
+        os << "monobucket_bucket_quota_bytes{bucket=\"" << name << "\"} " << bucket.quotaBytes
+           << '\n';
+    }
+
+    os << "# HELP monobucket_bucket_used_bytes Object payload bytes stored in a bucket.\n"
+       << "# TYPE monobucket_bucket_used_bytes gauge\n";
+    for (const auto& [name, bucket] : capacities) {
+        os << "monobucket_bucket_used_bytes{bucket=\"" << name << "\"} " << bucket.usedBytes
+           << '\n';
+    }
+
+    os << "# HELP monobucket_bucket_pending_bytes Multipart part bytes charged to a bucket.\n"
+       << "# TYPE monobucket_bucket_pending_bytes gauge\n";
+    for (const auto& [name, bucket] : capacities) {
+        os << "monobucket_bucket_pending_bytes{bucket=\"" << name << "\"} " << bucket.pendingBytes
+           << '\n';
+    }
+
     // The metadata engine's own memory, which is the part of RSS that is not
     // ours to shrink directly — only to budget.
     for (const auto& [name, value] : stats.engineGauges) {

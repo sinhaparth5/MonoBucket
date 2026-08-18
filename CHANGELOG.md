@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.3] — 2026-08-18
+
 ### Added
 
 - **Per-bucket storage allocations.** Every bucket carries an allocation, and

@@ -16,7 +16,9 @@
 #include "core/io_executor.hpp"
 #include "monobucket/version.hpp"
 #include "s3/metrics.hpp"
+#include "s3/response.hpp"
 #include "s3/router.hpp"
+#include "s3/s3_error.hpp"
 #include "server/asset_store.hpp"
 #include "server/server.hpp"
 #include "storage/storage_engine.hpp"
@@ -281,6 +283,28 @@ void registerSystemRoutes(const Config& config, StorageEngine& storage, IoExecut
             }));
         },
         {drogon::Get});
+
+    // The reserved names above are exact paths registered for the verbs they
+    // serve, so Drogon answers anything else on them with a bare 405 — before
+    // the S3 router, and therefore without an S3 error document. A client
+    // creating a bucket called `healthz` would get an unparseable response
+    // instead of the InvalidBucketName that handleCreateBucket is standing
+    // ready to give it. Claiming the write verbs here is what makes that
+    // refusal reach the client in the shape it can read.
+    for (const std::string_view reserved : {"/healthz", "/readyz", "/metrics", "/_mb"}) {
+        app.registerHandler(
+            std::string(reserved),
+            [name = std::string(reserved.substr(1))](const HttpRequestPtr& req,
+                                                     ResponseCallback&&    callback) {
+                auto response = s3::errorResponse(
+                    s3::S3ErrorCode::InvalidBucketName,
+                    "'" + name +
+                        "' is reserved for a server endpoint and cannot be used as a bucket name.",
+                    req->getPath(), s3::newRequestId());
+                callback(response);
+            },
+            {drogon::Put, drogon::Delete, drogon::Post});
+    }
 
     if (config.metricsEnabled) {
         app.registerHandler(

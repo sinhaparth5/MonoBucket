@@ -41,7 +41,14 @@ private:
 
 /// Transactional metadata for buckets, objects and multipart uploads.
 ///
-/// The contract that matters is blob ownership. Every mutation that drops a
+/// Mutations that publish or retire object data take the `Durability` the
+/// owning bucket resolved to, because a bucket may override the server setting
+/// and only the caller knows which bucket a write belongs to. `Strict` syncs
+/// the write-ahead log before the call returns. The log is shared across
+/// buckets, so a strict write also happens to flush whatever its neighbours had
+/// pending — every bucket gets at least what it asked for, sometimes more.
+///
+/// The other contract that matters is blob ownership. Every mutation that drops a
 /// reference to a payload *returns* the blob id it released, in the same call
 /// that atomically committed the metadata change. The caller is then obliged to
 /// hand it back for reclamation. Deleting the payload first, or forgetting to,
@@ -82,7 +89,8 @@ public:
     /// The payload must already be durable on disk before this is called —
     /// that ordering is the whole reason a partially written object is never
     /// observable.
-    virtual PutOutcome putObject(std::string_view bucket, const ObjectRecord& object) = 0;
+    virtual PutOutcome putObject(std::string_view bucket, const ObjectRecord& object,
+                                 Durability durability) = 0;
 
     virtual std::optional<ObjectRecord> getObject(std::string_view bucket,
                                                   std::string_view key) = 0;
@@ -94,7 +102,8 @@ public:
 
     /// Deleting a key that does not exist is not an error: S3 returns 204
     /// either way.
-    virtual DeleteOutcome deleteObject(std::string_view bucket, std::string_view key) = 0;
+    virtual DeleteOutcome deleteObject(std::string_view bucket, std::string_view key,
+                                       Durability durability) = 0;
 
     /// Prefix, delimiter and pagination, in the exact lexicographic order S3
     /// specifies. Throws NoSuchBucket.
@@ -119,14 +128,16 @@ public:
     };
 
     /// Throws NoSuchUpload.
-    virtual PutPartOutcome putPart(std::string_view uploadId, const PartRecord& part) = 0;
+    virtual PutPartOutcome putPart(std::string_view uploadId, const PartRecord& part,
+                                   Durability durability) = 0;
 
     /// Ascending by part number. Throws NoSuchUpload.
     virtual std::vector<PartRecord> listParts(std::string_view uploadId) = 0;
 
     /// Discards the upload and every part. Returns all released payloads.
     /// Throws NoSuchUpload.
-    virtual std::vector<std::string> abortUpload(std::string_view uploadId) = 0;
+    virtual std::vector<std::string> abortUpload(std::string_view uploadId,
+                                                 Durability       durability) = 0;
 
     struct CompleteOutcome {
         std::optional<std::string> releasedBlobId;  ///< object this replaced
@@ -140,7 +151,8 @@ public:
     /// else: the metadata commit is the point of no return, and unlinking
     /// happens strictly after it.
     virtual CompleteOutcome completeUpload(std::string_view bucket, std::string_view uploadId,
-                                           const ObjectRecord& object) = 0;
+                                           const ObjectRecord& object,
+                                           Durability          durability) = 0;
 
     // --- Blob reclamation --------------------------------------------------
 
@@ -191,8 +203,9 @@ struct MetadataStoreOptions {
     /// otherwise size both independently and the sum is what the container sees.
     std::uint64_t memoryBudgetBytes = 32ull * 1024 * 1024;
 
-    /// fsync the write-ahead log on every commit. Costs an fsync per mutation
-    /// and buys survival of a power cut rather than merely a process crash.
+    /// fsync the write-ahead log on every commit that does not carry its own
+    /// durability — bucket rows, upload creation and reclamation bookkeeping.
+    /// Object writes pass the level their bucket resolved to instead.
     bool syncWrites = false;
 
     /// Bounds the table-reader memory that open SST files pin.

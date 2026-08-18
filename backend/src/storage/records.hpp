@@ -2,10 +2,12 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "storage/codec.hpp"
+#include "storage/durability.hpp"
 
 // The metadata schema, as plain structs. These cross the boundary between the
 // storage engine and the S3 protocol layer, so field names track S3 vocabulary
@@ -80,6 +82,14 @@ struct BucketRecord {
     /// no rules: S3 answers a preflight against the former with 403 and the
     /// latter cannot occur, because an empty CORSConfiguration is refused.
     std::vector<CorsRule> cors;
+
+    /// Overrides `MONOBUCKET_DURABILITY` for writes to this bucket.
+    ///
+    /// Unset means "follow the server", which is deliberately not the same as
+    /// storing today's server setting: an operator who raises the global level
+    /// expects every bucket that never asked for something else to rise with
+    /// it. Only a bucket that explicitly asked stays where it is.
+    std::optional<Durability> durability;
 };
 
 struct ObjectRecord {

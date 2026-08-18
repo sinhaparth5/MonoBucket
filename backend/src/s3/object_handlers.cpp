@@ -121,13 +121,19 @@ drogon::HttpResponsePtr handleGetObject(const S3Context& context, const S3Reques
     if (!record) throw S3Exception(S3ErrorCode::NoSuchKey);
 
     if (const int precondition = evaluatePreconditions(http, *record); precondition != 0) {
-        auto response = emptyResponse(precondition);
-        // A 304 carries the validators so the client can refresh its own copy's
-        // metadata without a second round trip.
-        if (precondition == 304) {
-            response->addHeader(headers::kETag, quoteETag(record->etag));
-            response->addHeader("Last-Modified", toHttpDate(record->lastModified));
+        // 304 must not carry a body (RFC 9110), but it does carry the
+        // validators, so the client can refresh its own copy's metadata
+        // without a second round trip. 412 is an ordinary error and S3 sends
+        // the error document with it — a client that branches on the code
+        // string has nothing to read otherwise.
+        if (precondition == 412) {
+            return errorResponse(S3ErrorCode::PreconditionFailed, "", request.resource,
+                                 request.requestId);
         }
+
+        auto response = emptyResponse(precondition);
+        response->addHeader(headers::kETag, quoteETag(record->etag));
+        response->addHeader("Last-Modified", toHttpDate(record->lastModified));
         applyCommonHeaders(response, request.requestId);
         return response;
     }

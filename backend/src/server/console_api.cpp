@@ -218,7 +218,13 @@ nlohmann::json toJson(const BucketRecord& bucket) {
             {"createdAtMs", bucket.createdAt},
             {"publicRead", bucket.publicRead},
             {"hasPolicy", !bucket.policy.empty()},
-            {"corsRules", bucket.cors.size()}};
+            {"corsRules", bucket.cors.size()},
+            // null rather than the level it currently resolves to: the bucket
+            // is following the server, and rendering today's answer would make
+            // a form that saves it back pin the bucket to it by accident.
+            {"durability", bucket.durability
+                               ? nlohmann::json(std::string(toString(*bucket.durability)))
+                               : nlohmann::json(nullptr)}};
 }
 
 nlohmann::json toJson(const CorsRule& rule) {
@@ -681,8 +687,34 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     return;
                 }
                 const bool publicRead = body.value("publicRead", false);
-                offload(callback, [&storage, &cache, name, publicRead]() -> HttpResponsePtr {
+
+                // Absent means "leave the override alone", null means "clear it
+                // and follow the server". A form that only edits public access
+                // must not silently reset durability by omitting the field.
+                std::optional<std::optional<Durability>> durability;
+                if (body.contains("durability")) {
+                    const auto& node = body.at("durability");
+                    if (node.is_null()) {
+                        durability.emplace();
+                    } else if (node.is_string()) {
+                        const auto parsed = durabilityFromString(node.get<std::string>());
+                        if (!parsed) {
+                            callback(errorJson("durability must be none, relaxed or strict",
+                                               drogon::k400BadRequest));
+                            return;
+                        }
+                        durability.emplace(*parsed);
+                    } else {
+                        callback(errorJson("durability must be a string or null",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+                }
+
+                offload(callback, [&storage, &cache, name, publicRead,
+                                   durability]() -> HttpResponsePtr {
                     storage.setBucketPublicRead(name, publicRead);
+                    if (durability) storage.setBucketDurability(name, *durability);
 
                     // Without this the S3 anonymous path keeps reading the old
                     // flag until the entry ages out, so making a bucket private

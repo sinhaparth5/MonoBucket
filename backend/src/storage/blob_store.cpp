@@ -165,7 +165,9 @@ void BlobWriter::appendBlob(const BlobStore& store, std::string_view blobId) {
     }
 }
 
-BlobWriter::Committed BlobWriter::commit() {
+BlobWriter::Committed BlobWriter::commit() { return commit(store_->durability()); }
+
+BlobWriter::Committed BlobWriter::commit(Durability durability) {
     if (committed_) {
         throw StorageError(StorageErrorCode::Internal, "blob writer committed twice");
     }
@@ -173,7 +175,7 @@ BlobWriter::Committed BlobWriter::commit() {
         throw StorageError(StorageErrorCode::Internal, "commit on a closed blob writer");
     }
 
-    if (store_->durability() != Durability::None) {
+    if (durability != Durability::None) {
         fsyncFile(fd_, "payload " + blobId_);
     }
 
@@ -196,7 +198,7 @@ BlobWriter::Committed BlobWriter::commit() {
     }
     committed_ = true;
 
-    if (store_->durability() == Durability::Strict) {
+    if (durability == Durability::Strict) {
         fsyncDirectory(finalPath.parent_path());
     }
 
@@ -379,6 +381,39 @@ std::size_t BlobStore::sweepTemporaries() const {
 
     if (ec) log::warn("cannot scan the temporary directory: ", ec.message());
     return removed;
+}
+
+std::size_t BlobStore::forEachBlob(const std::function<void(const TreeEntry&)>& visit) const {
+    std::size_t     seen = 0;
+    std::error_code ec;
+
+    // recursive_directory_iterator with an error_code never throws, so a shard
+    // directory that vanishes mid-walk (reclamation runs concurrently) skips
+    // that entry instead of aborting the whole scan.
+    std::filesystem::recursive_directory_iterator it(objectsDir_, ec);
+    if (ec) {
+        log::warn("cannot scan the payload tree: ", ec.message());
+        return 0;
+    }
+
+    for (const auto& entry : it) {
+        std::error_code entryError;
+        if (!entry.is_regular_file(entryError) || entryError) continue;
+
+        TreeEntry found;
+        found.blobId     = entry.path().filename().string();
+        found.wellFormed = isValidBlobId(found.blobId);
+
+        struct stat info {};
+        if (::stat(entry.path().c_str(), &info) != 0) continue;
+        found.size = static_cast<std::uint64_t>(info.st_size);
+        found.modifiedMs =
+            static_cast<std::int64_t>(info.st_mtim.tv_sec) * 1000 + info.st_mtim.tv_nsec / 1000000;
+
+        ++seen;
+        visit(found);
+    }
+    return seen;
 }
 
 BlobStore::SpaceInfo BlobStore::space() const {

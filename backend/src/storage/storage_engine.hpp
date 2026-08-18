@@ -71,6 +71,14 @@ public:
     /// is what DeleteBucketCors means.
     void setBucketCors(std::string_view name, std::vector<CorsRule> rules);
 
+    /// Overrides the server's durability for this bucket, or clears the
+    /// override so the bucket follows the server again.
+    void setBucketDurability(std::string_view name, std::optional<Durability> durability);
+
+    /// The level writes to `bucket` are held to: its override if it set one,
+    /// otherwise `MONOBUCKET_DURABILITY`.
+    Durability durabilityFor(std::string_view bucket);
+
     // --- Objects -----------------------------------------------------------
 
     /// Opens a payload for streaming and registers it for reclamation first, so
@@ -134,6 +142,87 @@ public:
     ObjectRecord completeUpload(std::string_view uploadId,
                                 const std::vector<RequestedPart>& parts);
 
+    // --- Consistency check -------------------------------------------------
+
+    /// What a full check found. Kept as a list of findings rather than a bool
+    /// so an operator can tell a leaked file (wasted space) apart from a
+    /// missing payload (lost data) — the responses are nothing alike.
+    struct FsckReport {
+        enum class Kind {
+            /// A live row names a payload that is not in the tree. Data loss:
+            /// a GET of this key already fails.
+            MissingPayload,
+            /// The payload exists but is not the length the row records.
+            SizeMismatch,
+            /// The payload's SHA-256 differs from the one recorded at write
+            /// time. Only reported by a deep check.
+            DigestMismatch,
+            /// A file in the tree that no row names and no reclamation record
+            /// covers. This is the case the reclamation log cannot see, and
+            /// the reason a tree walk exists at all.
+            UnreferencedPayload,
+            /// A file in the tree whose name could not have come from
+            /// newBlobId(), so nothing in the store could ever reference it.
+            MalformedName,
+        };
+
+        struct Finding {
+            Kind        kind = Kind::MissingPayload;
+            std::string blobId;
+            /// Where the reference came from — `bucket/key`, or `upload
+            /// <id> part <n>`. Empty for findings about a file with no
+            /// referrer.
+            std::string reference;
+            std::string detail;
+        };
+
+        std::uint64_t bucketsScanned = 0;
+        std::uint64_t objectsScanned = 0;
+        std::uint64_t partsScanned   = 0;
+        std::uint64_t filesScanned   = 0;
+        std::uint64_t bytesRead      = 0;  ///< non-zero only for a deep check
+
+        /// Bytes held by files that nothing references — what a reclaim would
+        /// return to the filesystem.
+        std::uint64_t leakedBytes = 0;
+
+        std::vector<Finding> findings;
+
+        bool clean() const noexcept { return findings.empty(); }
+    };
+
+    struct FsckOptions {
+        /// Re-read every payload and compare its SHA-256 against the digest
+        /// recorded when it was written. Costs one full pass over the data, so
+        /// it is opt-in: the structural check alone is bounded by metadata.
+        bool verifyDigests = false;
+
+        /// Files younger than this are not judged unreferenced.
+        ///
+        /// Load-bearing for the same reason `listOrphans` takes a cutoff: a
+        /// payload is linked into the tree a moment before the metadata naming
+        /// it is committed, so a walk that raced that window would report a
+        /// perfectly good object as a leak. Zero is correct only when nothing
+        /// else is running.
+        std::int64_t unreferencedGraceMs = 60 * 60 * 1000;
+
+        /// Stop after this many findings. A store that is comprehensively
+        /// broken should not produce a report nobody can read.
+        std::size_t maxFindings = 1000;
+    };
+
+    /// Walks the metadata and the payload tree and reports every way they
+    /// disagree.
+    ///
+    /// This is the check the reclamation log cannot do. The log knows about
+    /// payloads it was told about; it cannot know about a file that was never
+    /// tracked, nor that a file it does track has the wrong contents. Only a
+    /// walk of the tree finds those, and only reading the bytes finds the last.
+    ///
+    /// Reports; never repairs. Deleting data on the strength of a scan that
+    /// raced a live writer is how a consistency checker becomes the outage.
+    FsckReport fsck(const FsckOptions& options);
+
     // --- Maintenance -------------------------------------------------------
 
     /// Unlinks up to `limit` payloads that are no longer referenced and are
@@ -171,5 +260,8 @@ private:
     BlobStore                      blobs_;
     std::unique_ptr<MetadataStore> metadata_;
 };
+
+/// Renders a finding kind for logs and the `--fsck` report.
+std::string_view toString(StorageEngine::FsckReport::Kind kind);
 
 }  // namespace monobucket

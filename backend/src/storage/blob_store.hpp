@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -66,9 +67,16 @@ public:
         std::string   sha256;  ///< 64 hex chars
     };
 
-    /// Flushes according to the store's durability setting and links the
-    /// payload into the tree. After this returns the bytes are durable, which
-    /// is the precondition for publishing the metadata that references them.
+    /// Flushes to `durability` and links the payload into the tree. After this
+    /// returns the bytes are durable to that level, which is the precondition
+    /// for publishing the metadata that references them.
+    ///
+    /// The level is a parameter rather than a property of the store because a
+    /// bucket may override the server's setting, and the bucket is only known
+    /// once the payload is already streaming — `create()` cannot know it.
+    Committed commit(Durability durability);
+
+    /// Flushes to the store's configured durability.
     Committed commit();
 
     /// Discards the partial payload. Called by the destructor; safe to repeat.
@@ -159,6 +167,25 @@ public:
     /// referenced by metadata, so anything found there is the residue of an
     /// interrupted write. Returns how many were removed.
     std::size_t sweepTemporaries() const;
+
+    /// One entry of the payload tree, as found on disk rather than as metadata
+    /// describes it. `blobId` is the file name, which fsck checks rather than
+    /// trusts — a file whose name is not a valid id cannot have been written by
+    /// this store.
+    struct TreeEntry {
+        std::string   blobId;
+        std::uint64_t size       = 0;
+        std::int64_t  modifiedMs = 0;
+        bool          wellFormed = false;
+    };
+
+    /// Visits every file under `objects/`, in whatever order the filesystem
+    /// yields. Streamed through a callback rather than returned as a vector:
+    /// the whole point is to walk a tree that may hold more entries than the
+    /// caller wants resident, and fsck only needs one at a time.
+    ///
+    /// Returns how many entries were visited.
+    std::size_t forEachBlob(const std::function<void(const TreeEntry&)>& visit) const;
 
     struct SpaceInfo {
         std::uint64_t totalBytes     = 0;

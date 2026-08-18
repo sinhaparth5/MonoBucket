@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <string>
@@ -10,17 +11,30 @@
 #include "monobucket/version.hpp"
 #include "server/asset_store.hpp"
 #include "server/server.hpp"
+#include "storage/storage_engine.hpp"
 
 namespace {
 
 constexpr int kExitConfigError = 78;  // EX_CONFIG
 constexpr int kExitFailure     = 1;
 
+/// A completed check that found problems. Distinct from kExitFailure so a
+/// caller can tell "the store is damaged" from "the check could not run" —
+/// the first is a maintenance decision, the second is a bug or a bad path.
+constexpr int kExitUnclean = 2;
+
 void printUsage() {
     std::cout
         << "MonoBucket " << monobucket::version::kVersion << "\n"
         << "Single-binary S3-compatible object storage.\n\n"
-        << "Usage: monobucket [--version | --help | --print-config]\n\n"
+        << "Usage: monobucket [--version | --help | --print-config]\n"
+        << "       monobucket --fsck [--deep]\n\n"
+        << "  --fsck    check the metadata against the payload tree and report\n"
+        << "            every disagreement. Reports; never repairs. Exits 0 when\n"
+        << "            clean, 2 when it found something.\n"
+        << "  --deep    additionally re-hash every payload and compare it with\n"
+        << "            the digest recorded when it was written. Reads the whole\n"
+        << "            store.\n\n"
         << "MonoBucket is configured entirely through the environment:\n\n"
         << "  MONOBUCKET_HOST                    bind address           (0.0.0.0)\n"
         << "  MONOBUCKET_PORT                    S3 API port            (9000)\n"
@@ -41,6 +55,63 @@ void printUsage() {
         << "  MONOBUCKET_LOG_LEVEL               trace|debug|info|warn|error\n"
         << "  MONOBUCKET_METRICS_ENABLED         expose /metrics        (true)\n\n"
         << "Sizes accept unit suffixes: binary (KiB/MiB/GiB) and SI (KB/MB/GB).\n";
+}
+
+/// Opens the store, checks it and prints what it found.
+///
+/// Deliberately does not start a listener or the I/O pool: fsck is a
+/// maintenance command run against a stopped server, and the synchronous
+/// storage API is directly callable precisely because the threading rule lives
+/// above it rather than inside it.
+int runFsck(const monobucket::Config& config, bool deep) {
+    monobucket::StorageEngine::FsckOptions options;
+    options.verifyDigests = deep;
+    // Nothing else is running against this directory — that is the premise of
+    // the command — so a file linked into the tree is either referenced or
+    // genuinely orphaned, with no in-flight window to allow for.
+    options.unreferencedGraceMs = 0;
+
+    try {
+        monobucket::StorageEngine        storage(monobucket::StorageEngine::optionsFrom(config));
+        const auto                       report = storage.fsck(options);
+
+        std::cout << "scanned " << report.bucketsScanned << " buckets, " << report.objectsScanned
+                  << " objects, " << report.partsScanned << " parts, " << report.filesScanned
+                  << " payload files\n";
+        if (deep) {
+            // Scaled rather than always MiB: a small store would otherwise be
+            // told it verified "0 MiB", which reads as "did nothing".
+            std::cout << "verified ";
+            if (report.bytesRead >= 1024 * 1024) {
+                std::cout << report.bytesRead / (1024 * 1024) << " MiB";
+            } else if (report.bytesRead >= 1024) {
+                std::cout << report.bytesRead / 1024 << " KiB";
+            } else {
+                std::cout << report.bytesRead << " bytes";
+            }
+            std::cout << " of payload\n";
+        }
+
+        if (report.clean()) {
+            std::cout << "clean\n";
+            return 0;
+        }
+
+        std::cout << report.findings.size() << " finding(s)";
+        if (report.leakedBytes > 0) {
+            std::cout << ", " << report.leakedBytes / 1024 << " KiB unreferenced";
+        }
+        std::cout << ":\n";
+        for (const auto& finding : report.findings) {
+            std::cout << "  " << monobucket::toString(finding.kind) << ' ' << finding.blobId;
+            if (!finding.reference.empty()) std::cout << " <- " << finding.reference;
+            std::cout << " (" << finding.detail << ")\n";
+        }
+        return kExitUnclean;
+    } catch (const std::exception& ex) {
+        std::cerr << "fsck failed: " << ex.what() << '\n';
+        return kExitFailure;
+    }
 }
 
 }  // namespace
@@ -79,6 +150,11 @@ int main(int argc, char** argv) {
             std::cout << config.toJson().dump(2) << '\n';
             return 0;
         }
+    }
+
+    const bool fsckRequested = std::find(args.begin(), args.end(), "--fsck") != args.end();
+    if (fsckRequested) {
+        return runFsck(config, std::find(args.begin(), args.end(), "--deep") != args.end());
     }
 
     monobucket::log::info("MonoBucket ", monobucket::version::kVersion, " starting");

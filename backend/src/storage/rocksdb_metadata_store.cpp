@@ -94,6 +94,12 @@ std::string encodeBucket(const BucketRecord& bucket) {
     writer.boolean(bucket.publicRead);
     writer.string(bucket.policy);
     encodeCorsRules(writer, bucket.cors);
+    // Two fields rather than one sentinel level: "unset" has to survive a
+    // round trip distinctly from any real level, because it means "follow the
+    // server" and the server's answer can change between restarts.
+    writer.boolean(bucket.durability.has_value());
+    writer.u8(bucket.durability ? static_cast<std::uint8_t>(*bucket.durability)
+                                : static_cast<std::uint8_t>(Durability::Relaxed));
     return out;
 }
 
@@ -112,6 +118,22 @@ BucketRecord decodeBucket(std::string_view name, std::string_view stored) {
     // catch a *changed* layout — an added trailing field is the case the format
     // was designed to absorb. A record from an older build simply has no rules.
     if (!reader.exhausted()) bucket.cors = decodeCorsRules(reader);
+
+    // Appended after the CORS rules, for the same reason and on the same terms:
+    // a bucket written before per-bucket durability existed simply follows the
+    // server, which is exactly what it did before.
+    if (!reader.exhausted()) {
+        const bool         overridden = reader.boolean();
+        const std::uint8_t level      = reader.u8();
+        if (overridden) {
+            if (level > static_cast<std::uint8_t>(Durability::Strict)) {
+                fail(StorageErrorCode::Corruption,
+                     "bucket record names durability level " + std::to_string(level) +
+                         ", which this build does not define");
+            }
+            bucket.durability = static_cast<Durability>(level);
+        }
+    }
 
     return bucket;
 }
@@ -294,7 +316,8 @@ public:
 
     // --- Objects -----------------------------------------------------------
 
-    PutOutcome putObject(std::string_view bucket, const ObjectRecord& object) override {
+    PutOutcome putObject(std::string_view bucket, const ObjectRecord& object,
+                         Durability durability) override {
         std::shared_lock bucketGuard(bucketLock_);
         requireBucket(bucket);
 
@@ -323,7 +346,8 @@ public:
             orphans_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        check(db_->Write(writeOptions_, &batch), "putting object '" + object.key + "'");
+        check(db_->Write(writeOptionsFor(durability), &batch),
+              "putting object '" + object.key + "'");
         bytes_.fetch_add(object.size, std::memory_order_relaxed);
         return outcome;
     }
@@ -333,7 +357,8 @@ public:
         return loadObject(keys::object(bucket, key), key);
     }
 
-    DeleteOutcome deleteObject(std::string_view bucket, std::string_view key) override {
+    DeleteOutcome deleteObject(std::string_view bucket, std::string_view key,
+                               Durability durability) override {
         std::shared_lock bucketGuard(bucketLock_);
         requireBucket(bucket);
 
@@ -351,7 +376,8 @@ public:
         batch.Delete(toSlice(storedKey));
         batch.Put(toSlice(keys::orphan(existing->blobId)), toSlice(orphanValue()));
 
-        check(db_->Write(writeOptions_, &batch), "deleting object '" + std::string(key) + "'");
+        check(db_->Write(writeOptionsFor(durability), &batch),
+              "deleting object '" + std::string(key) + "'");
 
         objects_.fetch_sub(1, std::memory_order_relaxed);
         bytes_.fetch_sub(existing->size, std::memory_order_relaxed);
@@ -477,7 +503,8 @@ public:
         return uploads;
     }
 
-    PutPartOutcome putPart(std::string_view uploadId, const PartRecord& part) override {
+    PutPartOutcome putPart(std::string_view uploadId, const PartRecord& part,
+                           Durability durability) override {
         if (part.partNumber == 0 || part.partNumber > limits::kMaxPartNumber) {
             fail(StorageErrorCode::InvalidPart,
                  "part number " + std::to_string(part.partNumber) + " is outside 1.." +
@@ -510,7 +537,7 @@ public:
             orphans_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        check(db_->Write(writeOptions_, &batch),
+        check(db_->Write(writeOptionsFor(durability), &batch),
               "storing part " + std::to_string(part.partNumber));
         return outcome;
     }
@@ -522,7 +549,8 @@ public:
         return collectParts(uploadId);
     }
 
-    std::vector<std::string> abortUpload(std::string_view uploadId) override {
+    std::vector<std::string> abortUpload(std::string_view uploadId,
+                                         Durability       durability) override {
         const auto upload = loadUpload(uploadId);
         if (!upload) fail(StorageErrorCode::NoSuchUpload, "no such upload: " + std::string(uploadId));
 
@@ -545,7 +573,8 @@ public:
         batch.Delete(toSlice(keys::uploadById(uploadId)));
         batch.Delete(toSlice(keys::uploadByKey(upload->bucket, upload->key, uploadId)));
 
-        check(db_->Write(writeOptions_, &batch), "aborting upload " + std::string(uploadId));
+        check(db_->Write(writeOptionsFor(durability), &batch),
+              "aborting upload " + std::string(uploadId));
 
         uploads_.fetch_sub(1, std::memory_order_relaxed);
         orphans_.fetch_add(released.size(), std::memory_order_relaxed);
@@ -553,7 +582,8 @@ public:
     }
 
     CompleteOutcome completeUpload(std::string_view bucket, std::string_view uploadId,
-                                   const ObjectRecord& object) override {
+                                   const ObjectRecord& object,
+                                   Durability          durability) override {
         std::shared_lock bucketGuard(bucketLock_);
         requireBucket(bucket);
 
@@ -590,7 +620,8 @@ public:
         batch.Delete(toSlice(keys::uploadById(uploadId)));
         batch.Delete(toSlice(keys::uploadByKey(upload->bucket, upload->key, uploadId)));
 
-        check(db_->Write(writeOptions_, &batch), "completing upload " + std::string(uploadId));
+        check(db_->Write(writeOptionsFor(durability), &batch),
+              "completing upload " + std::string(uploadId));
 
         bytes_.fetch_add(object.size, std::memory_order_relaxed);
         uploads_.fetch_sub(1, std::memory_order_relaxed);
@@ -951,6 +982,15 @@ private:
     std::unique_ptr<rocksdb::DB>     db_;
     std::shared_ptr<rocksdb::Cache>  cache_;
     rocksdb::ReadOptions             readOptions_;
+    /// Write options for a call that knows which bucket it belongs to. Only
+    /// Strict pays for the log sync; the store-level default covers everything
+    /// that has no bucket to ask.
+    rocksdb::WriteOptions writeOptionsFor(Durability durability) const {
+        rocksdb::WriteOptions options = writeOptions_;
+        options.sync                  = durability == Durability::Strict;
+        return options;
+    }
+
     rocksdb::WriteOptions            writeOptions_;
 
     /// Held shared by anything that touches a bucket's contents and exclusively

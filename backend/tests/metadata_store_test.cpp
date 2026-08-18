@@ -108,7 +108,7 @@ TEST_CASE("a bucket holding objects refuses to be deleted", "[metadata]") {
     auto               store = openStore(root);
 
     createBucket(*store, "photos");
-    store->putObject("photos", object("cat.jpg", blobId('a')));
+    store->putObject("photos", object("cat.jpg", blobId('a')), monobucket::Durability::None);
 
     try {
         store->deleteBucket("photos");
@@ -117,7 +117,7 @@ TEST_CASE("a bucket holding objects refuses to be deleted", "[metadata]") {
         CHECK(error.code() == StorageErrorCode::BucketNotEmpty);
     }
 
-    store->deleteObject("photos", "cat.jpg");
+    store->deleteObject("photos", "cat.jpg", monobucket::Durability::None);
     CHECK_NOTHROW(store->deleteBucket("photos"));
 }
 
@@ -126,7 +126,7 @@ TEST_CASE("writing to a missing bucket is refused", "[metadata]") {
     auto               store = openStore(root);
 
     try {
-        store->putObject("nope", object("k", blobId('a')));
+        store->putObject("nope", object("k", blobId('a')), monobucket::Durability::None);
         FAIL("putting into a missing bucket should throw");
     } catch (const StorageError& error) {
         CHECK(error.code() == StorageErrorCode::NoSuchBucket);
@@ -145,7 +145,7 @@ TEST_CASE("objects round-trip with their metadata", "[metadata]") {
     record.sha256       = std::string(64, 'f');
     record.userMetadata = {{"author", "someone"}, {"camera", "a model"}};
 
-    store->putObject("photos", record);
+    store->putObject("photos", record, monobucket::Durability::None);
 
     const auto loaded = store->getObject("photos", "holiday/beach.jpg");
     REQUIRE(loaded.has_value());
@@ -164,11 +164,12 @@ TEST_CASE("overwriting an object releases the payload it replaced", "[metadata]"
     auto               store = openStore(root);
 
     createBucket(*store, "photos");
-    store->putObject("photos", object("k", blobId('a'), 100));
+    store->putObject("photos", object("k", blobId('a'), 100), monobucket::Durability::None);
 
     // The released id is the caller's only notice that a payload is now
     // unreferenced; losing it here is how an object store fills up.
-    const auto outcome = store->putObject("photos", object("k", blobId('b'), 250));
+    const auto outcome =
+        store->putObject("photos", object("k", blobId('b'), 250), monobucket::Durability::None);
     REQUIRE(outcome.releasedBlobId.has_value());
     CHECK(*outcome.releasedBlobId == blobId('a'));
 
@@ -182,9 +183,9 @@ TEST_CASE("deleting an object releases its payload", "[metadata]") {
     auto               store = openStore(root);
 
     createBucket(*store, "photos");
-    store->putObject("photos", object("k", blobId('a'), 100));
+    store->putObject("photos", object("k", blobId('a'), 100), monobucket::Durability::None);
 
-    const auto outcome = store->deleteObject("photos", "k");
+    const auto outcome = store->deleteObject("photos", "k", monobucket::Durability::None);
     CHECK(outcome.existed);
     REQUIRE(outcome.releasedBlobId.has_value());
     CHECK(*outcome.releasedBlobId == blobId('a'));
@@ -193,7 +194,7 @@ TEST_CASE("deleting an object releases its payload", "[metadata]") {
     CHECK(store->usage().bytes == 0);
 
     // S3 answers 204 for a key that was never there, so this is not an error.
-    const auto again = store->deleteObject("photos", "k");
+    const auto again = store->deleteObject("photos", "k", monobucket::Durability::None);
     CHECK_FALSE(again.existed);
     CHECK_FALSE(again.releasedBlobId.has_value());
 }
@@ -210,7 +211,7 @@ TEST_CASE("a new payload stops being owed to the reclaimer once referenced",
     store->trackBlob(blobId('a'));
     CHECK(store->listOrphans(10, monobucket::nowMs()).size() == 1);
 
-    store->putObject("photos", object("k", blobId('a')));
+    store->putObject("photos", object("k", blobId('a')), monobucket::Durability::None);
     CHECK(store->listOrphans(10, monobucket::nowMs()).empty());
 }
 
@@ -233,7 +234,7 @@ TEST_CASE("listing returns keys in binary order", "[metadata][list]") {
 
     createBucket(*store, "b");
     for (const char* key : {"z", "a/b", "a", "ab", "a/b/c"}) {
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
     }
 
     ListObjectsRequest request;
@@ -248,7 +249,7 @@ TEST_CASE("a prefix restricts the listing", "[metadata][list]") {
 
     createBucket(*store, "b");
     for (const char* key : {"photos/1.jpg", "photos/2.jpg", "photos2/other.jpg", "docs/a.txt"}) {
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
     }
 
     ListObjectsRequest request;
@@ -266,7 +267,7 @@ TEST_CASE("a delimiter rolls keys up into common prefixes", "[metadata][list]") 
 
     createBucket(*store, "b");
     for (const char* key : {"a.txt", "photos/1.jpg", "photos/2.jpg", "photos/raw/3.jpg", "z.txt"}) {
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
     }
 
     ListObjectsRequest request;
@@ -285,7 +286,7 @@ TEST_CASE("a delimiter applies below the prefix", "[metadata][list]") {
     createBucket(*store, "b");
     for (const char* key : {"photos/1.jpg", "photos/raw/a.dng", "photos/raw/b.dng",
                             "photos/edited/c.jpg"}) {
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
     }
 
     ListObjectsRequest request;
@@ -309,7 +310,7 @@ TEST_CASE("pagination walks the whole keyspace exactly once", "[metadata][list]"
         // Zero-padded so binary order and numeric order agree.
         std::string key = "key-" + std::string(2 - std::to_string(i).size(), '0') +
                           std::to_string(i);
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
         expected.push_back(key);
     }
     std::sort(expected.begin(), expected.end());
@@ -339,7 +340,7 @@ TEST_CASE("pagination terminates when a page ends on a common prefix",
 
     createBucket(*store, "b");
     for (const char* key : {"a/1", "a/2", "b/1", "b/2", "c/1", "d"}) {
-        store->putObject("b", object(key, blobId('a')));
+        store->putObject("b", object(key, blobId('a')), monobucket::Durability::None);
     }
 
     ListObjectsRequest request;
@@ -400,7 +401,7 @@ TEST_CASE("multipart parts are stored and returned in ascending order",
         part.size       = 5ull * 1024 * 1024;
         part.etag       = "etag" + std::to_string(number);
         part.uploadedAt = monobucket::nowMs();
-        store->putPart("UPLOAD1", part);
+        store->putPart("UPLOAD1", part, monobucket::Durability::None);
     }
 
     const auto parts = store->listParts("UPLOAD1");
@@ -430,11 +431,11 @@ TEST_CASE("re-uploading a part releases the payload it replaced",
     part.blobId     = blobId('a');
     part.size       = 1024;
     part.etag       = "first";
-    store->putPart("UPLOAD1", part);
+    store->putPart("UPLOAD1", part, monobucket::Durability::None);
 
     part.blobId = blobId('b');
     part.etag   = "second";
-    const auto outcome = store->putPart("UPLOAD1", part);
+    const auto outcome = store->putPart("UPLOAD1", part, monobucket::Durability::None);
 
     REQUIRE(outcome.releasedBlobId.has_value());
     CHECK(*outcome.releasedBlobId == blobId('a'));
@@ -458,10 +459,10 @@ TEST_CASE("aborting an upload releases every part", "[metadata][multipart]") {
         part.partNumber = number;
         part.blobId     = std::string(32, static_cast<char>('a' + number));
         part.size       = 1024;
-        store->putPart("UPLOAD1", part);
+        store->putPart("UPLOAD1", part, monobucket::Durability::None);
     }
 
-    const auto released = store->abortUpload("UPLOAD1");
+    const auto released = store->abortUpload("UPLOAD1", monobucket::Durability::None);
     CHECK(released.size() == 3);
     CHECK_FALSE(store->getUpload("UPLOAD1").has_value());
     CHECK(store->usage().uploads == 0);
@@ -476,7 +477,7 @@ TEST_CASE("an unknown upload is distinguishable", "[metadata][multipart]") {
     auto               store = openStore(root);
 
     try {
-        store->abortUpload("NOPE");
+        store->abortUpload("NOPE", monobucket::Durability::None);
         FAIL("aborting a missing upload should throw");
     } catch (const StorageError& error) {
         CHECK(error.code() == StorageErrorCode::NoSuchUpload);
@@ -511,8 +512,8 @@ TEST_CASE("counters survive a reopen", "[metadata]") {
     {
         auto store = openStore(root);
         createBucket(*store, "b");
-        store->putObject("b", object("one", blobId('a'), 100));
-        store->putObject("b", object("two", blobId('b'), 250));
+        store->putObject("b", object("one", blobId('a'), 100), monobucket::Durability::None);
+        store->putObject("b", object("two", blobId('b'), 250), monobucket::Durability::None);
         store->flush();
     }
 

@@ -13,6 +13,8 @@ set(MONOBUCKET_CORE_SOURCES
     src/core/config.cpp
     src/core/credentials.cpp
     src/core/env.cpp
+    src/core/identity.cpp
+    src/core/identity_migration.cpp
     src/core/io_executor.cpp
     src/core/lifecycle.cpp
     src/core/logging.cpp

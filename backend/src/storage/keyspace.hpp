@@ -34,6 +34,8 @@ inline constexpr char kPart        = 'p';  ///< p<uploadId>\0<be32 partNumber>
 inline constexpr char kOrphan      = 'x';  ///< x<blobId>
 inline constexpr char kMeta        = 'm';  ///< m<name>
 inline constexpr char kAccessKey   = 'k';  ///< k<accessKeyId>
+inline constexpr char kUser        = 'a';  ///< a<username>
+inline constexpr char kAudit       = 'A';  ///< A<be64 sequence>
 
 std::string bucket(std::string_view name);
 std::string bucketPrefix();
@@ -59,6 +61,21 @@ std::string meta(std::string_view name);
 
 std::string accessKey(std::string_view accessKeyId);
 std::string accessKeyPrefix();
+
+std::string user(std::string_view username);
+std::string userPrefix();
+
+/// Audit entries are keyed by sequence alone, big-endian, so that
+/// lexicographic order is insertion order. Keying them by timestamp would put
+/// the log at the mercy of a clock that steps backwards — and would make two
+/// events in the same millisecond collide, which under a burst of refusals is
+/// exactly when the log matters.
+std::string audit(std::uint64_t sequence);
+std::string auditPrefix();
+
+/// Recovers the sequence from a stored `A<be64>` entry. Nothing when the key is
+/// not an audit key or has been truncated.
+std::optional<std::uint64_t> auditSequence(std::string_view stored);
 
 /// The exclusive upper bound for iterating `prefix`, for RocksDB's
 /// `iterate_upper_bound`. Returns nothing when the prefix is all 0xFF bytes and

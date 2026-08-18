@@ -139,11 +139,30 @@ listener — a `/_mb/api/...` route on port 9000 would collide with a bucket nam
 handlers, but only when they were registered first.
 
 Console auth is a session cookie (`mb_session`, `SameSite=Strict`, 12 h), not SigV4. The subject is
-the **administrator account** — a username and a PBKDF2-SHA256 verifier in the metadata store — and
+a **user account** — a username, a PBKDF2-SHA256 verifier and a role, in the metadata store — and
 never an S3 credential. Keeping them apart is the point: revoking every access key leaves the
 session working, and signing out leaves every S3 client working. `SessionStore` and `LoginThrottle`
 live in `server/console_session.cpp` with the clock injected, so expiry and lockout are testable
 without a listener.
+
+A session carries a *copy* of the role rather than re-reading it per request, so every change to a
+user's role or status calls `SessionStore::closeUser()`. That is the whole reason a role change
+signs somebody out: the alternative is a RocksDB lookup on the event loop for every console request.
+
+Authorisation is `allows(Role, Permission)` in `core/identity.cpp` — a pure function, a closed set of
+three roles, no policy language. Console routes pass the permission they need to `guard()`; a route
+that forgets does not compile. Signed S3 requests map operation → permission through
+`s3::permissionFor()` and are checked against the role of the key's owner, read fresh every request.
+Both mapping tables are exhaustive switches with no default arm, so a new `Operation` or `Permission`
+is a compile error rather than a silent hole. `backend/tests/identity_test.cpp` asserts the whole
+matrix as literal data — never derived from `allows()`, which would agree with any change.
+
+The audit log (`kAudit` records, `MetadataStore::appendAudit`) is a fixed ring of `kAuditCapacity`
+entries keyed by sequence alone, so lexicographic order is insertion order and a clock that steps
+backwards cannot reorder history. It is written without an fsync and drops entries when the I/O queue
+is full: a log that could refuse a sign-in, or that an unauthenticated client could grow, would be a
+participant rather than a record. S3 *signature* failures are deliberately not logged — only role
+refusals, which require a valid credential and are therefore bounded by who holds one.
 
 Consequences that are easy to break: login is posted to `IoExecutor` because the verifier is
 deliberately expensive and the event loop must not pay it; a failed login returns one message for
@@ -238,10 +257,16 @@ icon package and no emoji.
 
 ## Project conventions
 
-- **Two credential kinds, kept apart.** The administrator account is for people and the console;
-  S3 access keys are for programs and the S3 listener. Neither authenticates against the other's
-  surface. A change that lets one do the other's job is a regression regardless of how convenient
-  it is.
+- **Two credential kinds, kept apart.** User accounts are for people and the console; S3 access
+  keys are for programs and the S3 listener. Neither authenticates against the other's surface. A
+  change that lets one do the other's job is a regression regardless of how convenient it is.
+- **An access key never exceeds its owner.** Every key carries an `owner` and is authorised with
+  that user's role. The one exception is the root pair from the environment, which is not a user and
+  is administrator-equivalent by design — it is the break-glass credential and is documented as one.
+  Startup adopts ownerless keys (written before this existed) into the administrator account.
+- **The last enabled administrator is protected.** Delete, disable and demote all consult
+  `countEnabledAdministrators()` first. A console that cannot be administered cannot be repaired
+  from the console.
 - **Configuration is environment only.** Every knob is a `MONOBUCKET_*` variable parsed once at
   startup into the immutable `Config`, validated before the first listener opens. No config file
   format, nothing hot-reloaded. A malformed setting aborts startup with an actionable message rather

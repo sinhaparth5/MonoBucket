@@ -9,6 +9,8 @@
 #include <drogon/drogon.h>
 
 #include "cache/cache_factory.hpp"
+#include "core/identity.hpp"
+#include "core/identity_migration.hpp"
 #include "core/lifecycle.hpp"
 #include "core/logging.hpp"
 #include "core/password.hpp"
@@ -103,19 +105,30 @@ void Server::provisionAdministrator() {
     // provisions the account ahead of the day the console is turned on.
     if (!config_.consoleEnabled && config_.adminPassword.empty()) return;
 
-    auto existing = storage_->getAdmin();
+    migrateLegacyIdentities(*storage_);
+
+    const std::size_t administrators = storage_->countEnabledAdministrators();
 
     if (config_.adminPassword.empty()) {
-        if (existing) {
-            log::info("console administrator '", existing->username, "' loaded from the store");
+        if (administrators > 0) {
+            const auto users = storage_->listUsers();
+            log::info("console users loaded from the store: ", users.size(), " account",
+                      users.size() == 1 ? "" : "s", ", ", administrators, " enabled administrator",
+                      administrators == 1 ? "" : "s");
             return;
         }
         // Refusing to start is the point. The alternatives are a console with a
         // documented default password — which is a published credential on
         // every deployment that skipped the docs — or a console that runs with
         // no way in, which an operator discovers at the moment they need it.
+        //
+        // "No enabled administrator" and "no accounts at all" are the same
+        // refusal, because they are the same problem: a console that cannot be
+        // administered. Disabling the last administrator is refused at the
+        // console, so reaching this with accounts present means the store was
+        // edited from outside.
         throw ConfigError(
-            "no console administrator has been provisioned for this data directory. Set "
+            "no enabled console administrator exists for this data directory. Set "
             "MONOBUCKET_ADMIN_PASSWORD_FILE (preferred) or MONOBUCKET_ADMIN_PASSWORD to at least " +
             std::to_string(password::kMinimumLength) +
             " characters and start again; MONOBUCKET_ADMIN_USERNAME chooses the name and defaults "
@@ -123,12 +136,24 @@ void Server::provisionAdministrator() {
             "instead.");
     }
 
-    AdminRecord admin;
+    if (!isValidUsername(config_.adminUsername)) {
+        throw ConfigError("MONOBUCKET_ADMIN_USERNAME must be 1-64 characters of letters, digits, "
+                          "dot, underscore or hyphen, starting with a letter or digit");
+    }
+
+    auto       existing = storage_->getUser(config_.adminUsername);
+    UserRecord admin;
     admin.username     = config_.adminUsername;
     admin.passwordHash = password::hash(config_.adminPassword);
-    admin.createdAt    = existing ? existing->createdAt : nowMs();
-    admin.updatedAt    = nowMs();
-    storage_->putAdmin(admin);
+    // The environment always restores the account to a usable administrator.
+    // This variable is the recovery path — a reset that left the account
+    // disabled, or left it an operator, would recover nothing.
+    admin.role              = Role::Administrator;
+    admin.disabled          = false;
+    admin.createdAt         = existing ? existing->createdAt : nowMs();
+    admin.updatedAt         = nowMs();
+    admin.passwordChangedAt = admin.updatedAt;
+    storage_->putUser(admin);
 
     // The plaintext is dropped here rather than kept for the process lifetime.
     // Nothing after this point has a use for it, and a copy that outlives its
@@ -136,6 +161,8 @@ void Server::provisionAdministrator() {
     std::fill(config_.adminPassword.begin(), config_.adminPassword.end(), '\0');
     config_.adminPassword.clear();
     config_.adminPassword.shrink_to_fit();
+
+    adoptOwnerlessAccessKeys(*storage_, admin.username);
 
     if (existing) {
         log::warn("console administrator reset to '", admin.username,

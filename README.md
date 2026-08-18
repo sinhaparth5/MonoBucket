@@ -17,15 +17,16 @@ binary. It runs without sidecars or an external database.
 - Multipart uploads, presigned URLs, bucket policies, CORS, and SigV4
 - A browser dashboard for buckets, objects, uploads, metrics, and settings
 - Console sign-in with a password, separate from the S3 keys you issue in it
+- Named user accounts with three roles, and an audit log of what they did
 - One container for `linux/amd64` and `linux/arm64`
 
 ## Two kinds of credential
 
 MonoBucket keeps the person and the program apart:
 
-- **An administrator account** — a username and password — signs in to the
-  dashboard. It is provisioned from the environment on first start and stored
-  as a PBKDF2-SHA256 verifier, never as a password.
+- **User accounts** — a username and password — sign in to the dashboard. Each
+  is stored as a PBKDF2-SHA256 verifier, never as a password. The first one is
+  provisioned from the environment; the rest are created in the console.
 - **S3 access keys** sign S3 requests. Issue, rotate and revoke them from the
   console's **Access keys** screen. They do not grant console access, and the
   console session does not sign S3 requests.
@@ -36,6 +37,42 @@ never breaks a client.
 There is no default administrator password. A deployment with none configured
 and none provisioned **refuses to start** and says what to set — a shipped
 default would be a published credential on every install.
+
+## Users and roles
+
+Every account holds one of three roles. The role decides what it may do in the
+console *and* what any S3 access key it issues may do — a key acts as the person
+who issued it and can never exceed them.
+
+| | `administrator` | `operator` | `readonly` |
+| --- | --- | --- | --- |
+| Read buckets and objects | ✓ | ✓ | ✓ |
+| Write buckets and objects | ✓ | ✓ | |
+| Read the resolved settings | ✓ | ✓ | ✓ |
+| Issue, rotate and revoke access keys | ✓ | own only | |
+| Manage users | ✓ | | |
+| Read the audit log | ✓ | | |
+
+`readonly` deliberately cannot issue an access key at all, not even a read-only
+one: a role whose name says it only reads should not mint a credential that
+outlives the session it was minted from.
+
+Enforcement is in the backend. Every console route names the permission it
+needs and answers `403` without it, and every signed S3 request is checked
+against the role of the identity behind its access key. The console hides what
+you cannot use, which is a courtesy — calling the API directly gets the same
+refusal.
+
+**Disabling an account** ends every console session it holds immediately and
+stops its S3 access keys on their next request; nothing is cached between
+requests. The keys survive, so re-enabling restores them. **Deleting** an
+account revokes them instead. The last enabled administrator cannot be deleted,
+disabled or demoted, so the console cannot be locked out of itself.
+
+**Activity** records sign-ins and refusals, user and credential changes, and
+every denied authorisation check. It is a bounded ring of the most recent 5000
+entries kept beside the metadata — a window on what just happened, not an
+archive. Ship the server's stdout somewhere durable if you need one.
 
 ## Run it
 
@@ -128,6 +165,27 @@ does, and no S3 key of any kind signs you in.
 Nothing is migrated automatically and nothing is removed. Step 4 can happen
 whenever, or never.
 
+## Upgrading from 2026.08.1
+
+The single administrator account became one of many user accounts with roles.
+Nothing has to be done by hand:
+
+1. **Start it.** The old administrator record is converted in place into a user
+   with the `administrator` role, keeping its username, password and creation
+   date, and the old record is dropped. Access keys issued before this release
+   are adopted into that account, so they keep working and become revocable by
+   name.
+2. **Add the people who need access** under **Users**, giving each the narrowest
+   role that does their job. They sign in with their own username and password.
+3. **Reissue keys per identity** if you want a program's authority bounded — a
+   key issued by an `operator` cannot manage users, and one issued by a
+   `readonly` account cannot write.
+
+The root S3 pair is untouched and still administrator-equivalent. Downgrading to
+2026.08.1 after this will not find the migrated account, because it reads the
+record this release deleted; set `MONOBUCKET_ADMIN_PASSWORD` on that start to
+re-establish one.
+
 ## Known limitations
 
 Every project has them; these are MonoBucket's, and they are worth reading
@@ -157,14 +215,25 @@ before you rely on it:
   reproducing the secret. Anyone who can read the data directory can read every
   issued S3 secret. Console passwords are not stored this way — those are
   PBKDF2-SHA256 verifiers, and a stolen data directory does not yield a login.
-- **Every valid credential has full authority.** An issued access key can do
-  anything the root pair can, including issuing nothing — there is no per-key
-  scoping, no read-only key and no bucket restriction. What issued keys buy over
-  the root pair is that they can be rotated and revoked individually.
-- **One administrator account, and it cannot be changed from the console.**
-  There are no additional users, no roles, and no password-change screen; a
-  reset means restarting with the password variable set. The root S3 key pair
-  likewise cannot be revoked from the console — it comes from the environment.
+- **Authorisation is per identity, not per bucket or per key.** A key inherits
+  its owner's role and nothing narrower: there is no per-key scoping, no bucket
+  restriction and no way to give one program read access to one bucket. An
+  operator who may delete an object may delete any object. Narrowing that would
+  mean a second policy system beside the bucket policies that already exist,
+  with the two having to agree about which one denies.
+- **The root S3 key pair cannot be revoked from the console.** It comes from the
+  environment, is not attached to any user account, and is administrator-
+  equivalent. Treat it as a break-glass credential and issue per-client keys for
+  everything else; changing it means restarting with different values.
+- **The audit log is a bounded ring, not an archive.** The most recent 5000
+  entries, oldest dropped on write, stored beside the object metadata and lost
+  with the data directory. Anything that has to be kept belongs wherever the
+  server's stdout is collected. Entries are written without an fsync, so a power
+  cut can lose the last few.
+- **A role change reaches an open console tab only by ending its session.** The
+  session carries a copy of the role, so changing a user's role or status signs
+  them out rather than silently updating the page. S3 access keys need no such
+  step — the owner's record is read on every signed request.
 - **Object versioning, lifecycle rules, server-side encryption and IAM-style
   policies** beyond the credentials described above do not exist.
 

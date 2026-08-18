@@ -174,6 +174,7 @@ std::string encodeAccessKey(const AccessKeyRecord& key) {
     writer.string(key.description);
     writer.varint(static_cast<std::uint64_t>(key.createdAt));
     writer.varint(static_cast<std::uint64_t>(key.rotatedAt));
+    writer.string(key.owner);
     return out;
 }
 
@@ -187,7 +188,80 @@ AccessKeyRecord decodeAccessKey(std::string_view accessKeyId, std::string_view s
     key.description = reader.string();
     key.createdAt   = static_cast<TimestampMs>(reader.varint());
     key.rotatedAt   = static_cast<TimestampMs>(reader.varint());
+    // Appended after the record already shipped, so a value written by the
+    // previous release simply ends here. An empty owner is what "issued before
+    // keys had owners" looks like, and startup adopts those rather than leaving
+    // the S3 path to decide what an unowned credential may do.
+    if (!reader.exhausted()) key.owner = reader.string();
     return key;
+}
+
+std::string encodeUser(const UserRecord& user) {
+    std::string   out;
+    codec::Writer writer(out);
+    writer.u8(kRecordVersion);
+    writer.string(user.passwordHash);
+    writer.string(toString(user.role));
+    writer.boolean(user.disabled);
+    writer.varint(static_cast<std::uint64_t>(user.createdAt));
+    writer.varint(static_cast<std::uint64_t>(user.updatedAt));
+    writer.varint(static_cast<std::uint64_t>(user.passwordChangedAt));
+    return out;
+}
+
+UserRecord decodeUser(std::string_view username, std::string_view stored) {
+    codec::Reader reader(stored);
+    expectVersion(reader, "user");
+
+    UserRecord user;
+    user.username     = std::string(username);
+    user.passwordHash = reader.string();
+
+    // The role is stored by name rather than by ordinal so that reordering the
+    // enum cannot silently promote everybody. A name this build does not know
+    // is a record from a newer version: it denies rather than guesses, which
+    // for a decoder means refusing the record outright.
+    const std::string role = reader.string();
+    const auto        parsed = parseRole(role);
+    if (!parsed) {
+        fail(StorageErrorCode::Corruption,
+             "user '" + std::string(username) + "' has an unrecognised role '" + role + "'");
+    }
+    user.role = *parsed;
+
+    user.disabled          = reader.boolean();
+    user.createdAt         = static_cast<TimestampMs>(reader.varint());
+    user.updatedAt         = static_cast<TimestampMs>(reader.varint());
+    user.passwordChangedAt = static_cast<TimestampMs>(reader.varint());
+    return user;
+}
+
+std::string encodeAudit(const AuditRecord& entry) {
+    std::string   out;
+    codec::Writer writer(out);
+    writer.u8(kRecordVersion);
+    writer.varint(static_cast<std::uint64_t>(entry.atMs));
+    writer.string(entry.actor);
+    writer.string(entry.action);
+    writer.string(entry.target);
+    writer.boolean(entry.allowed);
+    writer.string(entry.detail);
+    return out;
+}
+
+AuditRecord decodeAudit(std::uint64_t sequence, std::string_view stored) {
+    codec::Reader reader(stored);
+    expectVersion(reader, "audit entry");
+
+    AuditRecord entry;
+    entry.sequence = sequence;
+    entry.atMs     = static_cast<TimestampMs>(reader.varint());
+    entry.actor    = reader.string();
+    entry.action   = reader.string();
+    entry.target   = reader.string();
+    entry.allowed  = reader.boolean();
+    entry.detail   = reader.string();
+    return entry;
 }
 
 std::string encodeObject(const ObjectRecord& object) {
@@ -368,6 +442,46 @@ public:
 
     // --- Identity ----------------------------------------------------------
 
+    std::optional<UserRecord> getUser(std::string_view username) override {
+        if (username.empty()) return std::nullopt;
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::user(username)), &stored);
+        if (status.IsNotFound()) return std::nullopt;
+        check(status, "reading user '" + std::string(username) + "'");
+        return decodeUser(username, stored);
+    }
+
+    std::vector<UserRecord> listUsers() override {
+        std::vector<UserRecord> users;
+        forEachUser([&](UserRecord user) { users.push_back(std::move(user)); });
+        return users;
+    }
+
+    void putUser(const UserRecord& user) override {
+        check(db_->Put(durableWrite(), toSlice(keys::user(user.username)),
+                       toSlice(encodeUser(user))),
+              "writing user '" + user.username + "'");
+    }
+
+    bool deleteUser(std::string_view username) override {
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::user(username)), &stored);
+        if (status.IsNotFound()) return false;
+        check(status, "reading user '" + std::string(username) + "'");
+
+        check(db_->Delete(durableWrite(), toSlice(keys::user(username))),
+              "deleting user '" + std::string(username) + "'");
+        return true;
+    }
+
+    std::size_t countEnabledAdministrators() override {
+        std::size_t count = 0;
+        forEachUser([&](const UserRecord& user) {
+            if (!user.disabled && user.role == Role::Administrator) ++count;
+        });
+        return count;
+    }
+
     std::optional<AdminRecord> getAdmin() override {
         std::string stored;
         const auto  status = db_->Get(readOptions_, toSlice(keys::meta(kAdminName)), &stored);
@@ -380,6 +494,11 @@ public:
         check(db_->Put(durableWrite(), toSlice(keys::meta(kAdminName)),
                        toSlice(encodeAdmin(admin))),
               "writing the administrator record");
+    }
+
+    void deleteAdmin() override {
+        check(db_->Delete(durableWrite(), toSlice(keys::meta(kAdminName))),
+              "dropping the legacy administrator record");
     }
 
     std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId) override {
@@ -428,6 +547,55 @@ public:
         check(db_->Delete(durableWrite(), toSlice(keys::accessKey(accessKeyId))),
               "revoking access key '" + std::string(accessKeyId) + "'");
         return true;
+    }
+
+    // --- Audit -------------------------------------------------------------
+
+    std::uint64_t appendAudit(const AuditRecord& entry) override {
+        // Serialised on its own mutex rather than on an atomic sequence: the
+        // append and the matching trim have to reach the batch in the same
+        // order the sequence was handed out, or a burst can drop an entry that
+        // is still the newest one.
+        const std::lock_guard<std::mutex> guard(auditLock_);
+
+        const std::uint64_t sequence = ++auditSequence_;
+
+        rocksdb::WriteBatch batch;
+        batch.Put(toSlice(keys::audit(sequence)), toSlice(encodeAudit(entry)));
+
+        // The ring closes here. Deleting a key that was already trimmed — or
+        // never existed, on a store younger than the capacity — is a no-op, so
+        // this needs no read to decide whether to run.
+        if (sequence > kAuditCapacity) {
+            batch.Delete(toSlice(keys::audit(sequence - kAuditCapacity)));
+        }
+
+        // Not a durable write. An audit entry lost to a power cut is a gap in a
+        // record of what the console did; paying an fsync per refused request
+        // would let anyone with a socket set this server's write rate.
+        check(db_->Write(writeOptions_, &batch), "appending an audit entry");
+        return sequence;
+    }
+
+    std::vector<AuditRecord> listAudit(std::size_t limit) override {
+        std::vector<AuditRecord> entries;
+        if (limit == 0) return entries;
+        entries.reserve(std::min(limit, kAuditCapacity));
+
+        // Backwards from the end: the console wants the newest first, and
+        // reading forwards would mean holding the whole ring to reverse it.
+        // No iterate bound is set, because RocksDB's are stated for forward
+        // iteration; leaving the audit region is detected by the key itself,
+        // which is unambiguous in either direction.
+        const std::string                  last = keys::audit(UINT64_MAX);
+        std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(readOptions_));
+        for (it->SeekForPrev(toSlice(last)); it->Valid() && entries.size() < limit; it->Prev()) {
+            const auto sequence = keys::auditSequence(toView(it->key()));
+            if (!sequence) break;
+            entries.push_back(decodeAudit(*sequence, toView(it->value())));
+        }
+        check(it->status(), "reading the audit log");
+        return entries;
     }
 
     // --- Objects -----------------------------------------------------------
@@ -955,6 +1123,8 @@ private:
         }
         check(it->status(), "scanning the metadata store at startup");
 
+        seedAuditSequence();
+
         buckets_.store(buckets, std::memory_order_relaxed);
         objects_.store(objects, std::memory_order_relaxed);
         bytes_.store(bytes, std::memory_order_relaxed);
@@ -966,6 +1136,24 @@ private:
         log::info("metadata scan: ", buckets, " buckets, ", objects, " objects, ", uploads,
                   " uploads in progress, ", orphans, " blobs pending reclaim (", elapsed.count(),
                   " ms)");
+    }
+
+    /// Recovers where the audit ring left off.
+    ///
+    /// One seek rather than a count: the sequence is what the trim arithmetic
+    /// is expressed in, and it is recoverable from the newest key alone. A
+    /// cursor that restarted at zero would overwrite the newest entries with
+    /// the oldest sequence numbers and leave the log unreadable in order.
+    void seedAuditSequence() {
+        const std::string                  last = keys::audit(UINT64_MAX);
+        std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(readOptions_));
+        it->SeekForPrev(toSlice(last));
+        if (it->Valid()) {
+            if (const auto sequence = keys::auditSequence(toView(it->key()))) {
+                auditSequence_ = *sequence;
+            }
+        }
+        check(it->status(), "reading the audit log cursor");
     }
 
     // --- Helpers -----------------------------------------------------------
@@ -991,6 +1179,31 @@ private:
         } catch (const std::exception&) {
             return 0;
         }
+    }
+
+    /// Walks the user keyspace once. Every caller wants either all of them or a
+    /// count over all of them, and both would otherwise repeat this iterator
+    /// setup — which is where a forgotten prefix check turns a user listing
+    /// into a listing of whatever sorts next.
+    template <typename Visit>
+    void forEachUser(Visit&& visit) {
+        const std::string prefix = keys::userPrefix();
+        const auto        bound  = keys::upperBound(prefix);
+
+        rocksdb::ReadOptions read = readOptions_;
+        rocksdb::Slice       boundSlice;
+        if (bound) {
+            boundSlice               = toSlice(*bound);
+            read.iterate_upper_bound = &boundSlice;
+        }
+
+        std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(read));
+        for (it->Seek(toSlice(prefix)); it->Valid(); it->Next()) {
+            const auto stored = toView(it->key());
+            if (!stored.starts_with(prefix)) break;
+            visit(decodeUser(stored.substr(prefix.size()), toView(it->value())));
+        }
+        check(it->status(), "listing users");
     }
 
     std::mutex& stripeFor(std::string_view key) {
@@ -1121,6 +1334,12 @@ private:
     /// design never exists.
     mutable std::shared_mutex                 bucketLock_;
     std::array<std::mutex, kLockStripes>      stripes_;
+
+    /// The audit ring's write cursor, recovered at open by seeking to the last
+    /// entry. Held under its own lock rather than as an atomic — see
+    /// appendAudit.
+    std::mutex    auditLock_;
+    std::uint64_t auditSequence_ = 0;
 
     std::atomic<std::uint64_t> buckets_{0};
     std::atomic<std::uint64_t> objects_{0};

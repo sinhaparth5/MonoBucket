@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError } from './api';
+import { api, ApiError, can } from './api';
 
 // The console's logic is which endpoint gets called, with what body, and what
 // it does with the answer. All of that is reachable with a stubbed `fetch`,
@@ -253,5 +253,164 @@ describe('S3 credentials', () => {
 			status: 404,
 			message: 'no such access key'
 		});
+	});
+});
+
+describe('permissions', () => {
+	it('answers from the list the server sent', () => {
+		const session = { permissions: ['bucket:read', 'object:read'] as const };
+
+		expect(can(session, 'bucket:read')).toBe(true);
+		expect(can(session, 'object:read')).toBe(true);
+		expect(can(session, 'bucket:write')).toBe(false);
+	});
+
+	it('requires every permission asked for, not any of them', () => {
+		const session = { permissions: ['bucket:read'] as const };
+
+		expect(can(session, 'bucket:read', 'bucket:write')).toBe(false);
+		expect(can(session, 'bucket:read', 'bucket:read')).toBe(true);
+	});
+
+	it('treats no session as holding nothing', () => {
+		// The signed-out shell asks this before it knows anything, and the
+		// answer has to be "no" rather than a crash.
+		expect(can(null, 'bucket:read')).toBe(false);
+		expect(can(undefined, 'user:write')).toBe(false);
+		expect(can({ permissions: [] }, 'settings:read')).toBe(false);
+	});
+});
+
+describe('users', () => {
+	it('reads the accounts and the role catalogue together', async () => {
+		respondWith({
+			status: 200,
+			body: {
+				users: [{ username: 'admin', role: 'administrator', disabled: false }],
+				roles: [{ name: 'administrator', description: 'everything', permissions: [] }]
+			}
+		});
+
+		const answer = await api.users();
+
+		expect(calls[0].url).toBe('/_mb/api/users');
+		expect(answer.users).toHaveLength(1);
+		// The picker is built from what the server shipped, so it can never
+		// offer a role this build does not have.
+		expect(answer.roles[0].name).toBe('administrator');
+	});
+
+	it('creates a user with a password and a role', async () => {
+		respondWith({ status: 201, body: { username: 'sam', role: 'operator' } });
+
+		await api.createUser('sam', 'a long enough password', 'operator');
+
+		expect(calls[0].init.method).toBe('POST');
+		expect(bodyOf(calls[0])).toEqual({
+			username: 'sam',
+			password: 'a long enough password',
+			role: 'operator'
+		});
+	});
+
+	it('patches only what changed', async () => {
+		respondWith({ status: 200, body: { username: 'sam', role: 'readonly', endedSessions: 2 } });
+
+		const result = await api.updateUser('sam', { role: 'readonly' });
+
+		expect(calls[0].init.method).toBe('PATCH');
+		// No `disabled` key: sending one would ask the server to reassert a
+		// status this call was never about.
+		expect(bodyOf(calls[0])).toEqual({ username: 'sam', role: 'readonly' });
+		expect(result.endedSessions).toBe(2);
+	});
+
+	it('disables without touching the role', async () => {
+		respondWith({ status: 200, body: { username: 'sam', disabled: true, endedSessions: 1 } });
+
+		await api.updateUser('sam', { disabled: true });
+
+		expect(bodyOf(calls[0])).toEqual({ username: 'sam', disabled: true });
+	});
+
+	it('surfaces the last-administrator refusal as a conflict', async () => {
+		respondWith({ status: 409, body: { error: 'this is the last enabled administrator' } });
+
+		await expect(api.updateUser('admin', { role: 'readonly' })).rejects.toMatchObject({
+			status: 409,
+			message: 'this is the last enabled administrator'
+		});
+	});
+
+	it('deletes with the username escaped into the query', async () => {
+		respondWith({
+			status: 200,
+			body: { deleted: 'sam', revokedCredentials: 2, endedSessions: 1 }
+		});
+
+		const result = await api.deleteUser('a b');
+
+		expect(calls[0].url).toBe('/_mb/api/users?username=a%20b');
+		expect(calls[0].init.method).toBe('DELETE');
+		// The keys go with the account, and the caller is told how many.
+		expect(result.revokedCredentials).toBe(2);
+	});
+});
+
+describe('passwords', () => {
+	it('changes your own with the current one and no username', async () => {
+		respondWith({ status: 200, body: { username: 'sam', endedSessions: 3 } });
+
+		await api.setPassword('a brand new password', { currentPassword: 'the old one' });
+
+		expect(calls[0].url).toBe('/_mb/api/users/password');
+		expect(bodyOf(calls[0])).toEqual({
+			newPassword: 'a brand new password',
+			currentPassword: 'the old one'
+		});
+		// Omitting the username is what makes this a self-change rather than a
+		// reset, so its absence is the assertion.
+		expect(bodyOf(calls[0])).not.toHaveProperty('username');
+	});
+
+	it('resets somebody else with a username and no current password', async () => {
+		respondWith({ status: 200, body: { username: 'sam', endedSessions: 0 } });
+
+		await api.setPassword('a brand new password', { username: 'sam' });
+
+		expect(bodyOf(calls[0])).toEqual({ newPassword: 'a brand new password', username: 'sam' });
+		expect(bodyOf(calls[0])).not.toHaveProperty('currentPassword');
+	});
+
+	it('reports a wrong current password as a 401', async () => {
+		respondWith({ status: 401, body: { error: 'the current password is wrong' } });
+
+		await expect(
+			api.setPassword('a brand new password', { currentPassword: 'wrong' })
+		).rejects.toMatchObject({ status: 401 });
+	});
+});
+
+describe('the activity log', () => {
+	it('asks for a bounded number of entries', async () => {
+		respondWith({ status: 200, body: { entries: [], capacity: 5000 } });
+
+		await api.audit();
+		expect(calls[0].url).toBe('/_mb/api/audit?limit=200');
+
+		await api.audit(25);
+		expect(calls[1].url).toBe('/_mb/api/audit?limit=25');
+	});
+
+	it('reports a refusal to read it as forbidden rather than unauthorized', async () => {
+		respondWith({ status: 403, body: { error: 'this account is not permitted to audit:read' } });
+
+		const failure = await api.audit().catch((cause) => cause);
+
+		// The two land in different places in the console: a 401 belongs on the
+		// login page and a 403 belongs where the reader already is.
+		expect(failure).toBeInstanceOf(ApiError);
+		expect(failure.forbidden).toBe(true);
+		expect(failure.unauthorized).toBe(false);
 	});
 });

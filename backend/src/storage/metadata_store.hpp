@@ -12,6 +12,12 @@
 
 namespace monobucket {
 
+/// How many audit entries the store keeps. Roughly a megabyte at the sizes
+/// these records actually reach, which is the budget a log that lives beside
+/// the object metadata deserves — anything more belongs in whatever collects
+/// this server's stdout.
+inline constexpr std::size_t kAuditCapacity = 5000;
+
 /// Conditions the S3 layer has to distinguish, so they are modelled as codes
 /// rather than as message text. Phase 4 maps each onto an S3 error code.
 enum class StorageErrorCode {
@@ -189,11 +195,42 @@ public:
     // credential that survived being shown but not a power cut is worse than
     // one that was never issued.
 
+    virtual std::optional<UserRecord> getUser(std::string_view username) = 0;
+
+    /// Ordered by username, which is the order the console renders. The user
+    /// list is small by construction — it is people, not objects — so this
+    /// returns all of them rather than a page.
+    virtual std::vector<UserRecord> listUsers() = 0;
+
+    /// Creates an account or replaces it wholesale. Callers read, modify and
+    /// write back; there is no partial update, because a partial update of a
+    /// record that carries a role is a way to change a role by accident.
+    virtual void putUser(const UserRecord& user) = 0;
+
+    /// Returns false when there was no such account.
+    virtual bool deleteUser(std::string_view username) = 0;
+
+    /// How many administrators are enabled right now.
+    ///
+    /// Exists so that "this would remove the last administrator" can be
+    /// answered before the write rather than discovered after it. A scan, but
+    /// of the user keyspace only, and only on a mutation path — the alternative
+    /// is a maintained counter that can disagree with the records it counts.
+    virtual std::size_t countEnabledAdministrators() = 0;
+
+    /// The single administrator account that predates per-user identities, if
+    /// this data directory still has one. Read by startup migration and by
+    /// nothing else.
     virtual std::optional<AdminRecord> getAdmin() = 0;
 
-    /// Creates the administrator or replaces its verifier. There is exactly one
-    /// account, so this is a write, not an insert.
+    /// Writes the legacy record. Only startup does, and only to establish the
+    /// account on a store that has never been opened by a build with users —
+    /// after which the same startup migrates it. Kept so a downgrade to the
+    /// previous release still finds an account it understands.
     virtual void putAdmin(const AdminRecord& admin) = 0;
+
+    /// Drops the legacy record once it has been migrated. Idempotent.
+    virtual void deleteAdmin() = 0;
 
     virtual std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId) = 0;
 
@@ -209,6 +246,20 @@ public:
     ///
     /// Returns false when there was nothing to revoke.
     virtual bool deleteAccessKey(std::string_view accessKeyId) = 0;
+
+    // --- Audit -------------------------------------------------------------
+
+    /// Appends one security event and assigns its sequence number.
+    ///
+    /// The log is a bounded ring: once it holds `kAuditCapacity` entries, each
+    /// append drops the oldest. Bounded rather than growing without limit for
+    /// the same reason every other queue here is — a refused request can be
+    /// generated as fast as a client can send one, and an unbounded log turns
+    /// that into unbounded disk.
+    virtual std::uint64_t appendAudit(const AuditRecord& entry) = 0;
+
+    /// The most recent entries, newest first, at most `limit` of them.
+    virtual std::vector<AuditRecord> listAudit(std::size_t limit) = 0;
 
     // --- Introspection -----------------------------------------------------
 

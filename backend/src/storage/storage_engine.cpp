@@ -173,7 +173,25 @@ void StorageEngine::setBucketDurability(std::string_view              name,
 // through metadata_ directly so that the console and the S3 router depend on
 // one storage surface, not two.
 
+std::optional<UserRecord> StorageEngine::getUser(std::string_view username) {
+    return metadata_->getUser(username);
+}
+
+std::vector<UserRecord> StorageEngine::listUsers() { return metadata_->listUsers(); }
+
+void StorageEngine::putUser(const UserRecord& user) { metadata_->putUser(user); }
+
+bool StorageEngine::deleteUser(std::string_view username) {
+    return metadata_->deleteUser(username);
+}
+
+std::size_t StorageEngine::countEnabledAdministrators() {
+    return metadata_->countEnabledAdministrators();
+}
+
 std::optional<AdminRecord> StorageEngine::getAdmin() { return metadata_->getAdmin(); }
+
+void StorageEngine::deleteAdmin() { metadata_->deleteAdmin(); }
 
 void StorageEngine::putAdmin(const AdminRecord& admin) { metadata_->putAdmin(admin); }
 
@@ -189,6 +207,14 @@ void StorageEngine::putAccessKey(const AccessKeyRecord& key) { metadata_->putAcc
 
 bool StorageEngine::deleteAccessKey(std::string_view accessKeyId) {
     return metadata_->deleteAccessKey(accessKeyId);
+}
+
+std::uint64_t StorageEngine::appendAudit(const AuditRecord& entry) {
+    return metadata_->appendAudit(entry);
+}
+
+std::vector<AuditRecord> StorageEngine::listAudit(std::size_t limit) {
+    return metadata_->listAudit(limit);
 }
 
 // --- Objects ---------------------------------------------------------------

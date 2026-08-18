@@ -12,10 +12,17 @@
 	import { resolve } from '$app/paths';
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type Credential, type IssuedCredential } from '$lib/api';
+	import { api, ApiError, can, type Credential, type IssuedCredential } from '$lib/api';
 	import { formatTimestamp, plural } from '$lib/format';
 	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon from '$lib/components/Icon.svelte';
+
+	let { data } = $props();
+
+	// An administrator sees everybody's keys, so the owner column only earns its
+	// width for them — for anyone else every row would say the same name.
+	const mayWrite = $derived(can(data.session, 'credential:write'));
+	const seesEveryone = $derived(can(data.session, 'user:read'));
 
 	let credentials = $state<Credential[] | null>(null);
 	let error = $state('');
@@ -153,10 +160,12 @@
 			{/if}
 		</div>
 
-		<button class="btn btn-primary gap-2 shadow-primary/20 shadow-lg" onclick={openCreate}>
-			<Icon name="plus" class="size-4" />
-			Create access key
-		</button>
+		{#if mayWrite}
+			<button class="btn btn-primary gap-2 shadow-primary/20 shadow-lg" onclick={openCreate}>
+				<Icon name="plus" class="size-4" />
+				Create access key
+			</button>
+		{/if}
 	</header>
 
 	{#if error}
@@ -183,14 +192,17 @@
 			<div class="flex flex-col gap-1">
 				<p class="text-xl font-bold tracking-tight">No access keys yet</p>
 				<p class="text-base-content/60 mx-auto max-w-md text-sm">
-					Create one to give a program access to the S3 API. Signing in to this console uses your
-					administrator password instead, so a key you revoke here never locks you out.
+					Create one to give a program access to the S3 API. A key acts as the person who issued it
+					and can never do more than they can, so revoking one never locks anybody out of this
+					console.
 				</p>
 			</div>
-			<button class="btn btn-primary gap-2" onclick={openCreate}>
-				<Icon name="plus" class="size-4" />
-				Create the first key
-			</button>
+			{#if mayWrite}
+				<button class="btn btn-primary gap-2" onclick={openCreate}>
+					<Icon name="plus" class="size-4" />
+					Create the first key
+				</button>
+			{/if}
 		</div>
 	{:else}
 		<div class="panel overflow-x-auto shadow-sm">
@@ -199,6 +211,7 @@
 					<tr class="border-base-300">
 						<th>Access key ID</th>
 						<th>Description</th>
+						{#if seesEveryone}<th class="w-40">Owner</th>{/if}
 						<th class="w-52">Created</th>
 						<th class="w-52">Secret rotated</th>
 						<th class="w-0"></th>
@@ -224,34 +237,41 @@
 							<td class="text-base-content/70 max-w-xs truncate">
 								{credential.description || '—'}
 							</td>
+							{#if seesEveryone}
+								<td class="text-base-content/70 text-sm">{credential.owner || '—'}</td>
+							{/if}
 							<td class="text-base-content/60">{formatTimestamp(credential.createdAtMs)}</td>
 							<td class="text-base-content/60">
 								{credential.rotatedAtMs > 0 ? formatTimestamp(credential.rotatedAtMs) : 'never'}
 							</td>
 							<td>
 								<div class="flex items-center justify-end gap-1">
-									<button
-										class="btn btn-ghost btn-sm gap-1.5"
-										disabled={busy === credential.accessKeyId}
-										onclick={() => {
-											pendingRotate = credential;
-											rotateDialog.showModal();
-										}}
-									>
-										<Icon name="refresh" class="size-3.5" />
-										Rotate
-									</button>
-									<button
-										class="btn btn-ghost btn-sm text-error gap-1.5"
-										disabled={busy === credential.accessKeyId}
-										onclick={() => {
-											pendingRevoke = credential;
-											revokeDialog.showModal();
-										}}
-									>
-										<Icon name="trash" class="size-3.5" />
-										Revoke
-									</button>
+									{#if mayWrite}
+										<button
+											class="btn btn-ghost btn-sm gap-1.5"
+											disabled={busy === credential.accessKeyId}
+											onclick={() => {
+												pendingRotate = credential;
+												rotateDialog.showModal();
+											}}
+										>
+											<Icon name="refresh" class="size-3.5" />
+											Rotate
+										</button>
+										<button
+											class="btn btn-ghost btn-sm text-error gap-1.5"
+											disabled={busy === credential.accessKeyId}
+											onclick={() => {
+												pendingRevoke = credential;
+												revokeDialog.showModal();
+											}}
+										>
+											<Icon name="trash" class="size-3.5" />
+											Revoke
+										</button>
+									{:else}
+										<span class="text-base-content/45 text-xs">read only</span>
+									{/if}
 								</div>
 							</td>
 						</tr>

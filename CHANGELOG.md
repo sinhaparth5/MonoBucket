@@ -98,7 +98,70 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Breaking
+
+- **The single administrator account is now one of many user accounts.** The
+  console's identity is a `UserRecord` with a role, not the one-of-a-kind admin
+  record. Startup migrates the old record in place — it becomes a user with the
+  `administrator` role, keeping its username, password and creation date — and
+  then drops it. Nothing has to be done by hand and no password changes. A
+  downgrade to 2026.08.1 after upgrading will not see the migrated account,
+  because it reads the record this release deleted; set
+  `MONOBUCKET_ADMIN_PASSWORD` on the downgraded start to re-establish it.
+- **S3 access keys belong to a user and inherit that user's role.** A key issued
+  by a `readonly` account can only read. Keys issued before this release had no
+  owner; startup adopts them into the administrator account, so they keep
+  working exactly as they did and become revocable by name. The root pair from
+  `MONOBUCKET_ROOT_ACCESS_KEY` is unchanged and remains administrator-equivalent
+  — it comes from the environment and is the break-glass credential.
+- **`GET /_mb/api/session` and `POST /_mb/api/login` answer with `role` and
+  `permissions`.** Existing fields are untouched.
+
+### Added
+
+- **Users, roles and per-role authorisation.** Three roles, defined in
+  `core/identity.hpp` as a pure `allows(Role, Permission)` function:
+  `administrator` (everything, including user management and the audit log),
+  `operator` (buckets, objects and their own access keys), and `readonly`
+  (reads, and creates nothing at all — including credentials).
+- **`/_mb/api/users`** — list, create, update role and status, and delete.
+  Deleting an account revokes the S3 keys it owns; disabling keeps them and is
+  reversible. The last enabled administrator cannot be deleted, disabled or
+  demoted, and an account cannot delete itself.
+- **`/_mb/api/users/password`** — change your own password with the current one,
+  or reset somebody else's with `user:write`. Either way every session that
+  account holds ends; a self-change hands back a fresh cookie so the tab that
+  made it keeps working.
+- **`/_mb/api/audit`** — the security event log: sign-ins and refusals, user and
+  credential changes, and every denied authorisation check. A bounded ring of
+  the most recent 5000 entries in the metadata store, oldest dropped on write.
+- **Console screens for both**, under **Users** and **Activity**, plus a
+  password-change form on **Settings**. Navigation is filtered by the signed-in
+  role — as a courtesy, never as the enforcement.
+
+### Changed
+
+- **Every console route names the permission it requires**, checked before the
+  handler runs. A request that lacks it gets a `403` naming the permission, in
+  one shape for every route and every role.
+- **Signed S3 requests are authorised against the key owner's role.** The owner
+  record is read on every request rather than cached, so a role change or a
+  disabled account takes effect on the next request rather than the next
+  restart. Refused requests are recorded, unlike signature failures — reaching
+  that point requires a valid credential, which is what bounds the log.
+- **The credentials screen shows only your own keys** unless you can manage
+  users, and a key can only be rotated or revoked by its owner or an
+  administrator. A key that belongs to somebody else answers `404`, the same as
+  one that does not exist.
+- Startup now refuses to open a listener when no *enabled administrator* exists,
+  rather than when no administrator record exists.
+
+### Security
+
+- Disabling a user ends every console session they hold and stops their S3
+  access keys on the next request. Deleting one additionally revokes those keys.
+- A disabled account fails sign-in at the same point and the same cost as a
+  wrong password, so response timing does not distinguish the two.
 
 ---
 

@@ -2,8 +2,12 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+
+#include "core/identity.hpp"
 
 // Console session tokens and the rate limiter in front of the login route.
 //
@@ -30,6 +34,20 @@ inline constexpr std::int64_t kLoginWindowSeconds = 60;
 /// Unix seconds, from the system clock.
 std::int64_t nowSeconds() noexcept;
 
+/// Who a live session belongs to, and what they may do.
+///
+/// The role is captured at sign-in rather than re-read from the store on every
+/// request. That is a deliberate trade with one consequence, and the consequence
+/// is handled rather than tolerated: a role change would otherwise not reach an
+/// open tab, so every change to a user's role or status closes that user's
+/// sessions — see SessionStore::closeUser and the console's users handler. The
+/// alternative, a RocksDB point lookup on the event loop for every console
+/// request, pays on every request to fix something that happens twice a year.
+struct Principal {
+    std::string username;
+    Role        role = Role::ReadOnly;
+};
+
 /// Session tokens held in memory only. A restart logs everyone out, which is
 /// the correct trade for a single-binary server: persisting them would mean a
 /// stolen data directory is also a stolen login, and signing in again costs one
@@ -42,19 +60,29 @@ class SessionStore {
 public:
     explicit SessionStore(std::int64_t ttlSeconds = kSessionTtlSeconds) : ttlSeconds_(ttlSeconds) {}
 
-    /// Returns an unguessable token naming `username`.
-    std::string open(const std::string& username);
-    std::string openAt(const std::string& username, std::int64_t atSeconds);
+    /// Returns an unguessable token naming `username` with `role`.
+    std::string open(const std::string& username, Role role);
+    std::string openAt(const std::string& username, Role role, std::int64_t atSeconds);
 
-    /// The administrator the token names, or empty when it is unknown or has
-    /// expired. Expiry is judged on every use rather than by a sweeper, so a
-    /// tab left open past the TTL is refused without waiting for one.
-    std::string resolve(const std::string& token) const;
-    std::string resolveAt(const std::string& token, std::int64_t atSeconds) const;
+    /// Who the token names, or nothing when it is unknown or has expired.
+    /// Expiry is judged on every use rather than by a sweeper, so a tab left
+    /// open past the TTL is refused without waiting for one.
+    std::optional<Principal> resolve(const std::string& token) const;
+    std::optional<Principal> resolveAt(const std::string& token, std::int64_t atSeconds) const;
 
     /// Signing out. Idempotent, and silent about whether the token was live —
     /// nothing useful follows from telling the caller.
     void close(const std::string& token);
+
+    /// Ends every session belonging to `username`, and answers how many there
+    /// were. This is what makes disabling, deleting, demoting or resetting an
+    /// account take effect on a tab that is already open: the session carries a
+    /// copy of the role, so the copy has to go when the original changes.
+    ///
+    /// Deliberately not "refresh the role" — a demoted user should be made to
+    /// sign in again rather than have the page silently lose controls, and a
+    /// disabled one has nothing to refresh to.
+    std::size_t closeUser(std::string_view username);
 
     /// Live sessions, expired ones excluded. For tests and for nothing else.
     std::size_t size() const;
@@ -62,6 +90,7 @@ public:
 private:
     struct Session {
         std::string  username;
+        Role         role      = Role::ReadOnly;
         std::int64_t expiresAt = 0;
     };
 

@@ -18,6 +18,12 @@ void appendBigEndian32(std::string& out, std::uint32_t value) {
     out.push_back(static_cast<char>(value & 0xFF));
 }
 
+void appendBigEndian64(std::string& out, std::uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<char>((value >> shift) & 0xFF));
+    }
+}
+
 }  // namespace
 
 std::string bucket(std::string_view name) { return tagged(kBucket, name); }
@@ -77,6 +83,30 @@ std::string partPrefix(std::string_view uploadId) {
 std::string orphan(std::string_view blobId) { return tagged(kOrphan, blobId); }
 
 std::string orphanPrefix() { return std::string(1, kOrphan); }
+
+std::string user(std::string_view username) { return tagged(kUser, username); }
+
+std::string userPrefix() { return std::string(1, kUser); }
+
+std::string audit(std::uint64_t sequence) {
+    std::string out;
+    out.reserve(9);
+    out.push_back(kAudit);
+    appendBigEndian64(out, sequence);
+    return out;
+}
+
+std::string auditPrefix() { return std::string(1, kAudit); }
+
+std::optional<std::uint64_t> auditSequence(std::string_view stored) {
+    if (stored.size() != 9 || stored.front() != kAudit) return std::nullopt;
+
+    std::uint64_t value = 0;
+    for (std::size_t i = 1; i < stored.size(); ++i) {
+        value = (value << 8) | static_cast<unsigned char>(stored[i]);
+    }
+    return value;
+}
 
 std::string meta(std::string_view name) { return tagged(kMeta, name); }
 

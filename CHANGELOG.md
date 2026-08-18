@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.4] — 2026-08-18
+
 ### Fixed
 
 - **The console built S3 links against its own hostname**, gluing it to

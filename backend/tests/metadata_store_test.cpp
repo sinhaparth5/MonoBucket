@@ -527,3 +527,169 @@ TEST_CASE("counters survive a reopen", "[metadata]") {
 
     CHECK(reopened->getObject("b", "one").has_value());
 }
+
+// --- Identity ---------------------------------------------------------------
+
+TEST_CASE("the administrator record survives a reopen", "[metadata]") {
+    TemporaryDirectory root{"admin"};
+
+    {
+        auto store = openStore(root);
+        CHECK_FALSE(store->getAdmin().has_value());
+
+        monobucket::AdminRecord admin;
+        admin.username     = "operator";
+        admin.passwordHash = "pbkdf2-sha256$1000$aabb$ccdd";
+        admin.createdAt    = 1000;
+        admin.updatedAt    = 2000;
+        store->putAdmin(admin);
+    }
+
+    auto store = openStore(root);
+    auto admin = store->getAdmin();
+    REQUIRE(admin.has_value());
+    CHECK(admin->username == "operator");
+    CHECK(admin->passwordHash == "pbkdf2-sha256$1000$aabb$ccdd");
+    CHECK(admin->createdAt == 1000);
+    CHECK(admin->updatedAt == 2000);
+}
+
+TEST_CASE("provisioning again replaces the administrator", "[metadata]") {
+    TemporaryDirectory root{"admin-reset"};
+    auto               store = openStore(root);
+
+    monobucket::AdminRecord admin;
+    admin.username     = "admin";
+    admin.passwordHash = "first";
+    store->putAdmin(admin);
+
+    // There is one account, so this is a write rather than an insert — a
+    // second record would leave the store with two answers to one question.
+    admin.username     = "renamed";
+    admin.passwordHash = "second";
+    store->putAdmin(admin);
+
+    const auto stored = store->getAdmin();
+    REQUIRE(stored.has_value());
+    CHECK(stored->username == "renamed");
+    CHECK(stored->passwordHash == "second");
+}
+
+TEST_CASE("an access key round-trips through the store", "[metadata]") {
+    TemporaryDirectory root{"access-keys"};
+
+    {
+        auto store = openStore(root);
+
+        monobucket::AccessKeyRecord key;
+        key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
+        key.secretKey   = "a-secret-worth-forty-characters-exactly1";
+        key.description = "backups from the nightly job";
+        key.createdAt   = 4242;
+        store->putAccessKey(key);
+    }
+
+    auto       store = openStore(root);
+    const auto key   = store->getAccessKey("MBAAAAAAAAAAAAAAAAAA");
+    REQUIRE(key.has_value());
+    CHECK(key->accessKeyId == "MBAAAAAAAAAAAAAAAAAA");
+    CHECK(key->secretKey == "a-secret-worth-forty-characters-exactly1");
+    CHECK(key->description == "backups from the nightly job");
+    CHECK(key->createdAt == 4242);
+    CHECK(key->rotatedAt == 0);
+}
+
+TEST_CASE("an access key that was never issued resolves to nothing", "[metadata]") {
+    TemporaryDirectory root{"access-keys-missing"};
+    auto               store = openStore(root);
+
+    CHECK_FALSE(store->getAccessKey("MBAAAAAAAAAAAAAAAAAA").has_value());
+    CHECK_FALSE(store->getAccessKey("").has_value());
+}
+
+TEST_CASE("access keys list in id order", "[metadata]") {
+    TemporaryDirectory root{"access-keys-list"};
+    auto               store = openStore(root);
+
+    for (const char* id : {"MBCCCCCCCCCCCCCCCCCC", "MBAAAAAAAAAAAAAAAAAA",
+                           "MBBBBBBBBBBBBBBBBBBB"}) {
+        monobucket::AccessKeyRecord key;
+        key.accessKeyId = id;
+        key.secretKey   = "secret";
+        store->putAccessKey(key);
+    }
+
+    const auto keys = store->listAccessKeys();
+    REQUIRE(keys.size() == 3);
+    CHECK(keys[0].accessKeyId == "MBAAAAAAAAAAAAAAAAAA");
+    CHECK(keys[1].accessKeyId == "MBBBBBBBBBBBBBBBBBBB");
+    CHECK(keys[2].accessKeyId == "MBCCCCCCCCCCCCCCCCCC");
+}
+
+TEST_CASE("rotation keeps the id and replaces the secret", "[metadata]") {
+    TemporaryDirectory root{"access-keys-rotate"};
+    auto               store = openStore(root);
+
+    monobucket::AccessKeyRecord key;
+    key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
+    key.secretKey   = "the-original-secret";
+    key.createdAt   = 100;
+    store->putAccessKey(key);
+
+    key.secretKey = "the-replacement-secret";
+    key.rotatedAt = 500;
+    store->putAccessKey(key);
+
+    const auto stored = store->getAccessKey("MBAAAAAAAAAAAAAAAAAA");
+    REQUIRE(stored.has_value());
+    CHECK(stored->secretKey == "the-replacement-secret");
+    CHECK(stored->createdAt == 100);
+    CHECK(stored->rotatedAt == 500);
+    CHECK(store->listAccessKeys().size() == 1);
+}
+
+TEST_CASE("revoking an access key removes it entirely", "[metadata]") {
+    TemporaryDirectory root{"access-keys-revoke"};
+
+    {
+        auto store = openStore(root);
+
+        monobucket::AccessKeyRecord key;
+        key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
+        key.secretKey   = "a-secret";
+        store->putAccessKey(key);
+
+        CHECK(store->deleteAccessKey("MBAAAAAAAAAAAAAAAAAA"));
+        CHECK_FALSE(store->getAccessKey("MBAAAAAAAAAAAAAAAAAA").has_value());
+
+        // False rather than throwing: revoking twice is what a double-clicked
+        // button does, and the second one has nothing to report.
+        CHECK_FALSE(store->deleteAccessKey("MBAAAAAAAAAAAAAAAAAA"));
+    }
+
+    // And it stays revoked. A delete that only cleared a cache would let a
+    // restart resurrect the credential.
+    auto store = openStore(root);
+    CHECK_FALSE(store->getAccessKey("MBAAAAAAAAAAAAAAAAAA").has_value());
+    CHECK(store->listAccessKeys().empty());
+}
+
+TEST_CASE("credentials do not appear in the bucket or object keyspace", "[metadata]") {
+    TemporaryDirectory root{"access-keys-isolated"};
+    auto               store = openStore(root);
+
+    monobucket::AccessKeyRecord key;
+    key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
+    key.secretKey   = "a-secret";
+    store->putAccessKey(key);
+
+    monobucket::AdminRecord admin;
+    admin.username     = "admin";
+    admin.passwordHash = "hash";
+    store->putAdmin(admin);
+
+    // Both live under their own type tags, so a ListBuckets cannot enumerate
+    // them and a bucket named like a key id cannot shadow one.
+    CHECK(store->listBuckets().empty());
+    CHECK(store->usage().buckets == 0);
+}

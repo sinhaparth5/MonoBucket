@@ -2,12 +2,14 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <sstream>
 
 #include <drogon/drogon.h>
 
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
+#include "core/credentials.hpp"
 #include "core/io_executor.hpp"
 #include "core/logging.hpp"
 #include "s3/cors.hpp"
@@ -166,9 +168,29 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
         // all, since the framework keeps no record of it.
         if (request.method == "GET") options.alternateMethod = "HEAD";
 
-        const Credentials credentials{context.config.rootAccessKey, context.config.rootSecretKey};
+        // Two sources, checked in that order. The root pair from the
+        // environment is what every deployment before console-issued
+        // credentials was configured with, and it keeps working untouched —
+        // that is the migration path, not a transitional hack. Everything else
+        // is a record in the store, so revoking one takes effect on the next
+        // request rather than on the next restart.
+        //
+        // This is a RocksDB point lookup per signed request. It is on the I/O
+        // thread the whole request already runs on, and it is not cached: a
+        // cached secret is a revocation that has not happened yet.
+        const auto resolveCredential =
+            [&context](std::string_view accessKeyId) -> std::optional<std::string> {
+            if (secureEquals(accessKeyId, context.config.rootAccessKey)) {
+                return context.config.rootSecretKey;
+            }
+            if (!credentials::plausibleAccessKeyId(accessKeyId)) return std::nullopt;
+            const auto record = context.storage.getAccessKey(accessKeyId);
+            if (!record) return std::nullopt;
+            return record->secretKey;
+        };
+
         const AuthOutcome auth =
-            authenticate(toSigningRequest(http), request.query, credentials, options);
+            authenticate(toSigningRequest(http), request.query, resolveCredential, options);
 
         if (!auth.method.empty()) request.method = auth.method;
 

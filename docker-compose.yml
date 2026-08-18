@@ -11,8 +11,20 @@ services:
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Admin dashboard
+    # Delivered as a file rather than an environment variable: a value in
+    # `environment:` shows up in `docker inspect` and in /proc/<pid>/environ.
+    secrets:
+      - monobucket_admin_password
     environment:
       MONOBUCKET_DATA_DIR: /data
+      # Who signs in to the dashboard. There is no default password: create
+      # secrets/admin_password.txt (>= 12 characters) before the first start,
+      # or the container refuses to come up and says so.
+      MONOBUCKET_ADMIN_USERNAME: ${MONOBUCKET_ADMIN_USERNAME:-admin}
+      MONOBUCKET_ADMIN_PASSWORD_FILE: /run/secrets/monobucket_admin_password
+      # The bootstrap S3 key pair. It signs S3 requests and nothing else — it
+      # has not been a console login since the administrator account existed.
+      # Day-to-day credentials are issued from the console instead.
       MONOBUCKET_ROOT_ACCESS_KEY: ${MONOBUCKET_ROOT_ACCESS_KEY:-monobucket}
       MONOBUCKET_ROOT_SECRET_KEY: ${MONOBUCKET_ROOT_SECRET_KEY:-monobucket-dev-secret}
       MONOBUCKET_REGION: ${MONOBUCKET_REGION:-us-east-1}
@@ -57,3 +69,7 @@ services:
 volumes:
   monobucket-data:
   monobucket-redis:
+
+secrets:
+  monobucket_admin_password:
+    file: ./secrets/admin_password.txt

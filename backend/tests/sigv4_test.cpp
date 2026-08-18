@@ -507,3 +507,80 @@ TEST_CASE("signature comparison does not short-circuit on length or content", "[
     REQUIRE_FALSE(secureEquals("abc", "ab"));
     REQUIRE(secureEquals("", ""));
 }
+
+// --- Credential resolution -------------------------------------------------
+//
+// Verification stopped being about one pair from the environment when keys
+// became issuable from the console. What matters is that the resolver decides
+// *which* secret is used and that saying "no such key" is the only way a
+// revoked credential is reported — the same answer as one that never existed.
+
+TEST_CASE("a resolver supplies the secret the signature is checked against", "[sigv4]") {
+    const std::string signedHeaders = "host;range;x-amz-content-sha256;x-amz-date";
+    const std::string signature =
+        "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41";
+
+    SigningRequest request;
+    request.method  = "GET";
+    request.uri     = "/test.txt";
+    request.headers = {
+        {"host", kHost},
+        {"range", "bytes=0-9"},
+        {"x-amz-content-sha256", kEmptySha256},
+        {"x-amz-date", kAmzDate},
+        {"authorization", authorizationHeader(signedHeaders, signature)},
+    };
+
+    SECTION("the key the scope names is the one looked up") {
+        std::string asked;
+        const CredentialResolver resolve =
+            [&](std::string_view id) -> std::optional<std::string> {
+            asked = std::string(id);
+            return kSecretKey;
+        };
+
+        const AuthOutcome outcome = authenticate(request, {}, resolve, defaultOptions());
+        CHECK(asked == kAccessKey);
+        CHECK(outcome.accessKey == kAccessKey);
+    }
+
+    SECTION("a revoked key is InvalidAccessKeyId, not a signature failure") {
+        // The distinction matters: SignatureDoesNotMatch would tell a caller
+        // holding a revoked key that it is still a key, and send whoever is
+        // debugging it looking at their clock.
+        const CredentialResolver revoked =
+            [](std::string_view) -> std::optional<std::string> { return std::nullopt; };
+
+        try {
+            authenticate(request, {}, revoked, defaultOptions());
+            FAIL("a revoked credential must not authenticate");
+        } catch (const S3Exception& error) {
+            CHECK(error.code() == S3ErrorCode::InvalidAccessKeyId);
+        }
+    }
+
+    SECTION("the wrong secret still fails on the signature") {
+        const CredentialResolver wrong =
+            [](std::string_view) -> std::optional<std::string> { return "not-the-right-secret"; };
+        REQUIRE_THROWS_AS(authenticate(request, {}, wrong, defaultOptions()), S3Exception);
+    }
+}
+
+TEST_CASE("an anonymous request never reaches the resolver", "[sigv4]") {
+    // Nothing to look up, and a resolver that reads RocksDB should not be asked
+    // to on every unauthenticated GET of a public bucket.
+    SigningRequest request;
+    request.method  = "GET";
+    request.uri     = "/public.txt";
+    request.headers = {{"host", kHost}};
+
+    bool                     asked   = false;
+    const CredentialResolver resolve = [&](std::string_view) -> std::optional<std::string> {
+        asked = true;
+        return kSecretKey;
+    };
+
+    const AuthOutcome outcome = authenticate(request, {}, resolve, defaultOptions());
+    CHECK(outcome.anonymous);
+    CHECK_FALSE(asked);
+}

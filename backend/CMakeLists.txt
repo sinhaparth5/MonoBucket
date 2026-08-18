@@ -11,10 +11,12 @@ set(MONOBUCKET_CORE_SOURCES
     src/cache/memory_cache.cpp
     src/cache/redis_url.cpp
     src/core/config.cpp
+    src/core/credentials.cpp
     src/core/env.cpp
     src/core/io_executor.cpp
-    src/core/logging.cpp
     src/core/lifecycle.cpp
+    src/core/logging.cpp
+    src/core/password.cpp
     src/s3/base64.cpp
     src/s3/bucket_handlers.cpp
     src/s3/chunked.cpp
@@ -39,6 +41,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/storage/rocksdb_metadata_store.cpp
     src/storage/storage_engine.cpp
     src/server/console_api.cpp
+    src/server/console_session.cpp
     src/server/metrics_history.cpp
     src/server/server.cpp
     src/server/system_routes.cpp

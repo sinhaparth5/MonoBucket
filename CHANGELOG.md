@@ -98,7 +98,61 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Breaking
+
+- **The console no longer accepts S3 credentials as a login.** Sign-in takes an
+  administrator username and password. `POST /_mb/api/login` now expects
+  `{username, password}` instead of `{accessKey, secretKey}`, and
+  `GET /_mb/api/session` reports `username` in place of `accessKey`.
+- **A deployment with no administrator provisioned and no password configured
+  refuses to start** (exit 78) rather than defaulting to anything. Set
+  `MONOBUCKET_ADMIN_PASSWORD_FILE` or `MONOBUCKET_ADMIN_PASSWORD` — at least 12
+  characters — once; the account then lives in the data directory and the
+  variable can be removed. A console-less deployment
+  (`MONOBUCKET_CONSOLE_ENABLED=false`) is exempt.
+- No change to the S3 API. `MONOBUCKET_ROOT_ACCESS_KEY` and
+  `MONOBUCKET_ROOT_SECRET_KEY` sign S3 requests exactly as before, which is the
+  documented migration path — see *Upgrading from 2026.08.0* in `README.md`.
+
+### Added
+
+- **S3 access keys issued from the console.** A new *Access keys* screen
+  creates, lists, rotates and revokes credential pairs, backed by
+  `/_mb/api/credentials` and `/_mb/api/credentials/rotate`. A generated secret
+  is returned exactly once, by the call that created or rotated it; no later
+  read returns it. Revocation deletes the record, so it takes effect on the
+  next signed request without a restart.
+- **A console administrator account.** `MONOBUCKET_ADMIN_USERNAME` (default
+  `admin`) with `MONOBUCKET_ADMIN_PASSWORD` or `MONOBUCKET_ADMIN_PASSWORD_FILE`;
+  setting both forms is an error. Stored as a PBKDF2-HMAC-SHA256 verifier at
+  600,000 iterations with a per-record salt, so a stolen data directory does not
+  yield a console login. Verification runs on an I/O thread — the cost is the
+  point, and the event loop must not pay it.
+- `MONOBUCKET_CONSOLE_COOKIE_SECURE` (`auto` | `true` | `false`). `auto` marks
+  the session cookie `Secure` when the request arrived over TLS, directly or via
+  a proxy's `X-Forwarded-Proto`.
+- Compose now delivers the administrator password as a Docker secret rather
+  than an environment variable.
+
+### Changed
+
+- Sign-in failures return one message for every cause, so response text cannot
+  distinguish an unknown username from a wrong password. The verifier runs
+  against a placeholder record when the username misses, so response *time*
+  cannot either.
+- SigV4 verification resolves the secret through a callback rather than
+  comparing against one pair, so the root credential and every issued key are
+  checked by the same path. A revoked key reports `InvalidAccessKeyId`, the same
+  as one that never existed.
+
+### Fixed
+
+- The settings panel named `MONOBUCKET_S3_PORT` as the variable behind the S3
+  port. It is `MONOBUCKET_PORT`; the panel exists to tell an operator which
+  variable to set, so naming the wrong one defeated it.
+- The access-key generator's rejection-sampling bound truncated to zero for an
+  alphabet whose size divides 256, rejecting every byte and looping forever.
+  Caught before release by the generator's own test.
 
 ---
 

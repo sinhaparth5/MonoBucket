@@ -1,8 +1,9 @@
 <script lang="ts">
-	// Deliberately plain in what it asks for. The console authenticates against
-	// the root credentials from the environment and hands back a session cookie;
-	// accounts, roles and key management are a later problem, and pretending
-	// otherwise here would mean building a UI for a backend that does not exist.
+	// A username and a password, never an S3 key pair. The console used to take
+	// the root access key here, which made "revoke someone's console access" and
+	// "break every program using this deployment" the same operation. They are
+	// now two accounts of two different kinds, and this form only knows about
+	// the human one.
 	//
 	// It is the first screen anyone sees, though, so it wears the same mark and
 	// the same surfaces as the console behind it rather than looking like a
@@ -15,8 +16,8 @@
 	import Icon from '$lib/components/Icon.svelte';
 	import logo from '$lib/assets/monobucket-logo.svg';
 
-	let accessKey = $state('');
-	let secretKey = $state('');
+	let username = $state('');
+	let secret = $state('');
 	let showSecret = $state(false);
 	let error = $state('');
 	let busy = $state(false);
@@ -28,7 +29,7 @@
 		busy = true;
 		error = '';
 		try {
-			await api.login(accessKey, secretKey);
+			await api.login(username, secret);
 			await goto(resolve('/'));
 		} catch (cause) {
 			error = cause instanceof ApiError ? cause.message : 'sign in failed';
@@ -72,41 +73,41 @@
 					Your storage, <span class="brand-text">in clear view.</span>
 				</h1>
 				<p class="text-base-content/60 mt-3 max-w-sm text-base leading-relaxed">
-					Sign in with the root credentials configured for this MonoBucket instance.
+					Sign in with the administrator account configured for this MonoBucket instance.
 				</p>
 			</div>
 
 			<form class="panel surface-raised flex flex-col gap-5 p-6 sm:p-7" onsubmit={submit}>
 				<fieldset class="fieldset gap-1.5 p-0">
-					<legend class="fieldset-legend text-sm">Access key</legend>
+					<legend class="fieldset-legend text-sm">Username</legend>
 					<label class="input h-12 w-full">
 						<Icon name="key" class="text-primary size-4.5" />
 						<input
 							type="text"
 							autocomplete="username"
 							spellcheck="false"
-							bind:value={accessKey}
-							placeholder="monobucket"
+							bind:value={username}
+							placeholder="admin"
 							required
 						/>
 					</label>
 				</fieldset>
 
 				<fieldset class="fieldset gap-1.5 p-0">
-					<legend class="fieldset-legend text-sm">Secret key</legend>
+					<legend class="fieldset-legend text-sm">Password</legend>
 					<label class="input h-12 w-full pr-1">
 						<Icon name="shield" class="text-primary size-4.5" />
 						<input
 							type={showSecret ? 'text' : 'password'}
 							autocomplete="current-password"
-							bind:value={secretKey}
-							placeholder="Enter your secret key"
+							bind:value={secret}
+							placeholder="Enter your password"
 							required
 						/>
 						<button
 							type="button"
 							class="btn btn-ghost size-10 p-0"
-							aria-label={showSecret ? 'Hide the secret key' : 'Show the secret key'}
+							aria-label={showSecret ? 'Hide the password' : 'Show the password'}
 							onclick={() => (showSecret = !showSecret)}
 						>
 							<Icon name={showSecret ? 'eyeOff' : 'eye'} class="size-4.5" />
@@ -135,7 +136,8 @@
 				</button>
 
 				<p class="text-base-content/50 text-xs leading-relaxed">
-					The browser receives an HttpOnly session cookie. Your S3 secret stays on the server.
+					The browser receives an HttpOnly session cookie. S3 access keys are managed inside the
+					console and never sign you in.
 				</p>
 			</form>
 		</div>

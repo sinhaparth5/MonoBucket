@@ -167,6 +167,30 @@ void StorageEngine::setBucketDurability(std::string_view              name,
     metadata_->updateBucket(*bucket);
 }
 
+// --- Identity ---------------------------------------------------------------
+
+// Straight passthroughs. They live on the engine rather than being reached for
+// through metadata_ directly so that the console and the S3 router depend on
+// one storage surface, not two.
+
+std::optional<AdminRecord> StorageEngine::getAdmin() { return metadata_->getAdmin(); }
+
+void StorageEngine::putAdmin(const AdminRecord& admin) { metadata_->putAdmin(admin); }
+
+std::optional<AccessKeyRecord> StorageEngine::getAccessKey(std::string_view accessKeyId) {
+    return metadata_->getAccessKey(accessKeyId);
+}
+
+std::vector<AccessKeyRecord> StorageEngine::listAccessKeys() {
+    return metadata_->listAccessKeys();
+}
+
+void StorageEngine::putAccessKey(const AccessKeyRecord& key) { metadata_->putAccessKey(key); }
+
+bool StorageEngine::deleteAccessKey(std::string_view accessKeyId) {
+    return metadata_->deleteAccessKey(accessKeyId);
+}
+
 // --- Objects ---------------------------------------------------------------
 
 BlobWriter StorageEngine::beginWrite() {

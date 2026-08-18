@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -186,6 +187,25 @@ bool secureEquals(std::string_view a, std::string_view b) noexcept;
 /// throwing when no credentials were presented.
 AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryParam>& query,
                          const Credentials& credentials, const AuthOptions& options);
+
+/// Answers with the secret belonging to an access key id, or nothing when no
+/// such credential exists.
+///
+/// Introduced when credentials stopped being a single pair from the
+/// environment. The resolver is a callback rather than a container because the
+/// authoritative copy lives in RocksDB: handing this file a map would mean
+/// either loading every credential into memory or caching them here, and a
+/// cached secret is a revocation that does not take effect.
+using CredentialResolver = std::function<std::optional<std::string>(std::string_view accessKeyId)>;
+
+/// Verifies a request against whichever credential its scope names.
+///
+/// The single-pair overload above delegates here. Failure to resolve is
+/// reported as InvalidAccessKeyId — the same error a wrong key has always
+/// produced, so a revoked credential is indistinguishable from one that never
+/// existed.
+AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryParam>& query,
+                         const CredentialResolver& resolve, const AuthOptions& options);
 
 // --- Presigning ------------------------------------------------------------
 

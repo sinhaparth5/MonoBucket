@@ -86,8 +86,40 @@ struct Config {
     // --- Identity ----------------------------------------------------------
     /// Empty means "use kDefaultAccessKey/kDefaultSecretKey"; resolveDerived-
     /// Values() substitutes them and startup warns that they are in use.
+    ///
+    /// This pair signs S3 requests and nothing else. It stopped being a console
+    /// login when the administrator account arrived, and it is kept because
+    /// every deployment that predates that account is configured with it — see
+    /// the migration note in README.md.
     std::string rootAccessKey;
     std::string rootSecretKey;
+
+    /// The console administrator's name. Only ever compared, never used as a
+    /// key: there is one account, stored at a fixed place.
+    std::string adminUsername = "admin";
+
+    /// The password to provision the administrator with, in plaintext, held
+    /// only until startup has hashed it into the store.
+    ///
+    /// Empty means "leave whatever is already provisioned alone", which is the
+    /// normal state of a running deployment — the variable exists to establish
+    /// or reset the account, not to be present forever. Startup refuses to open
+    /// a listener when this is empty *and* no administrator has ever been
+    /// provisioned, because a console nobody can sign in to is not a safe
+    /// default, and a shipped default password is worse.
+    ///
+    /// Never logged, never in summary(), never in toJson().
+    std::string adminPassword;
+
+    /// Whether the session cookie carries `Secure`.
+    ///
+    /// Auto is the default and the only setting most deployments should use: it
+    /// marks the cookie Secure when the request that produced it arrived over
+    /// TLS, directly or through a proxy that said so. Forcing it on behind a
+    /// plain-HTTP hop makes the browser drop a cookie it was just given, which
+    /// presents as a login that silently does nothing.
+    enum class CookieSecurity { Auto, Always, Never };
+    CookieSecurity consoleCookieSecure = CookieSecurity::Auto;
 
     // --- Runtime -----------------------------------------------------------
     /// 0 means "derive from hardware_concurrency"; after

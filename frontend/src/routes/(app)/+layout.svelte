@@ -24,6 +24,12 @@
 			icon: 'bucket',
 			hint: 'Browse, upload and share objects'
 		},
+		{
+			href: '/credentials',
+			label: 'Access keys',
+			icon: 'key',
+			hint: 'Issue, rotate and revoke S3 credentials'
+		},
 		{ href: '/settings', label: 'Settings', icon: 'settings', hint: 'The resolved configuration' }
 	] as const satisfies readonly { href: string; label: string; icon: IconName; hint: string }[];
 
@@ -139,8 +145,8 @@
 
 				<div class="divider divider-horizontal mx-0 hidden h-5 self-center sm:flex"></div>
 
-				<span class="text-base-content/55 hidden max-w-40 truncate font-mono text-xs md:inline">
-					{data.session.accessKey}
+				<span class="text-base-content/55 hidden max-w-40 truncate text-xs md:inline">
+					{data.session.username}
 				</span>
 
 				<button
@@ -220,7 +226,7 @@
 				<div role="alert" class="alert alert-warning alert-soft m-2 gap-2 text-xs">
 					<Icon name="warning" class="size-4" />
 					<span>
-						Built-in demo credentials are in use. Set the root key pair before exposing this.
+						The built-in demo S3 key pair is in use. Change it before exposing this server.
 					</span>
 				</div>
 			{/if}

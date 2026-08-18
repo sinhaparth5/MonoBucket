@@ -12,12 +12,13 @@
 #include <drogon/drogon.h>
 #include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
-#include <openssl/rand.h>
 
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "core/io_executor.hpp"
+#include "core/credentials.hpp"
 #include "core/logging.hpp"
+#include "core/password.hpp"
 #include "monobucket/version.hpp"
 #include "s3/cors.hpp"
 #include "s3/handlers.hpp"
@@ -25,6 +26,7 @@
 #include "s3/s3_error.hpp"
 #include "s3/sigv4.hpp"
 #include "s3/uri.hpp"
+#include "server/console_session.hpp"
 #include "server/metrics_history.hpp"
 #include "server/server.hpp"
 #include "server/system_routes.hpp"
@@ -41,33 +43,25 @@ using ResponseCallback = std::function<void(const HttpResponsePtr&)>;
 
 constexpr const char* kSessionCookie = "mb_session";
 
-/// Twelve hours: long enough to survive a working day with the tab open, short
-/// enough that a forgotten session on a shared machine expires the same day.
-/// Not an environment knob — a console session is not part of the deployment
-/// shape, and every extra variable is one more thing to get wrong.
-constexpr std::int64_t kSessionTtlSeconds = 12 * 60 * 60;
-
 /// Sampling cadence and retention for the console graphs: 5s × 240 = 20 minutes
 /// of history for roughly 30 KB of ring. Longer windows are Prometheus's job.
 constexpr double      kSampleIntervalSeconds = 5.0;
 constexpr std::size_t kSampleCapacity        = 240;
-
-/// A wrong password is cheap to try, so cap how often it can be tried. The
-/// window is global rather than per-IP on purpose: there is exactly one account,
-/// so a per-IP bucket would only tell an attacker to change source addresses.
-constexpr int          kMaxFailedLogins    = 10;
-constexpr std::int64_t kLoginWindowSeconds = 60;
 
 /// S3's own ceiling on a presigned URL's lifetime. Repeated here rather than
 /// reached for through sigv4 because the console rejects an over-long request
 /// before it reaches an I/O thread.
 constexpr std::int64_t kMaxPresignSeconds = 604800;
 
+/// A label, not a document. Bounded so a description cannot be used to store
+/// arbitrary bulk in a record the S3 hot path reads.
+constexpr std::size_t kMaxDescriptionLength = 200;
+
 /// The console tells us which name the browser reached the deployment by,
 /// because `config.host` is normally 0.0.0.0 and knows no better. That string is
 /// signed and handed back inside a URL, so it is held to what a host and port
-/// can actually contain — not to stop an attack (the caller already holds the
-/// root credentials) but so a mistake surfaces as a 400 here instead of as a
+/// can actually contain — not to stop an attack (the caller already holds a
+/// console session) but so a mistake surfaces as a 400 here instead of as a
 /// link that fails somewhere else.
 bool plausibleHost(const std::string& host) {
     if (host.empty() || host.size() > 255) return false;
@@ -75,12 +69,6 @@ bool plausibleHost(const std::string& host) {
         return std::isalnum(ch) != 0 || ch == '.' || ch == '-' || ch == ':' || ch == '[' ||
                ch == ']';
     });
-}
-
-std::int64_t nowSeconds() noexcept {
-    return std::chrono::duration_cast<std::chrono::seconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
 }
 
 HttpResponsePtr jsonResponse(const nlohmann::json& body,
@@ -106,100 +94,43 @@ bool secretsMatch(const std::string& a, const std::string& b) noexcept {
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
-std::string randomToken() {
-    unsigned char bytes[32];
-    if (RAND_bytes(bytes, sizeof(bytes)) != 1) {
-        throw std::runtime_error("the system random source is unavailable");
+/// Decides whether the session cookie carries `Secure`.
+///
+/// `Secure` tells the browser never to send the cookie over plain HTTP, which
+/// is right whenever there is TLS anywhere in front of the console and wrong
+/// the moment there is not: a cookie the browser accepts and then refuses to
+/// send back presents as a login that succeeds and lands on the login page
+/// again. Auto reads the request rather than guessing.
+bool secureCookieFor(const Config& config, const HttpRequestPtr& req) {
+    switch (config.consoleCookieSecure) {
+        case Config::CookieSecurity::Always: return true;
+        case Config::CookieSecurity::Never:  return false;
+        case Config::CookieSecurity::Auto:   break;
     }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string           out;
-    out.reserve(sizeof(bytes) * 2);
-    for (unsigned char byte : bytes) {
-        out.push_back(kHex[byte >> 4]);
-        out.push_back(kHex[byte & 0x0F]);
-    }
-    return out;
+
+    if (req->isOnSecureConnection()) return true;
+
+    // Set by a terminating proxy. Trusting it unverified is safe in this one
+    // direction: a forged header can only ask the browser to be stricter with
+    // a cookie it is already being handed.
+    std::string_view forwarded = req->getHeader("x-forwarded-proto");
+    const std::size_t comma    = forwarded.find(',');
+    if (comma != std::string_view::npos) forwarded = forwarded.substr(0, comma);
+    return forwarded == "https";
 }
 
-/// Session tokens held in memory only. A restart logs everyone out, which is
-/// the correct trade for a single-binary server: persisting them would mean a
-/// stolen data directory is also a stolen login, and re-authenticating against
-/// the root credentials costs one round trip.
-class SessionStore {
-public:
-    std::string open(std::string accessKey) {
-        std::string                       token = randomToken();
-        const std::lock_guard<std::mutex> guard(mutex_);
-        sweep();
-        sessions_.emplace(token, Session{std::move(accessKey), nowSeconds() + kSessionTtlSeconds});
-        return token;
-    }
-
-    /// Returns the access key the session was opened with, or empty.
-    std::string resolve(const std::string& token) const {
-        if (token.empty()) return {};
-        const std::lock_guard<std::mutex> guard(mutex_);
-        const auto                        it = sessions_.find(token);
-        if (it == sessions_.end() || it->second.expiresAt <= nowSeconds()) return {};
-        return it->second.accessKey;
-    }
-
-    void close(const std::string& token) {
-        const std::lock_guard<std::mutex> guard(mutex_);
-        sessions_.erase(token);
-    }
-
-private:
-    struct Session {
-        std::string  accessKey;
-        std::int64_t expiresAt = 0;
-    };
-
-    /// Called on every login rather than on a timer: expired entries are only
-    /// a leak if logins keep happening, and if they do this collects them.
-    void sweep() {
-        const std::int64_t now = nowSeconds();
-        for (auto it = sessions_.begin(); it != sessions_.end();) {
-            it = it->second.expiresAt <= now ? sessions_.erase(it) : std::next(it);
-        }
-    }
-
-    mutable std::mutex                           mutex_;
-    std::unordered_map<std::string, Session>     sessions_;
-};
-
-class LoginThrottle {
-public:
-    bool blocked() {
-        const std::lock_guard<std::mutex> guard(mutex_);
-        roll();
-        return failures_ >= kMaxFailedLogins;
-    }
-
-    void recordFailure() {
-        const std::lock_guard<std::mutex> guard(mutex_);
-        roll();
-        ++failures_;
-    }
-
-    void recordSuccess() {
-        const std::lock_guard<std::mutex> guard(mutex_);
-        failures_ = 0;
-    }
-
-private:
-    void roll() {
-        const std::int64_t now = nowSeconds();
-        if (now - windowStart_ >= kLoginWindowSeconds) {
-            windowStart_ = now;
-            failures_    = 0;
-        }
-    }
-
-    std::mutex   mutex_;
-    std::int64_t windowStart_ = 0;
-    int          failures_    = 0;
-};
+/// One place that builds the session cookie, so a flag cannot be set on the
+/// login path and forgotten on the logout path — where dropping `Secure` would
+/// leave the browser holding a cookie the clear was never applied to.
+drogon::Cookie sessionCookie(std::string value, std::int64_t maxAge, bool secure) {
+    drogon::Cookie cookie(kSessionCookie, std::move(value));
+    cookie.setHttpOnly(true);
+    cookie.setPath("/");
+    cookie.setMaxAge(maxAge);
+    cookie.setSameSite(drogon::Cookie::SameSite::kStrict);
+    cookie.setSecure(secure);
+    return cookie;
+}
 
 /// Everything the handlers share, kept alive by the closures Drogon holds.
 struct ConsoleState {
@@ -225,6 +156,20 @@ nlohmann::json toJson(const BucketRecord& bucket) {
             {"durability", bucket.durability
                                ? nlohmann::json(std::string(toString(*bucket.durability)))
                                : nlohmann::json(nullptr)}};
+}
+
+/// A credential as the console may see it — which is everything except the
+/// secret. The secret is written into the create and rotate responses by hand,
+/// at the one moment it is allowed to travel, so that no later caller can
+/// produce it by accident through this function.
+nlohmann::json toJson(const AccessKeyRecord& key) {
+    return {{"accessKeyId", key.accessKeyId},
+            {"description", key.description},
+            {"createdAt", toIso8601(key.createdAt)},
+            {"createdAtMs", key.createdAt},
+            {"rotatedAt", key.rotatedAt > 0 ? nlohmann::json(toIso8601(key.rotatedAt))
+                                            : nlohmann::json(nullptr)},
+            {"rotatedAtMs", key.rotatedAt}};
 }
 
 nlohmann::json toJson(const CorsRule& rule) {
@@ -302,7 +247,7 @@ std::vector<CorsRule> corsRulesFrom(const nlohmann::json& value) {
 const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
     static const std::unordered_map<std::string, std::string> kNames{
         {"host", "MONOBUCKET_HOST"},
-        {"s3Port", "MONOBUCKET_S3_PORT"},
+        {"s3Port", "MONOBUCKET_PORT"},
         {"consolePort", "MONOBUCKET_CONSOLE_PORT"},
         {"consoleEnabled", "MONOBUCKET_CONSOLE_ENABLED"},
         {"dataDir", "MONOBUCKET_DATA_DIR"},
@@ -317,6 +262,7 @@ const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
         {"ioQueueLimit", "MONOBUCKET_IO_QUEUE_LIMIT"},
         {"rootAccessKey", "MONOBUCKET_ROOT_ACCESS_KEY"},
         {"rootSecretKey", "MONOBUCKET_ROOT_SECRET_KEY"},
+        {"adminUsername", "MONOBUCKET_ADMIN_USERNAME"},
         {"workerThreads", "MONOBUCKET_WORKER_THREADS"},
         {"maxBodyBytes", "MONOBUCKET_MAX_BODY_BYTES"},
         {"maxMemoryBodyBytes", "MONOBUCKET_MAX_MEMORY_BODY_BYTES"},
@@ -399,12 +345,12 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             callback(errorJson("not found", drogon::k404NotFound));
             return;
         }
-        const std::string accessKey = state->sessions.resolve(req->getCookie(kSessionCookie));
-        if (accessKey.empty()) {
+        const std::string username = state->sessions.resolve(req->getCookie(kSessionCookie));
+        if (username.empty()) {
             callback(errorJson("not signed in", drogon::k401Unauthorized));
             return;
         }
-        handler(accessKey);
+        handler(username);
     };
 
     // Storage work is posted rather than run inline for the same reason the S3
@@ -429,9 +375,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     // --- Session -----------------------------------------------------------
 
+    // Username and password, never an S3 access key. The two were the same
+    // thing until credentials became separable; they are not the same thing,
+    // and the console accepting a storage credential meant the only way to lock
+    // a person out was to break every program at the same time.
     app.registerHandler(
         "/_mb/api/login",
-        [&config, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
+        [&config, &io, &storage, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
             if (!onConsoleListener(req, config)) {
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
@@ -439,7 +389,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             if (state->throttle.blocked()) {
                 auto resp = errorJson("too many failed attempts, try again shortly",
                                       drogon::k429TooManyRequests);
-                resp->addHeader("Retry-After", "60");
+                resp->addHeader("Retry-After", std::to_string(kLoginWindowSeconds));
                 callback(resp);
                 return;
             }
@@ -450,34 +400,51 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 return;
             }
 
-            const auto accessKey = body.value("accessKey", std::string{});
-            const auto secretKey = body.value("secretKey", std::string{});
+            const auto username = body.value("username", std::string{});
+            const auto pass     = body.value("password", std::string{});
+            const bool secure   = secureCookieFor(config, req);
 
-            // Both halves are compared even when the access key is already
-            // wrong, so a valid key is not distinguishable by response time.
-            const bool keyOk    = secretsMatch(accessKey, config.rootAccessKey);
-            const bool secretOk = secretsMatch(secretKey, config.rootSecretKey);
-            if (!keyOk || !secretOk) {
-                state->throttle.recordFailure();
-                callback(errorJson("invalid credentials", drogon::k401Unauthorized));
-                return;
+            // Posted rather than run here for two reasons that happen to
+            // coincide: it reads the store, and the verifier is deliberately
+            // expensive — several hundred milliseconds of PBKDF2 on the event
+            // loop would stall every other console request behind one login.
+            const bool accepted = io.post([&storage, state, callback, username, pass, secure]() {
+                try {
+                    const auto admin = storage.getAdmin();
+
+                    // The verifier runs even when the name is wrong, against a
+                    // throwaway record that costs the same. Returning early
+                    // would make response time answer the question the error
+                    // text refuses to: whether that account exists.
+                    const bool nameOk = admin && secretsMatch(username, admin->username);
+                    const bool passOk = password::verify(
+                        pass, nameOk ? admin->passwordHash : password::dummyHash());
+
+                    if (!nameOk || !passOk) {
+                        state->throttle.recordFailure();
+                        // One message for every way this can fail. "No such
+                        // user" and "wrong password" are two answers to a
+                        // question nobody signing in legitimately has to ask.
+                        callback(errorJson("invalid username or password",
+                                           drogon::k401Unauthorized));
+                        return;
+                    }
+
+                    state->throttle.recordSuccess();
+                    auto resp = jsonResponse({{"username", admin->username},
+                                              {"expiresInSeconds", kSessionTtlSeconds}});
+                    resp->addCookie(sessionCookie(state->sessions.open(admin->username),
+                                                  kSessionTtlSeconds, secure));
+                    callback(resp);
+                } catch (const std::exception& error) {
+                    log::error("console login: ", error.what());
+                    callback(errorJson("internal error", drogon::k500InternalServerError));
+                }
+            });
+            if (!accepted) {
+                callback(errorJson("the storage queue is saturated",
+                                   drogon::k503ServiceUnavailable));
             }
-
-            state->throttle.recordSuccess();
-            auto resp = jsonResponse({{"accessKey", accessKey},
-                                      {"expiresInSeconds", kSessionTtlSeconds}});
-
-            // HttpOnly so a script bug cannot read the token, SameSite=Strict so
-            // another origin cannot ride the session. No Secure flag: the
-            // console is routinely served over plain HTTP on a private network,
-            // and a cookie the browser refuses to send is not a security win.
-            drogon::Cookie cookie(kSessionCookie, state->sessions.open(accessKey));
-            cookie.setHttpOnly(true);
-            cookie.setPath("/");
-            cookie.setMaxAge(kSessionTtlSeconds);
-            cookie.setSameSite(drogon::Cookie::SameSite::kStrict);
-            resp->addCookie(std::move(cookie));
-            callback(resp);
         },
         {drogon::Post});
 
@@ -488,15 +455,14 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
             }
+            // The token is dropped server-side first. Clearing the cookie is
+            // the browser's half and cannot be relied on: a copy of the token
+            // taken before sign-out has to stop working regardless of what the
+            // client does with its jar.
             state->sessions.close(req->getCookie(kSessionCookie));
 
-            auto           resp = jsonResponse({{"signedOut", true}});
-            drogon::Cookie cookie(kSessionCookie, "");
-            cookie.setHttpOnly(true);
-            cookie.setPath("/");
-            cookie.setMaxAge(0);
-            cookie.setSameSite(drogon::Cookie::SameSite::kStrict);
-            resp->addCookie(std::move(cookie));
+            auto resp = jsonResponse({{"signedOut", true}});
+            resp->addCookie(sessionCookie("", 0, secureCookieFor(config, req)));
             callback(resp);
         },
         {drogon::Post});
@@ -511,20 +477,134 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
             }
-            const std::string accessKey = state->sessions.resolve(req->getCookie(kSessionCookie));
+            const std::string username = state->sessions.resolve(req->getCookie(kSessionCookie));
             // The S3 port and domain travel with the session because the console
             // is served from a different port and cannot infer them. The host is
             // deliberately not included: `config.host` is usually 0.0.0.0, and
             // the name the browser used to reach us is the only one known to
             // work — so the client supplies that half.
-            callback(jsonResponse({{"authenticated", !accessKey.empty()},
-                                   {"accessKey", accessKey},
+            callback(jsonResponse({{"authenticated", !username.empty()},
+                                   {"username", username},
                                    {"usingDefaultCredentials", config.usingDefaultCredentials()},
                                    {"s3Port", config.s3Port},
                                    {"s3Domain", config.s3Domain},
                                    {"version", version::kVersion}}));
         },
         {drogon::Get});
+
+    // --- S3 credentials ----------------------------------------------------
+
+    // Issuing and revoking the keys the S3 listener verifies. A session is
+    // required to reach any of it, and none of it grants console access in
+    // return: the two directions stay independent, which is the point.
+
+    app.registerHandler(
+        "/_mb/api/credentials",
+        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+                const std::string method = req->getMethodString();
+
+                if (method == "GET") {
+                    offload(callback, [&storage]() -> HttpResponsePtr {
+                        nlohmann::json keys = nlohmann::json::array();
+                        for (const auto& key : storage.listAccessKeys()) {
+                            keys.push_back(toJson(key));
+                        }
+                        return jsonResponse({{"credentials", std::move(keys)}});
+                    });
+                    return;
+                }
+
+                if (method == "POST") {
+                    const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                    // A description is optional; a body is not required at all.
+                    if (!body.is_discarded() && !body.is_null() && !body.is_object()) {
+                        callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                        return;
+                    }
+                    std::string description =
+                        body.is_object() ? body.value("description", std::string{}) : std::string{};
+                    if (description.size() > kMaxDescriptionLength) {
+                        callback(errorJson("the description is too long", drogon::k400BadRequest));
+                        return;
+                    }
+
+                    offload(callback, [&storage, description]() -> HttpResponsePtr {
+                        AccessKeyRecord key;
+                        key.accessKeyId = credentials::generateAccessKeyId();
+                        key.secretKey   = credentials::generateSecretKey();
+                        key.description = description;
+                        key.createdAt   = nowMs();
+                        storage.putAccessKey(key);
+
+                        log::info("issued S3 access key ", key.accessKeyId);
+
+                        // The only response that carries a secret, and only
+                        // because it is the only moment it can be carried: the
+                        // console shows it once and the store is the sole other
+                        // copy. Every later read of this record omits it.
+                        nlohmann::json out = toJson(key);
+                        out["secretKey"]   = key.secretKey;
+                        return jsonResponse(out, drogon::k201Created);
+                    });
+                    return;
+                }
+
+                const std::string accessKeyId = req->getParameter("accessKeyId");
+                if (accessKeyId.empty()) {
+                    callback(errorJson("an access key id is required", drogon::k400BadRequest));
+                    return;
+                }
+                offload(callback, [&storage, accessKeyId]() -> HttpResponsePtr {
+                    if (!storage.deleteAccessKey(accessKeyId)) {
+                        return errorJson("no such access key", drogon::k404NotFound);
+                    }
+                    log::info("revoked S3 access key ", accessKeyId);
+                    // Nothing to invalidate elsewhere: the router resolves the
+                    // secret from the store on every signed request and holds
+                    // no copy, so the next one already fails.
+                    return jsonResponse({{"revoked", accessKeyId}});
+                });
+            });
+        },
+        {drogon::Get, drogon::Post, drogon::Delete});
+
+    app.registerHandler(
+        "/_mb/api/credentials/rotate",
+        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                const auto accessKeyId = body.value("accessKeyId", std::string{});
+                if (accessKeyId.empty()) {
+                    callback(errorJson("an access key id is required", drogon::k400BadRequest));
+                    return;
+                }
+
+                offload(callback, [&storage, accessKeyId]() -> HttpResponsePtr {
+                    auto key = storage.getAccessKey(accessKeyId);
+                    if (!key) return errorJson("no such access key", drogon::k404NotFound);
+
+                    // The id survives and the secret does not. Rotation exists
+                    // to make a leaked secret stop working, so it takes effect
+                    // immediately and breaks every client still holding the old
+                    // one — that is the operation, not a side effect of it.
+                    key->secretKey = credentials::generateSecretKey();
+                    key->rotatedAt = nowMs();
+                    storage.putAccessKey(*key);
+
+                    log::info("rotated the secret for S3 access key ", accessKeyId);
+
+                    nlohmann::json out = toJson(*key);
+                    out["secretKey"]   = key->secretKey;
+                    return jsonResponse(out);
+                });
+            });
+        },
+        {drogon::Post});
 
     // --- Overview ----------------------------------------------------------
 

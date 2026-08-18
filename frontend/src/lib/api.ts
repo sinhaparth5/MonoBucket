@@ -4,6 +4,10 @@
 // only with a session cookie. The browser never holds an S3 secret: the S3
 // listener speaks SigV4 and this one speaks sessions, and keeping them apart is
 // what lets console access be revoked without rotating storage credentials.
+//
+// The one exception proves it — a freshly minted or rotated credential is
+// returned once, to be shown once. It is never stored here and never fetched
+// again; `credentials()` answers without secrets by design.
 
 const BASE = '/_mb/api';
 
@@ -66,11 +70,31 @@ function safeParse(text: string): unknown {
 
 export interface Session {
 	authenticated: boolean;
-	accessKey: string;
+	/// The administrator signed in, never a credential. The console has no S3
+	/// access key to show, and that is the separation working rather than a
+	/// field that went missing.
+	username: string;
 	usingDefaultCredentials: boolean;
 	s3Port: number;
 	s3Domain: string;
 	version: string;
+}
+
+export interface Credential {
+	accessKeyId: string;
+	description: string;
+	createdAt: string;
+	createdAtMs: number;
+	/// Null until the secret has been replaced at least once.
+	rotatedAt: string | null;
+	rotatedAtMs: number;
+}
+
+/// What create and rotate answer with. The secret is present exactly here and
+/// nowhere else: no later read of the credential list returns it, so a page
+/// that navigates away has thrown it away.
+export interface IssuedCredential extends Credential {
+	secretKey: string;
 }
 
 export interface Overview {
@@ -262,10 +286,10 @@ export interface ListQuery {
 export const api = {
 	session: () => request<Session>('/session'),
 
-	login: (accessKey: string, secretKey: string) =>
-		request<{ accessKey: string; expiresInSeconds: number }>('/login', {
+	login: (username: string, password: string) =>
+		request<{ username: string; expiresInSeconds: number }>('/login', {
 			method: 'POST',
-			body: JSON.stringify({ accessKey, secretKey })
+			body: JSON.stringify({ username, password })
 		}),
 
 	logout: () => request<{ signedOut: boolean }>('/logout', { method: 'POST' }),
@@ -323,6 +347,26 @@ export const api = {
 		}),
 
 	config: () => request<ServerConfig>('/config'),
+
+	credentials: () =>
+		request<{ credentials: Credential[] }>('/credentials').then((r) => r.credentials),
+
+	createCredential: (description: string) =>
+		request<IssuedCredential>('/credentials', {
+			method: 'POST',
+			body: JSON.stringify({ description })
+		}),
+
+	rotateCredential: (accessKeyId: string) =>
+		request<IssuedCredential>('/credentials/rotate', {
+			method: 'POST',
+			body: JSON.stringify({ accessKeyId })
+		}),
+
+	revokeCredential: (accessKeyId: string) =>
+		request<{ revoked: string }>(`/credentials?accessKeyId=${encodeURIComponent(accessKeyId)}`, {
+			method: 'DELETE'
+		}),
 
 	objects: (query: ListQuery) => {
 		const params = new URLSearchParams({ bucket: query.bucket });

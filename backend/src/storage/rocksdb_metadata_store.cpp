@@ -38,6 +38,11 @@ constexpr std::uint8_t kRecordVersion = 1;
 /// array stays in one cache line group. Only ever held across a Get + Write.
 constexpr std::size_t kLockStripes = 64;
 
+/// The administrator lives at a fixed name in the meta keyspace. There is one
+/// account by design, so the name is a constant rather than part of the key —
+/// which also means a renamed administrator does not orphan the old record.
+constexpr std::string_view kAdminName = "admin";
+
 rocksdb::Slice toSlice(std::string_view view) { return {view.data(), view.size()}; }
 
 std::string_view toView(const rocksdb::Slice& slice) { return {slice.data(), slice.size()}; }
@@ -136,6 +141,53 @@ BucketRecord decodeBucket(std::string_view name, std::string_view stored) {
     }
 
     return bucket;
+}
+
+std::string encodeAdmin(const AdminRecord& admin) {
+    std::string   out;
+    codec::Writer writer(out);
+    writer.u8(kRecordVersion);
+    writer.string(admin.username);
+    writer.string(admin.passwordHash);
+    writer.varint(static_cast<std::uint64_t>(admin.createdAt));
+    writer.varint(static_cast<std::uint64_t>(admin.updatedAt));
+    return out;
+}
+
+AdminRecord decodeAdmin(std::string_view stored) {
+    codec::Reader reader(stored);
+    expectVersion(reader, "administrator");
+
+    AdminRecord admin;
+    admin.username     = reader.string();
+    admin.passwordHash = reader.string();
+    admin.createdAt    = static_cast<TimestampMs>(reader.varint());
+    admin.updatedAt    = static_cast<TimestampMs>(reader.varint());
+    return admin;
+}
+
+std::string encodeAccessKey(const AccessKeyRecord& key) {
+    std::string   out;
+    codec::Writer writer(out);
+    writer.u8(kRecordVersion);
+    writer.string(key.secretKey);
+    writer.string(key.description);
+    writer.varint(static_cast<std::uint64_t>(key.createdAt));
+    writer.varint(static_cast<std::uint64_t>(key.rotatedAt));
+    return out;
+}
+
+AccessKeyRecord decodeAccessKey(std::string_view accessKeyId, std::string_view stored) {
+    codec::Reader reader(stored);
+    expectVersion(reader, "access key");
+
+    AccessKeyRecord key;
+    key.accessKeyId = std::string(accessKeyId);
+    key.secretKey   = reader.string();
+    key.description = reader.string();
+    key.createdAt   = static_cast<TimestampMs>(reader.varint());
+    key.rotatedAt   = static_cast<TimestampMs>(reader.varint());
+    return key;
 }
 
 std::string encodeObject(const ObjectRecord& object) {
@@ -312,6 +364,70 @@ public:
         }
         check(db_->Put(writeOptions_, toSlice(keys::bucket(bucket.name)), toSlice(encodeBucket(bucket))),
               "updating bucket '" + bucket.name + "'");
+    }
+
+    // --- Identity ----------------------------------------------------------
+
+    std::optional<AdminRecord> getAdmin() override {
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::meta(kAdminName)), &stored);
+        if (status.IsNotFound()) return std::nullopt;
+        check(status, "reading the administrator record");
+        return decodeAdmin(stored);
+    }
+
+    void putAdmin(const AdminRecord& admin) override {
+        check(db_->Put(durableWrite(), toSlice(keys::meta(kAdminName)),
+                       toSlice(encodeAdmin(admin))),
+              "writing the administrator record");
+    }
+
+    std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId) override {
+        if (accessKeyId.empty()) return std::nullopt;
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::accessKey(accessKeyId)), &stored);
+        if (status.IsNotFound()) return std::nullopt;
+        check(status, "reading an access key");
+        return decodeAccessKey(accessKeyId, stored);
+    }
+
+    std::vector<AccessKeyRecord> listAccessKeys() override {
+        std::vector<AccessKeyRecord> keys;
+        const std::string            prefix = keys::accessKeyPrefix();
+        const auto                   bound  = keys::upperBound(prefix);
+
+        rocksdb::ReadOptions read = readOptions_;
+        rocksdb::Slice       boundSlice;
+        if (bound) {
+            boundSlice               = toSlice(*bound);
+            read.iterate_upper_bound = &boundSlice;
+        }
+
+        std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(read));
+        for (it->Seek(toSlice(prefix)); it->Valid(); it->Next()) {
+            const auto stored = toView(it->key());
+            if (!stored.starts_with(prefix)) break;
+            keys.push_back(decodeAccessKey(stored.substr(prefix.size()), toView(it->value())));
+        }
+        check(it->status(), "listing access keys");
+        return keys;
+    }
+
+    void putAccessKey(const AccessKeyRecord& key) override {
+        check(db_->Put(durableWrite(), toSlice(keys::accessKey(key.accessKeyId)),
+                       toSlice(encodeAccessKey(key))),
+              "writing access key '" + key.accessKeyId + "'");
+    }
+
+    bool deleteAccessKey(std::string_view accessKeyId) override {
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::accessKey(accessKeyId)), &stored);
+        if (status.IsNotFound()) return false;
+        check(status, "reading an access key");
+
+        check(db_->Delete(durableWrite(), toSlice(keys::accessKey(accessKeyId))),
+              "revoking access key '" + std::string(accessKeyId) + "'");
+        return true;
     }
 
     // --- Objects -----------------------------------------------------------
@@ -985,6 +1101,10 @@ private:
     /// Write options for a call that knows which bucket it belongs to. Only
     /// Strict pays for the log sync; the store-level default covers everything
     /// that has no bucket to ask.
+    /// Credential writes never negotiate durability with the server setting.
+    /// See the note on MetadataStore's identity section.
+    rocksdb::WriteOptions durableWrite() const { return writeOptionsFor(Durability::Strict); }
+
     rocksdb::WriteOptions writeOptionsFor(Durability durability) const {
         rocksdb::WriteOptions options = writeOptions_;
         options.sync                  = durability == Durability::Strict;

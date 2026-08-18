@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <thread>
 
@@ -12,6 +13,7 @@
 // quietly running without the cache the operator asked for.
 #include "cache/redis_url.hpp"
 #include "core/env.hpp"
+#include "core/password.hpp"
 #include "monobucket/constants.hpp"
 
 namespace monobucket {
@@ -36,6 +38,44 @@ std::string redact(const std::string& secret) {
     if (secret.size() <= 4) return "****";
     return secret.substr(0, 2) + std::string(secret.size() - 4, '*') +
            secret.substr(secret.size() - 2);
+}
+
+/// Reads the administrator password from the environment, or from the file a
+/// `_FILE` variable points at.
+///
+/// The file form is what Docker and Kubernetes secrets deliver, and it is the
+/// one worth preferring: a value in `MONOBUCKET_ADMIN_PASSWORD` is visible in
+/// `docker inspect`, in `/proc/<pid>/environ`, and in the shell history of
+/// whoever started it. Both are supported, and setting both is an error rather
+/// than a silent precedence rule.
+std::string readAdminPassword() {
+    const auto inline_ = env::lookup("MONOBUCKET_ADMIN_PASSWORD");
+    const auto path    = env::lookup("MONOBUCKET_ADMIN_PASSWORD_FILE");
+
+    if (inline_ && path) {
+        throw ConfigError(
+            "set either MONOBUCKET_ADMIN_PASSWORD or MONOBUCKET_ADMIN_PASSWORD_FILE, not both");
+    }
+    if (inline_) return *inline_;
+    if (!path) return {};
+
+    std::ifstream file(*path, std::ios::binary);
+    if (!file) {
+        throw ConfigError("cannot read MONOBUCKET_ADMIN_PASSWORD_FILE '" + *path + "'");
+    }
+    std::string contents((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+
+    // A trailing newline is what every `echo secret > file` produces and is
+    // never part of the password. Nothing else is trimmed: leading spaces are
+    // as legitimate in a password as any other character.
+    while (!contents.empty() && (contents.back() == '\n' || contents.back() == '\r')) {
+        contents.pop_back();
+    }
+    if (contents.empty()) {
+        throw ConfigError("MONOBUCKET_ADMIN_PASSWORD_FILE '" + *path + "' is empty");
+    }
+    return contents;
 }
 
 std::uint16_t port(std::string_view name, std::uint16_t fallback) {
@@ -93,6 +133,22 @@ Config Config::fromEnvironment() {
 
     cfg.rootAccessKey = env::string("MONOBUCKET_ROOT_ACCESS_KEY", "");
     cfg.rootSecretKey = env::string("MONOBUCKET_ROOT_SECRET_KEY", "");
+
+    cfg.adminUsername = env::string("MONOBUCKET_ADMIN_USERNAME", cfg.adminUsername);
+    cfg.adminPassword = readAdminPassword();
+
+    const std::string cookieSecure = env::string("MONOBUCKET_CONSOLE_COOKIE_SECURE", "auto");
+    if (cookieSecure == "auto") {
+        cfg.consoleCookieSecure = CookieSecurity::Auto;
+    } else if (cookieSecure == "true" || cookieSecure == "always") {
+        cfg.consoleCookieSecure = CookieSecurity::Always;
+    } else if (cookieSecure == "false" || cookieSecure == "never") {
+        cfg.consoleCookieSecure = CookieSecurity::Never;
+    } else {
+        throw ConfigError(
+            "MONOBUCKET_CONSOLE_COOKIE_SECURE must be 'auto', 'true' or 'false', got '" +
+            cookieSecure + "'");
+    }
 
     cfg.workerThreads = static_cast<unsigned>(env::number("MONOBUCKET_WORKER_THREADS", 0));
     cfg.maxBodyBytes  = env::bytes("MONOBUCKET_MAX_BODY_BYTES", cfg.maxBodyBytes);
@@ -182,6 +238,29 @@ void Config::validate() const {
     }
     if (rootAccessKey.size() < 3) {
         throw ConfigError("MONOBUCKET_ROOT_ACCESS_KEY must be at least 3 characters");
+    }
+
+    if (adminUsername.empty() || adminUsername.size() > 64) {
+        throw ConfigError("MONOBUCKET_ADMIN_USERNAME must be between 1 and 64 characters");
+    }
+    if (!std::all_of(adminUsername.begin(), adminUsername.end(), [](const unsigned char ch) {
+            return std::isalnum(ch) != 0 || ch == '.' || ch == '-' || ch == '_' || ch == '@';
+        })) {
+        throw ConfigError(
+            "MONOBUCKET_ADMIN_USERNAME may contain letters, digits, and . - _ @ only, got '" +
+            adminUsername + "'");
+    }
+
+    // Checked only when a password was supplied: an empty one means "keep what
+    // is already provisioned", and startup — which can see the store — is where
+    // that is judged. Length only, no composition rule: a rule that rejects
+    // `correct horse battery staple` while accepting `Passw0rd!` is measuring
+    // the wrong thing.
+    if (!adminPassword.empty() && adminPassword.size() < password::kMinimumLength) {
+        throw ConfigError("the administrator password must be at least " +
+                          std::to_string(password::kMinimumLength) +
+                          " characters (set MONOBUCKET_ADMIN_PASSWORD or "
+                          "MONOBUCKET_ADMIN_PASSWORD_FILE)");
     }
 
     if (streamChunkBytes < 4096) {
@@ -291,6 +370,7 @@ std::string Config::summary() const {
        << "  redis            : " << redisSummary << '\n'
        << "  root access key  : " << rootAccessKey << '\n'
        << "  root secret key  : " << redact(rootSecretKey) << '\n'
+       << "  admin username   : " << adminUsername << '\n'
        << "  log level        : " << logLevel;
     return os.str();
 }
@@ -313,6 +393,10 @@ nlohmann::json Config::toJson() const {
         {"ioQueueLimit", ioQueueLimit},
         {"rootAccessKey", rootAccessKey},
         {"rootSecretKey", redact(rootSecretKey)},
+        // The administrator's name, and deliberately nothing about the
+        // password — not its length, not a redacted form, not whether one was
+        // supplied at boot. This is rendered in a browser.
+        {"adminUsername", adminUsername},
         {"workerThreads", workerThreads},
         {"maxBodyBytes", maxBodyBytes},
         {"maxMemoryBodyBytes", maxMemoryBodyBytes},

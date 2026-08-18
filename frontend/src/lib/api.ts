@@ -109,6 +109,10 @@ export interface Session {
 	usingDefaultCredentials: boolean;
 	s3Port: number;
 	s3Domain: string;
+	/// The origin S3 clients reach this deployment at, when an operator stated
+	/// one. Empty means the console falls back to its own hostname and
+	/// `s3Port`, which is only correct without a proxy in front.
+	s3PublicUrl: string;
 	version: string;
 }
 

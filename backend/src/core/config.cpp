@@ -108,6 +108,7 @@ Config Config::fromEnvironment() {
     cfg.dataDir = env::string("MONOBUCKET_DATA_DIR", cfg.dataDir);
     cfg.region  = env::string("MONOBUCKET_REGION", cfg.region);
     cfg.s3Domain = env::string("MONOBUCKET_S3_DOMAIN", cfg.s3Domain);
+    cfg.s3PublicUrl = env::string("MONOBUCKET_S3_PUBLIC_URL", cfg.s3PublicUrl);
 
     const std::string durability =
         env::string("MONOBUCKET_DURABILITY", std::string(toString(cfg.durability)));
@@ -232,6 +233,34 @@ void Config::validate() const {
         throw ConfigError(
             "MONOBUCKET_S3_DOMAIN must be a bare host name such as 's3.example.com', got '" +
             s3Domain + "'");
+    }
+
+    // Validated here rather than trusted, because a malformed value does not
+    // fail loudly: it becomes the host inside a signature, and the only symptom
+    // is SignatureDoesNotMatch on a link that was already handed to somebody.
+    if (!s3PublicUrl.empty()) {
+        const bool https = s3PublicUrl.rfind("https://", 0) == 0;
+        const bool http  = s3PublicUrl.rfind("http://", 0) == 0;
+        if (!https && !http) {
+            throw ConfigError(
+                "MONOBUCKET_S3_PUBLIC_URL must start with http:// or https://, got '" +
+                s3PublicUrl + "'");
+        }
+
+        const std::string authority = s3PublicUrl.substr(https ? 8 : 7);
+        if (authority.empty()) {
+            throw ConfigError("MONOBUCKET_S3_PUBLIC_URL names no host");
+        }
+        // A path component would be silently dropped from the signed URI and
+        // silently kept in the link, so the two would disagree.
+        if (authority.find('/') != std::string::npos ||
+            authority.find('?') != std::string::npos ||
+            authority.find('#') != std::string::npos) {
+            throw ConfigError(
+                "MONOBUCKET_S3_PUBLIC_URL must be an origin with no path, such as "
+                "'https://s3.example.com', got '" +
+                s3PublicUrl + "'");
+        }
     }
 
     if (dataDir.empty()) throw ConfigError("MONOBUCKET_DATA_DIR must not be empty");
@@ -404,6 +433,7 @@ nlohmann::json Config::toJson() const {
         {"dataDir", dataDir},
         {"region", region},
         {"s3Domain", s3Domain},
+        {"s3PublicUrl", s3PublicUrl},
         {"durability", std::string(toString(durability))},
         {"metadataMemoryBytes", metadataMemoryBytes},
         {"metadataMaxOpenFiles", metadataMaxOpenFiles},

@@ -98,7 +98,30 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The console built S3 links against its own hostname**, gluing it to
+  `MONOBUCKET_PORT` — behind a reverse proxy that is an address which exists
+  nowhere (`https://console.example.com:9000/...`). The same string was signed
+  as the host of every presigned URL, so correcting the link by hand then
+  failed with `SignatureDoesNotMatch`: SigV4 covers the host, and the one that
+  was signed was never the one the request arrived at.
+
+### Added
+
+- `MONOBUCKET_S3_PUBLIC_URL` — the origin S3 clients reach this deployment at,
+  as a full origin (`https://s3.example.com`). Only the console reads it, to
+  write object links and to sign presigned URLs. Behind a proxy the browser
+  cannot derive it: the console is served from a different hostname on a
+  different port, and `MONOBUCKET_HOST` is `0.0.0.0`. Unset, the previous
+  behaviour is kept, which is correct for a deployment clients reach directly.
+- `deploy/` — a compose file and environment template for running behind a
+  TLS-terminating reverse proxy, with both listeners bound to loopback.
+
+### Compatibility
+
+- Nothing changes for a deployment without `MONOBUCKET_S3_PUBLIC_URL` set.
+- The console session payload gains `s3PublicUrl`; it is empty when unset.
 
 ---
 

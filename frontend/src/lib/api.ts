@@ -23,6 +23,13 @@ export class ApiError extends Error {
 	get unauthorized(): boolean {
 		return this.status === 401;
 	}
+
+	/// Signed in, but not entitled. Distinct from `unauthorized` because the
+	/// responses differ: a 401 belongs on the login page and a 403 belongs
+	/// where the reader already is, with the reason.
+	get forbidden(): boolean {
+		return this.status === 403;
+	}
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -68,21 +75,92 @@ function safeParse(text: string): unknown {
 
 // --- Shapes ----------------------------------------------------------------
 
+/// The three roles the server defines. Kept as a union rather than a string so
+/// a typo in a comparison is a compile error instead of a control that never
+/// appears.
+export type RoleName = 'administrator' | 'operator' | 'readonly';
+
+/// Permission identifiers as the server spells them. The console uses these to
+/// decide what to render; the server decides what to allow. A page that shows a
+/// button it should not is a cosmetic bug, and a page that hides one is a
+/// courtesy — neither is the enforcement.
+export type PermissionName =
+	| 'bucket:read'
+	| 'bucket:write'
+	| 'object:read'
+	| 'object:write'
+	| 'settings:read'
+	| 'credential:read'
+	| 'credential:write'
+	| 'user:read'
+	| 'user:write'
+	| 'audit:read';
+
 export interface Session {
 	authenticated: boolean;
-	/// The administrator signed in, never a credential. The console has no S3
-	/// access key to show, and that is the separation working rather than a
-	/// field that went missing.
+	/// The person signed in, never a credential. The console has no S3 access
+	/// key to show, and that is the separation working rather than a field that
+	/// went missing.
 	username: string;
+	role: RoleName;
+	/// What this session may do. Empty when signed out.
+	permissions: PermissionName[];
 	usingDefaultCredentials: boolean;
 	s3Port: number;
 	s3Domain: string;
 	version: string;
 }
 
+/// True when the session holds every permission listed.
+export function can(
+	session: { permissions: readonly PermissionName[] } | null | undefined,
+	...needed: PermissionName[]
+): boolean {
+	if (!session) return false;
+	return needed.every((permission) => session.permissions.includes(permission));
+}
+
+export interface User {
+	username: string;
+	role: RoleName;
+	disabled: boolean;
+	createdAt: string;
+	createdAtMs: number;
+	updatedAt: string;
+	updatedAtMs: number;
+	/// Null on an account whose password has never been replaced.
+	passwordChangedAt: string | null;
+	passwordChangedAtMs: number;
+}
+
+/// The catalogue the server ships alongside the user list, so the role picker
+/// can only ever offer roles this build actually has.
+export interface RoleInfo {
+	name: RoleName;
+	description: string;
+	permissions: PermissionName[];
+}
+
+export interface AuditEntry {
+	sequence: number;
+	at: string;
+	atMs: number;
+	/// Empty when the request never got as far as naming an identity.
+	actor: string;
+	/// A dotted verb: `user.create`, `credential.revoke`, `authz.denied`.
+	action: string;
+	target: string;
+	/// False for a refusal, which is the half of the log worth reading.
+	allowed: boolean;
+	detail: string;
+}
+
 export interface Credential {
 	accessKeyId: string;
 	description: string;
+	/// The account the key acts as. A signed request never exceeds what this
+	/// user may do, and disabling them stops the key on its next request.
+	owner: string;
 	createdAt: string;
 	createdAtMs: number;
 	/// Null until the secret has been replaced at least once.
@@ -287,7 +365,12 @@ export const api = {
 	session: () => request<Session>('/session'),
 
 	login: (username: string, password: string) =>
-		request<{ username: string; expiresInSeconds: number }>('/login', {
+		request<{
+			username: string;
+			role: RoleName;
+			permissions: PermissionName[];
+			expiresInSeconds: number;
+		}>('/login', {
 			method: 'POST',
 			body: JSON.stringify({ username, password })
 		}),
@@ -367,6 +450,43 @@ export const api = {
 		request<{ revoked: string }>(`/credentials?accessKeyId=${encodeURIComponent(accessKeyId)}`, {
 			method: 'DELETE'
 		}),
+
+	users: () => request<{ users: User[]; roles: RoleInfo[] }>('/users'),
+
+	createUser: (username: string, password: string, role: RoleName) =>
+		request<User>('/users', {
+			method: 'POST',
+			body: JSON.stringify({ username, password, role })
+		}),
+
+	/// Role and status only. A password goes through `setPassword`, because who
+	/// may change one and what they have to present first are different there.
+	updateUser: (username: string, changes: { role?: RoleName; disabled?: boolean }) =>
+		request<User & { endedSessions: number }>('/users', {
+			method: 'PATCH',
+			body: JSON.stringify({ username, ...changes })
+		}),
+
+	deleteUser: (username: string) =>
+		request<{ deleted: string; revokedCredentials: number; endedSessions: number }>(
+			`/users?username=${encodeURIComponent(username)}`,
+			{ method: 'DELETE' }
+		),
+
+	/// Omit `username` to change your own, which requires the current password
+	/// and hands back a fresh session cookie. Pass one to reset somebody else's,
+	/// which requires `user:write` and does not ask for theirs.
+	setPassword: (
+		newPassword: string,
+		options: { username?: string; currentPassword?: string } = {}
+	) =>
+		request<{ username: string; endedSessions: number }>('/users/password', {
+			method: 'POST',
+			body: JSON.stringify({ newPassword, ...options })
+		}),
+
+	audit: (limit = 200) =>
+		request<{ entries: AuditEntry[]; capacity: number }>(`/audit?limit=${limit}`),
 
 	objects: (query: ListQuery) => {
 		const params = new URLSearchParams({ bucket: query.bucket });

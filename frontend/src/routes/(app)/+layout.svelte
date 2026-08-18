@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { fly, scale } from 'svelte/transition';
-	import { api } from '$lib/api';
+	import { api, can, type PermissionName } from '$lib/api';
 	import { motionDistance, motionDuration } from '$lib/motion';
 	import { theme, type ThemeChoice } from '$lib/theme.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
@@ -16,22 +16,62 @@
 	// `as const` so each href stays a literal: `resolve()` is typed against the
 	// route table, and a widened `string` would take the whole nav out of that
 	// check — which is the check that catches a route renamed out from under it.
+	// Each entry names the permission that reaches it. The server checks the same
+	// permission on every route behind these links, so leaving one in for
+	// somebody who cannot use it would only produce a 403 they had to click to
+	// find — the filter is the courtesy, never the enforcement.
 	const NAV = [
-		{ href: '/', label: 'Overview', icon: 'overview', hint: 'Live traffic, memory and capacity' },
+		{
+			href: '/',
+			label: 'Overview',
+			icon: 'overview',
+			hint: 'Live traffic, memory and capacity',
+			needs: 'settings:read'
+		},
 		{
 			href: '/buckets',
 			label: 'Buckets',
 			icon: 'bucket',
-			hint: 'Browse, upload and share objects'
+			hint: 'Browse, upload and share objects',
+			needs: 'bucket:read'
 		},
 		{
 			href: '/credentials',
 			label: 'Access keys',
 			icon: 'key',
-			hint: 'Issue, rotate and revoke S3 credentials'
+			hint: 'Issue, rotate and revoke S3 credentials',
+			needs: 'credential:read'
 		},
-		{ href: '/settings', label: 'Settings', icon: 'settings', hint: 'The resolved configuration' }
-	] as const satisfies readonly { href: string; label: string; icon: IconName; hint: string }[];
+		{
+			href: '/users',
+			label: 'Users',
+			icon: 'users',
+			hint: 'Accounts, roles and password resets',
+			needs: 'user:read'
+		},
+		{
+			href: '/activity',
+			label: 'Activity',
+			icon: 'activity',
+			hint: 'Sign-ins, changes and refused requests',
+			needs: 'audit:read'
+		},
+		{
+			href: '/settings',
+			label: 'Settings',
+			icon: 'settings',
+			hint: 'The resolved configuration',
+			needs: 'settings:read'
+		}
+	] as const satisfies readonly {
+		href: string;
+		label: string;
+		icon: IconName;
+		hint: string;
+		needs: PermissionName;
+	}[];
+
+	const visibleNav = $derived(NAV.filter((item) => can(data.session, item.needs)));
 
 	const currentNav = $derived(
 		NAV.find((item) =>
@@ -145,8 +185,13 @@
 
 				<div class="divider divider-horizontal mx-0 hidden h-5 self-center sm:flex"></div>
 
-				<span class="text-base-content/55 hidden max-w-40 truncate text-xs md:inline">
-					{data.session.username}
+				<span class="hidden max-w-48 flex-col items-end leading-tight md:flex">
+					<span class="text-base-content/70 max-w-48 truncate text-xs font-medium">
+						{data.session.username}
+					</span>
+					<span class="text-base-content/45 text-[0.65rem] tracking-wide uppercase">
+						{data.session.role}
+					</span>
 				</span>
 
 				<button
@@ -194,7 +239,7 @@
 
 			<div class="eyebrow px-5 pt-6 pb-2">Workspace</div>
 			<ul class="menu w-full grow gap-1 px-3 py-1">
-				{#each NAV as item (item.href)}
+				{#each visibleNav as item (item.href)}
 					<li>
 						<a
 							href={resolve(item.href)}

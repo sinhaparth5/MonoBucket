@@ -10,6 +10,7 @@
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "core/credentials.hpp"
+#include "core/identity.hpp"
 #include "core/io_executor.hpp"
 #include "core/logging.hpp"
 #include "s3/cors.hpp"
@@ -68,11 +69,53 @@ SigningRequest toSigningRequest(const HttpRequestPtr& request) {
     return signing;
 }
 
+/// Who a verified signature belongs to.
+///
+/// The role, not the record: everything past authentication needs to know what
+/// this request may do, and nothing past it needs the secret again.
+struct SignedIdentity {
+    Role        role = Role::ReadOnly;
+    std::string username;  ///< Empty for the root pair, which is not a user.
+};
+
 /// Anonymous access is allowed only where a bucket policy or ACL says so, and
-/// only for operations that cannot change anything.
+/// only for operations that cannot change anything. A signed request is
+/// allowed what the role of the identity behind its access key allows.
 void authorize(const S3Context& context, const S3Request& request, Operation operation,
-               const AuthOutcome& auth) {
-    if (!auth.anonymous) return;
+               const AuthOutcome& auth, const std::optional<SignedIdentity>& identity) {
+    if (!auth.anonymous) {
+        // Reached only when the key verified but named an identity that could
+        // not be resolved — deleted, disabled, or a key written before keys had
+        // owners that startup somehow did not adopt. AccessDenied rather than
+        // InvalidAccessKeyId, because the key is genuine and the refusal is
+        // about who holds it.
+        if (!identity) throw S3Exception(S3ErrorCode::AccessDenied);
+
+        const Permission needed = permissionFor(operation);
+        if (allows(identity->role, needed)) return;
+
+        // Recorded, unlike a signature failure. Reaching here means a valid
+        // credential was presented, so the entries are bounded by who holds a
+        // key rather than by who can open a socket — which is what makes it
+        // safe to write them to a log an unauthenticated client could otherwise
+        // flood.
+        try {
+            AuditRecord entry;
+            entry.atMs    = nowMs();
+            entry.actor   = identity->username;
+            entry.action  = "authz.denied";
+            entry.target  = request.resource;
+            entry.allowed = false;
+            entry.detail  = std::string(toString(needed)) + " required for " +
+                           std::string(toString(operation)) + ", " +
+                           std::string(toString(identity->role)) + " has it not";
+            context.storage.appendAudit(entry);
+        } catch (const std::exception& error) {
+            log::warn("could not record an S3 authorisation refusal: ", error.what());
+        }
+
+        throw S3Exception(S3ErrorCode::AccessDenied);
+    }
 
     if (!isReadOnly(operation)) throw S3Exception(S3ErrorCode::AccessDenied);
 
@@ -178,19 +221,50 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
         // This is a RocksDB point lookup per signed request. It is on the I/O
         // thread the whole request already runs on, and it is not cached: a
         // cached secret is a revocation that has not happened yet.
+        //
+        // The record the resolver found is kept, because the request needs it
+        // twice: once for the secret, and again for the identity that decides
+        // what the request may do. The alternative is a second point lookup for
+        // a row that was just read.
+        std::optional<AccessKeyRecord> resolved;
+        bool                           usedRootPair = false;
+
         const auto resolveCredential =
-            [&context](std::string_view accessKeyId) -> std::optional<std::string> {
+            [&context, &resolved, &usedRootPair](
+                std::string_view accessKeyId) -> std::optional<std::string> {
             if (secureEquals(accessKeyId, context.config.rootAccessKey)) {
+                usedRootPair = true;
                 return context.config.rootSecretKey;
             }
             if (!credentials::plausibleAccessKeyId(accessKeyId)) return std::nullopt;
-            const auto record = context.storage.getAccessKey(accessKeyId);
+            auto record = context.storage.getAccessKey(accessKeyId);
             if (!record) return std::nullopt;
-            return record->secretKey;
+
+            const std::string secret = record->secretKey;
+            resolved                 = std::move(record);
+            return secret;
         };
 
         const AuthOutcome auth =
             authenticate(toSigningRequest(http), request.query, resolveCredential, options);
+
+        // The root pair is not a user and has no record to disable. It stays
+        // administrator-equivalent because it comes from the environment, and
+        // an environment variable is not something the console can revoke — it
+        // is the break-glass credential, and it is documented as one.
+        std::optional<SignedIdentity> identity;
+        if (usedRootPair) {
+            identity = SignedIdentity{Role::Administrator, {}};
+        } else if (resolved && !resolved->owner.empty()) {
+            // Read on every signed request rather than cached alongside the
+            // key, for the same reason the secret is not cached: a role change
+            // or a disabled account that only took effect at the next restart
+            // is a revocation that has not happened.
+            if (const auto owner = context.storage.getUser(resolved->owner);
+                owner && !owner->disabled) {
+                identity = SignedIdentity{owner->role, owner->username};
+            }
+        }
 
         if (!auth.method.empty()) request.method = auth.method;
 
@@ -201,7 +275,7 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
                               "The '" + unsupported + "' subresource is not implemented.");
         }
 
-        authorize(context, request, operation, auth);
+        authorize(context, request, operation, auth, identity);
 
         const S3Body body(http->getBody(), auth, http->getHeader("content-encoding"),
                           headerAsUnsigned(http, "x-amz-decoded-content-length"));

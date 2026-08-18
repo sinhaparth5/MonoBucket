@@ -15,6 +15,7 @@
 
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
+#include "core/identity.hpp"
 #include "core/io_executor.hpp"
 #include "core/credentials.hpp"
 #include "core/logging.hpp"
@@ -158,6 +159,56 @@ nlohmann::json toJson(const BucketRecord& bucket) {
                                : nlohmann::json(nullptr)}};
 }
 
+nlohmann::json toJson(const UserRecord& user) {
+    // No password field of any kind — not the verifier, not its parameters.
+    // The console never has a reason to see one, and a field that is only ever
+    // ignored is a field a later handler can start rendering by accident.
+    return {{"username", user.username},
+            {"role", std::string(toString(user.role))},
+            {"disabled", user.disabled},
+            {"createdAt", toIso8601(user.createdAt)},
+            {"createdAtMs", user.createdAt},
+            {"updatedAt", toIso8601(user.updatedAt)},
+            {"updatedAtMs", user.updatedAt},
+            {"passwordChangedAt", user.passwordChangedAt > 0
+                                      ? nlohmann::json(toIso8601(user.passwordChangedAt))
+                                      : nlohmann::json(nullptr)},
+            {"passwordChangedAtMs", user.passwordChangedAt}};
+}
+
+nlohmann::json toJson(const AuditRecord& entry) {
+    return {{"sequence", entry.sequence},
+            {"at", toIso8601(entry.atMs)},
+            {"atMs", entry.atMs},
+            {"actor", entry.actor},
+            {"action", entry.action},
+            {"target", entry.target},
+            {"allowed", entry.allowed},
+            {"detail", entry.detail}};
+}
+
+/// The permission list a role holds, as the console renders it.
+nlohmann::json permissionsJson(Role role) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const Permission permission : permissionsFor(role)) {
+        out.push_back(std::string(toString(permission)));
+    }
+    return out;
+}
+
+/// The one refusal shape for "signed in, but not allowed".
+///
+/// Identical for every route and every role, and it names the permission rather
+/// than the role: an operator told "you need user:write" knows what to ask for,
+/// whereas one told "administrators only" has learned something about the role
+/// list instead of about their own request.
+HttpResponsePtr forbidden(Permission permission) {
+    return jsonResponse({{"error", "this account is not permitted to " +
+                                       std::string(toString(permission))},
+                         {"requiredPermission", std::string(toString(permission))}},
+                        drogon::k403Forbidden);
+}
+
 /// A credential as the console may see it — which is everything except the
 /// secret. The secret is written into the create and rotate responses by hand,
 /// at the one moment it is allowed to travel, so that no later caller can
@@ -165,6 +216,7 @@ nlohmann::json toJson(const BucketRecord& bucket) {
 nlohmann::json toJson(const AccessKeyRecord& key) {
     return {{"accessKeyId", key.accessKeyId},
             {"description", key.description},
+            {"owner", key.owner},
             {"createdAt", toIso8601(key.createdAt)},
             {"createdAtMs", key.createdAt},
             {"rotatedAt", key.rotatedAt > 0 ? nlohmann::json(toIso8601(key.rotatedAt))
@@ -336,21 +388,67 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     // --- Plumbing ----------------------------------------------------------
 
-    // Every console route shares the same three gates, in this order: it must
-    // have arrived on the console listener, it must carry a live session, and
-    // whatever it does to storage must happen on an I/O thread.
-    const auto guard = [&config, state](const HttpRequestPtr& req, const ResponseCallback& callback,
-                                        const std::function<void(const std::string&)>& handler) {
+    // Writes one security event.
+    //
+    // Posted to an I/O thread because the log is a RocksDB record and the
+    // callers are on the event loop. A saturated queue drops the entry rather
+    // than blocking or failing the request it describes: the log is a record of
+    // what happened, and refusing a legitimate sign-in because the log was busy
+    // would make it a participant instead. Losses are bounded by the same queue
+    // limit that sheds S3 load, and the log says so by being a ring.
+    const auto audit = [&storage, &io](std::string actor, std::string action, std::string target,
+                                       bool allowed, std::string detail) {
+        AuditRecord entry;
+        entry.atMs    = nowMs();
+        entry.actor   = std::move(actor);
+        entry.action  = std::move(action);
+        entry.target  = std::move(target);
+        entry.allowed = allowed;
+        entry.detail  = std::move(detail);
+
+        io.post([&storage, entry = std::move(entry)]() {
+            try {
+                storage.appendAudit(entry);
+            } catch (const std::exception& error) {
+                log::warn("could not record the audit entry '", entry.action, "': ", error.what());
+            }
+        });
+    };
+
+    // Every console route shares the same four gates, in this order: it must
+    // have arrived on the console listener, it must carry a live session, that
+    // session's role must hold the permission the route names, and whatever it
+    // does to storage must happen on an I/O thread.
+    //
+    // The permission is a parameter rather than something the handler checks
+    // for itself, so that "which routes are protected" is answerable by reading
+    // the registrations rather than by reading every handler body. A route that
+    // forgets it does not compile.
+    const auto guard = [&config, state, audit](
+                           const HttpRequestPtr& req, const ResponseCallback& callback,
+                           Permission                                      permission,
+                           const std::function<void(const Principal&)>& handler) {
         if (!onConsoleListener(req, config)) {
             callback(errorJson("not found", drogon::k404NotFound));
             return;
         }
-        const std::string username = state->sessions.resolve(req->getCookie(kSessionCookie));
-        if (username.empty()) {
+        const auto principal = state->sessions.resolve(req->getCookie(kSessionCookie));
+        if (!principal) {
             callback(errorJson("not signed in", drogon::k401Unauthorized));
             return;
         }
-        handler(username);
+        if (!allows(principal->role, permission)) {
+            // Recorded, because a refusal is the half of the log worth having:
+            // a successful action by someone entitled to it is ordinary, and an
+            // attempt by someone who is not is the thing an operator is looking
+            // for when they open this page.
+            audit(principal->username, "authz.denied", req->getPath(), false,
+                  std::string(toString(permission)) + " required, " +
+                      std::string(toString(principal->role)) + " has it not");
+            callback(forbidden(permission));
+            return;
+        }
+        handler(*principal);
     };
 
     // Storage work is posted rather than run inline for the same reason the S3
@@ -381,7 +479,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // a person out was to break every program at the same time.
     app.registerHandler(
         "/_mb/api/login",
-        [&config, &io, &storage, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
+        [&config, &io, &storage, state, audit](const HttpRequestPtr& req,
+                                               ResponseCallback&& callback) {
             if (!onConsoleListener(req, config)) {
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
@@ -408,39 +507,62 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             // coincide: it reads the store, and the verifier is deliberately
             // expensive — several hundred milliseconds of PBKDF2 on the event
             // loop would stall every other console request behind one login.
-            const bool accepted = io.post([&storage, state, callback, username, pass, secure]() {
-                try {
-                    const auto admin = storage.getAdmin();
+            const bool accepted =
+                io.post([&storage, state, audit, callback, username, pass, secure]() {
+                    try {
+                        // A name that could never have been stored is not
+                        // looked up — but it is still verified against the
+                        // dummy below, so refusing it costs exactly what
+                        // refusing a real name does.
+                        const auto user = isValidUsername(username)
+                                              ? storage.getUser(username)
+                                              : std::optional<UserRecord>{};
 
-                    // The verifier runs even when the name is wrong, against a
-                    // throwaway record that costs the same. Returning early
-                    // would make response time answer the question the error
-                    // text refuses to: whether that account exists.
-                    const bool nameOk = admin && secretsMatch(username, admin->username);
-                    const bool passOk = password::verify(
-                        pass, nameOk ? admin->passwordHash : password::dummyHash());
+                        // The verifier runs even when the name is wrong,
+                        // against a throwaway record that costs the same.
+                        // Returning early would make response time answer the
+                        // question the error text refuses to: whether that
+                        // account exists.
+                        const bool passOk = password::verify(
+                            pass, user ? user->passwordHash : password::dummyHash());
 
-                    if (!nameOk || !passOk) {
-                        state->throttle.recordFailure();
-                        // One message for every way this can fail. "No such
-                        // user" and "wrong password" are two answers to a
-                        // question nobody signing in legitimately has to ask.
-                        callback(errorJson("invalid username or password",
-                                           drogon::k401Unauthorized));
-                        return;
+                        // A disabled account fails here rather than earlier, so
+                        // that "disabled" and "wrong password" are the same
+                        // answer at the same cost. It is still recorded
+                        // separately, because the log is for the operator and
+                        // the response is for whoever is knocking.
+                        if (!user || !passOk || user->disabled) {
+                            state->throttle.recordFailure();
+                            audit(username, "session.denied", username, false,
+                                  !user      ? "no such user"
+                                  : !passOk  ? "wrong password"
+                                             : "account disabled");
+                            // One message for every way this can fail. "No such
+                            // user" and "wrong password" are two answers to a
+                            // question nobody signing in legitimately has to
+                            // ask.
+                            callback(errorJson("invalid username or password",
+                                               drogon::k401Unauthorized));
+                            return;
+                        }
+
+                        state->throttle.recordSuccess();
+                        audit(user->username, "session.open", user->username, true,
+                              std::string(toString(user->role)));
+
+                        auto resp = jsonResponse({{"username", user->username},
+                                                  {"role", std::string(toString(user->role))},
+                                                  {"permissions", permissionsJson(user->role)},
+                                                  {"expiresInSeconds", kSessionTtlSeconds}});
+                        resp->addCookie(
+                            sessionCookie(state->sessions.open(user->username, user->role),
+                                          kSessionTtlSeconds, secure));
+                        callback(resp);
+                    } catch (const std::exception& error) {
+                        log::error("console login: ", error.what());
+                        callback(errorJson("internal error", drogon::k500InternalServerError));
                     }
-
-                    state->throttle.recordSuccess();
-                    auto resp = jsonResponse({{"username", admin->username},
-                                              {"expiresInSeconds", kSessionTtlSeconds}});
-                    resp->addCookie(sessionCookie(state->sessions.open(admin->username),
-                                                  kSessionTtlSeconds, secure));
-                    callback(resp);
-                } catch (const std::exception& error) {
-                    log::error("console login: ", error.what());
-                    callback(errorJson("internal error", drogon::k500InternalServerError));
-                }
-            });
+                });
             if (!accepted) {
                 callback(errorJson("the storage queue is saturated",
                                    drogon::k503ServiceUnavailable));
@@ -450,7 +572,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/logout",
-        [&config, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
+        [&config, state, audit](const HttpRequestPtr& req, ResponseCallback&& callback) {
             if (!onConsoleListener(req, config)) {
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
@@ -459,7 +581,11 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             // the browser's half and cannot be relied on: a copy of the token
             // taken before sign-out has to stop working regardless of what the
             // client does with its jar.
+            const auto principal = state->sessions.resolve(req->getCookie(kSessionCookie));
             state->sessions.close(req->getCookie(kSessionCookie));
+            if (principal) {
+                audit(principal->username, "session.close", principal->username, true, "");
+            }
 
             auto resp = jsonResponse({{"signedOut", true}});
             resp->addCookie(sessionCookie("", 0, secureCookieFor(config, req)));
@@ -477,18 +603,27 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
             }
-            const std::string username = state->sessions.resolve(req->getCookie(kSessionCookie));
+            const auto principal = state->sessions.resolve(req->getCookie(kSessionCookie));
             // The S3 port and domain travel with the session because the console
             // is served from a different port and cannot infer them. The host is
             // deliberately not included: `config.host` is usually 0.0.0.0, and
             // the name the browser used to reach us is the only one known to
             // work — so the client supplies that half.
-            callback(jsonResponse({{"authenticated", !username.empty()},
-                                   {"username", username},
-                                   {"usingDefaultCredentials", config.usingDefaultCredentials()},
-                                   {"s3Port", config.s3Port},
-                                   {"s3Domain", config.s3Domain},
-                                   {"version", version::kVersion}}));
+            //
+            // The permission list travels too, so the console can leave out
+            // what it must not offer. That is presentation, never enforcement:
+            // every route re-decides for itself, and a browser that lies about
+            // this list gets a 403 rather than a page it was not entitled to.
+            callback(jsonResponse(
+                {{"authenticated", principal.has_value()},
+                 {"username", principal ? principal->username : std::string{}},
+                 {"role", std::string(toString(principal ? principal->role : Role::ReadOnly))},
+                 {"permissions",
+                  principal ? permissionsJson(principal->role) : nlohmann::json::array()},
+                 {"usingDefaultCredentials", config.usingDefaultCredentials()},
+                 {"s3Port", config.s3Port},
+                 {"s3Domain", config.s3Domain},
+                 {"version", version::kVersion}}));
         },
         {drogon::Get});
 
@@ -500,15 +635,32 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/credentials",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+        [&storage, guard, offload, audit](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            // Reading the list and changing it are different permissions, so
+            // the method decides which one this request is held to rather than
+            // the route being pinned to the weaker of the two.
+            //
+            // `method()` rather than `getMethodString()`: the latter answers
+            // with a `const char*`, so comparing it to a literal compares two
+            // addresses and is quietly always false.
+            const Permission needed = req->method() == drogon::Get
+                                          ? Permission::CredentialRead
+                                          : Permission::CredentialWrite;
+            guard(req, callback, needed,
+                  [&storage, req, callback, offload, audit](const Principal& principal) {
                 const std::string method = req->getMethodString();
 
                 if (method == "GET") {
-                    offload(callback, [&storage]() -> HttpResponsePtr {
+                    // An administrator sees every key, because managing other
+                    // people's credentials is what the role is for. Everyone
+                    // else sees their own: a key list is a list of what exists
+                    // to be attacked, and an operator has no use for the shape
+                    // of somebody else's.
+                    const bool all = allows(principal.role, Permission::UserRead);
+                    offload(callback, [&storage, all, owner = principal.username]() -> HttpResponsePtr {
                         nlohmann::json keys = nlohmann::json::array();
                         for (const auto& key : storage.listAccessKeys()) {
-                            keys.push_back(toJson(key));
+                            if (all || key.owner == owner) keys.push_back(toJson(key));
                         }
                         return jsonResponse({{"credentials", std::move(keys)}});
                     });
@@ -529,15 +681,22 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         return;
                     }
 
-                    offload(callback, [&storage, description]() -> HttpResponsePtr {
+                    offload(callback, [&storage, audit, description,
+                                       owner = principal.username]() -> HttpResponsePtr {
                         AccessKeyRecord key;
                         key.accessKeyId = credentials::generateAccessKeyId();
                         key.secretKey   = credentials::generateSecretKey();
                         key.description = description;
                         key.createdAt   = nowMs();
+                        // The issuer owns it, always — there is no field on the
+                        // request for this. A key that could be minted in
+                        // someone else's name would be a way to act as them
+                        // while the log said otherwise.
+                        key.owner       = owner;
                         storage.putAccessKey(key);
 
-                        log::info("issued S3 access key ", key.accessKeyId);
+                        log::info("issued S3 access key ", key.accessKeyId, " for ", owner);
+                        audit(owner, "credential.create", key.accessKeyId, true, description);
 
                         // The only response that carries a secret, and only
                         // because it is the only moment it can be carried: the
@@ -555,11 +714,23 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     callback(errorJson("an access key id is required", drogon::k400BadRequest));
                     return;
                 }
-                offload(callback, [&storage, accessKeyId]() -> HttpResponsePtr {
+                const bool any = allows(principal.role, Permission::UserWrite);
+                offload(callback, [&storage, audit, accessKeyId, any,
+                                   actor = principal.username]() -> HttpResponsePtr {
+                    const auto key = storage.getAccessKey(accessKeyId);
+                    // The same answer whether it does not exist or belongs to
+                    // somebody else. Telling an operator that a key id is real
+                    // but not theirs turns this route into a way to confirm
+                    // which ids exist.
+                    if (!key || (!any && key->owner != actor)) {
+                        return errorJson("no such access key", drogon::k404NotFound);
+                    }
                     if (!storage.deleteAccessKey(accessKeyId)) {
                         return errorJson("no such access key", drogon::k404NotFound);
                     }
                     log::info("revoked S3 access key ", accessKeyId);
+                    audit(actor, "credential.revoke", accessKeyId, true,
+                          key->owner == actor ? "" : "owned by " + key->owner);
                     // Nothing to invalidate elsewhere: the router resolves the
                     // secret from the store on every signed request and holds
                     // no copy, so the next one already fails.
@@ -571,8 +742,9 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/credentials/rotate",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+        [&storage, guard, offload, audit](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, Permission::CredentialWrite,
+                  [&storage, req, callback, offload, audit](const Principal& principal) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
@@ -584,9 +756,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     return;
                 }
 
-                offload(callback, [&storage, accessKeyId]() -> HttpResponsePtr {
+                const bool any = allows(principal.role, Permission::UserWrite);
+                offload(callback, [&storage, audit, accessKeyId, any,
+                                   actor = principal.username]() -> HttpResponsePtr {
                     auto key = storage.getAccessKey(accessKeyId);
-                    if (!key) return errorJson("no such access key", drogon::k404NotFound);
+                    if (!key || (!any && key->owner != actor)) {
+                        return errorJson("no such access key", drogon::k404NotFound);
+                    }
 
                     // The id survives and the secret does not. Rotation exists
                     // to make a leaked secret stop working, so it takes effect
@@ -597,6 +773,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     storage.putAccessKey(*key);
 
                     log::info("rotated the secret for S3 access key ", accessKeyId);
+                    audit(actor, "credential.rotate", accessKeyId, true,
+                          key->owner == actor ? "" : "owned by " + key->owner);
 
                     nlohmann::json out = toJson(*key);
                     out["secretKey"]   = key->secretKey;
@@ -606,14 +784,391 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         },
         {drogon::Post});
 
+    // --- Users -------------------------------------------------------------
+
+    // People, as opposed to the programs the credentials above are for. Every
+    // route here needs `user:read` or `user:write`, which only the
+    // administrator role holds — an operator can manage buckets and their own
+    // keys and cannot reach any of this.
+
+    app.registerHandler(
+        "/_mb/api/users",
+        [state, &storage, guard, offload, audit](const HttpRequestPtr& req,
+                                                 ResponseCallback&&    callback) {
+            const Permission needed = req->method() == drogon::Get ? Permission::UserRead
+                                                                      : Permission::UserWrite;
+            guard(req, callback, needed,
+                  [state, &storage, req, callback, offload, audit](const Principal& principal) {
+                const std::string method = req->getMethodString();
+
+                if (method == "GET") {
+                    offload(callback, [&storage]() -> HttpResponsePtr {
+                        nlohmann::json users = nlohmann::json::array();
+                        for (const auto& user : storage.listUsers()) users.push_back(toJson(user));
+
+                        // The role catalogue rides along with the list. The
+                        // console needs it to render a picker, and shipping it
+                        // from here means the picker cannot offer a role this
+                        // build does not have.
+                        nlohmann::json roles = nlohmann::json::array();
+                        for (const Role role :
+                             {Role::Administrator, Role::Operator, Role::ReadOnly}) {
+                            roles.push_back({{"name", std::string(toString(role))},
+                                             {"description", std::string(describe(role))},
+                                             {"permissions", permissionsJson(role)}});
+                        }
+                        return jsonResponse(
+                            {{"users", std::move(users)}, {"roles", std::move(roles)}});
+                    });
+                    return;
+                }
+
+                if (method == "DELETE") {
+                    const std::string username = req->getParameter("username");
+                    if (username.empty()) {
+                        callback(errorJson("a username is required", drogon::k400BadRequest));
+                        return;
+                    }
+                    if (username == principal.username) {
+                        // Not a lockout rule — the last-administrator check
+                        // below would catch that case anyway. It is that
+                        // deleting the account you are signed in as leaves a
+                        // live session naming a user that no longer exists,
+                        // and that is a worse thing to have to reason about
+                        // than a refusal.
+                        callback(errorJson("an account cannot delete itself",
+                                           drogon::k409Conflict));
+                        return;
+                    }
+
+                    offload(callback, [state, &storage, audit, username,
+                                       actor = principal.username]() -> HttpResponsePtr {
+                        const auto user = storage.getUser(username);
+                        if (!user) return errorJson("no such user", drogon::k404NotFound);
+
+                        if (user->role == Role::Administrator && !user->disabled &&
+                            storage.countEnabledAdministrators() <= 1) {
+                            return errorJson("this is the last enabled administrator",
+                                             drogon::k409Conflict);
+                        }
+
+                        // The keys go with the person. Leaving them behind
+                        // would leave credentials that authorise as an identity
+                        // the store can no longer describe — which the S3 path
+                        // would then have to have an opinion about.
+                        std::size_t revoked = 0;
+                        for (const auto& key : storage.listAccessKeys()) {
+                            if (key.owner != username) continue;
+                            if (storage.deleteAccessKey(key.accessKeyId)) ++revoked;
+                            audit(actor, "credential.revoke", key.accessKeyId, true,
+                                  "owner '" + username + "' deleted");
+                        }
+
+                        storage.deleteUser(username);
+                        const std::size_t closed = state->sessions.closeUser(username);
+
+                        log::info("deleted console user '", username, "' (", revoked,
+                                  " access keys revoked, ", closed, " sessions ended)");
+                        audit(actor, "user.delete", username, true,
+                              std::to_string(revoked) + " keys revoked");
+
+                        return jsonResponse({{"deleted", username},
+                                             {"revokedCredentials", revoked},
+                                             {"endedSessions", closed}});
+                    });
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                const auto username = body.value("username", std::string{});
+                if (!isValidUsername(username)) {
+                    callback(errorJson("a username must be 1-64 characters of letters, digits, "
+                                       "dot, underscore or hyphen, starting with a letter or "
+                                       "digit",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+
+                if (method == "POST") {
+                    const auto secret = body.value("password", std::string{});
+                    if (secret.size() < password::kMinimumLength) {
+                        callback(errorJson("a password must be at least " +
+                                               std::to_string(password::kMinimumLength) +
+                                               " characters",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+                    const auto role = parseRole(body.value("role", std::string{}));
+                    if (!role) {
+                        callback(errorJson("a role is required and must be one of administrator, "
+                                           "operator, readonly",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+
+                    offload(callback, [&storage, audit, username, secret, role = *role,
+                                       actor = principal.username]() -> HttpResponsePtr {
+                        if (storage.getUser(username)) {
+                            return errorJson("that username is taken", drogon::k409Conflict);
+                        }
+
+                        UserRecord user;
+                        user.username          = username;
+                        user.passwordHash      = password::hash(secret);
+                        user.role              = role;
+                        user.createdAt         = nowMs();
+                        user.updatedAt         = user.createdAt;
+                        user.passwordChangedAt = user.createdAt;
+                        storage.putUser(user);
+
+                        log::info("created console user '", username, "' as ", toString(role));
+                        audit(actor, "user.create", username, true, std::string(toString(role)));
+                        return jsonResponse(toJson(user), drogon::k201Created);
+                    });
+                    return;
+                }
+
+                // PATCH: role and status, and nothing else. A password is
+                // changed through its own route, because the two have different
+                // rules about who may do it and what has to be presented first.
+                const bool wantsRole     = body.contains("role") && !body.at("role").is_null();
+                const bool wantsDisabled = body.contains("disabled") &&
+                                           !body.at("disabled").is_null();
+                if (!wantsRole && !wantsDisabled) {
+                    callback(errorJson("nothing to change", drogon::k400BadRequest));
+                    return;
+                }
+
+                std::optional<Role> role;
+                if (wantsRole) {
+                    if (!body.at("role").is_string()) {
+                        callback(errorJson("role must be a string", drogon::k400BadRequest));
+                        return;
+                    }
+                    role = parseRole(body.at("role").get<std::string>());
+                    if (!role) {
+                        callback(errorJson("a role must be one of administrator, operator, "
+                                           "readonly",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+                }
+
+                std::optional<bool> disabled;
+                if (wantsDisabled) {
+                    if (!body.at("disabled").is_boolean()) {
+                        callback(errorJson("disabled must be true or false",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+                    disabled = body.at("disabled").get<bool>();
+                }
+
+                offload(callback, [state, &storage, audit, username, role, disabled,
+                                   actor = principal.username]() -> HttpResponsePtr {
+                    auto user = storage.getUser(username);
+                    if (!user) return errorJson("no such user", drogon::k404NotFound);
+
+                    const bool wasLastAdmin = user->role == Role::Administrator &&
+                                              !user->disabled &&
+                                              storage.countEnabledAdministrators() <= 1;
+                    const bool losesAdmin =
+                        (role && *role != Role::Administrator) || (disabled && *disabled);
+                    if (wasLastAdmin && losesAdmin) {
+                        // The check that keeps a console reachable. Demoting or
+                        // disabling the only administrator left is not an
+                        // operation anybody wants the result of, and it cannot
+                        // be undone from a console nobody can now sign in to.
+                        return errorJson("this is the last enabled administrator",
+                                         drogon::k409Conflict);
+                    }
+
+                    std::string changes;
+                    if (role && *role != user->role) {
+                        changes = "role " + std::string(toString(user->role)) + " -> " +
+                                  std::string(toString(*role));
+                        user->role = *role;
+                    }
+                    if (disabled && *disabled != user->disabled) {
+                        if (!changes.empty()) changes += ", ";
+                        changes += *disabled ? "disabled" : "enabled";
+                        user->disabled = *disabled;
+                    }
+                    if (changes.empty()) return jsonResponse(toJson(*user));
+
+                    user->updatedAt = nowMs();
+                    storage.putUser(*user);
+
+                    // A session carries a copy of the role, so the copy has to
+                    // go. Disabling takes effect on the next S3 request by
+                    // itself — the router reads the owner's record every time —
+                    // but an open console tab would otherwise keep the
+                    // authority it was handed at sign-in until the tab was
+                    // closed.
+                    const std::size_t closed = state->sessions.closeUser(username);
+
+                    log::info("updated console user '", username, "': ", changes, " (", closed,
+                              " sessions ended)");
+                    audit(actor, "user.update", username, true, changes);
+
+                    nlohmann::json out = toJson(*user);
+                    out["endedSessions"] = closed;
+                    return jsonResponse(out);
+                });
+            });
+        },
+        {drogon::Get, drogon::Post, drogon::Patch, drogon::Delete});
+
+    // Two operations wearing one route, told apart by whose password it is.
+    // Changing your own needs the current one and no permission; resetting
+    // somebody else's needs `user:write` and not their current password —
+    // an administrator who had to know it could not do the one thing a reset
+    // exists for.
+    app.registerHandler(
+        "/_mb/api/users/password",
+        [&config, state, &storage, &io, audit](const HttpRequestPtr& req,
+                                               ResponseCallback&&    callback) {
+            if (!onConsoleListener(req, config)) {
+                callback(errorJson("not found", drogon::k404NotFound));
+                return;
+            }
+            const auto principal = state->sessions.resolve(req->getCookie(kSessionCookie));
+            if (!principal) {
+                callback(errorJson("not signed in", drogon::k401Unauthorized));
+                return;
+            }
+
+            const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+                callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                return;
+            }
+
+            const auto target =
+                body.value("username", std::string{}).empty()
+                    ? principal->username
+                    : body.value("username", std::string{});
+            const bool self       = target == principal->username;
+            const auto current    = body.value("currentPassword", std::string{});
+            const auto next       = body.value("newPassword", std::string{});
+            const bool secureFlag = secureCookieFor(config, req);
+
+            if (!self && !allows(principal->role, Permission::UserWrite)) {
+                audit(principal->username, "authz.denied", req->getPath(), false,
+                      "user:write required to reset another account's password");
+                callback(forbidden(Permission::UserWrite));
+                return;
+            }
+            if (next.size() < password::kMinimumLength) {
+                callback(errorJson("a password must be at least " +
+                                       std::to_string(password::kMinimumLength) + " characters",
+                                   drogon::k400BadRequest));
+                return;
+            }
+            if (self && current.empty()) {
+                callback(errorJson("the current password is required", drogon::k400BadRequest));
+                return;
+            }
+
+            // Posted for the same reason login is: two PBKDF2 rounds on the
+            // event loop would stall every other console request behind them.
+            const bool accepted = io.post([state, &storage, audit, callback, target, self, current,
+                                           next, secureFlag, actor = principal->username]() {
+                try {
+                    auto user = storage.getUser(target);
+                    if (!user) {
+                        callback(errorJson("no such user", drogon::k404NotFound));
+                        return;
+                    }
+                    if (self && !password::verify(current, user->passwordHash)) {
+                        audit(actor, "user.password", target, false, "wrong current password");
+                        callback(errorJson("the current password is wrong",
+                                           drogon::k401Unauthorized));
+                        return;
+                    }
+
+                    user->passwordHash      = password::hash(next);
+                    user->updatedAt         = nowMs();
+                    user->passwordChangedAt = user->updatedAt;
+                    storage.putUser(*user);
+
+                    // Every session for that account ends, including this one.
+                    // A password change whose point is that a copy of the old
+                    // one is loose has to invalidate whatever that copy was
+                    // used to open.
+                    const std::size_t closed = state->sessions.closeUser(target);
+                    audit(actor, self ? "user.password" : "user.password.reset", target, true,
+                          std::to_string(closed) + " sessions ended");
+                    log::info("password changed for console user '", target, "' by '", actor,
+                              "' (", closed, " sessions ended)");
+
+                    auto resp = jsonResponse({{"username", target}, {"endedSessions", closed}});
+                    if (self) {
+                        // The caller just invalidated their own cookie. Handing
+                        // back a fresh one keeps a password change from
+                        // presenting as being thrown out of the console.
+                        resp->addCookie(
+                            sessionCookie(state->sessions.open(user->username, user->role),
+                                          kSessionTtlSeconds, secureFlag));
+                    }
+                    callback(resp);
+                } catch (const std::exception& error) {
+                    log::error("console password change: ", error.what());
+                    callback(errorJson("internal error", drogon::k500InternalServerError));
+                }
+            });
+            if (!accepted) {
+                callback(errorJson("the storage queue is saturated",
+                                   drogon::k503ServiceUnavailable));
+            }
+        },
+        {drogon::Post});
+
+    // --- Audit log ---------------------------------------------------------
+
+    app.registerHandler(
+        "/_mb/api/audit",
+        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guard(req, callback, Permission::AuditRead,
+                  [&storage, req, callback, offload](const Principal&) {
+                // Clamped rather than refused: a caller asking for more than
+                // the ring holds wants all of it, and the ring is the bound.
+                std::size_t limit = 200;
+                if (const std::string requested = req->getParameter("limit");
+                    !requested.empty()) {
+                    try {
+                        limit = std::min<std::size_t>(std::stoul(requested), kAuditCapacity);
+                    } catch (const std::exception&) {
+                        callback(errorJson("limit must be a number", drogon::k400BadRequest));
+                        return;
+                    }
+                }
+
+                offload(callback, [&storage, limit]() -> HttpResponsePtr {
+                    nlohmann::json entries = nlohmann::json::array();
+                    for (const auto& entry : storage.listAudit(limit)) {
+                        entries.push_back(toJson(entry));
+                    }
+                    return jsonResponse(
+                        {{"entries", std::move(entries)}, {"capacity", kAuditCapacity}});
+                });
+            });
+        },
+        {drogon::Get});
+
     // --- Overview ----------------------------------------------------------
 
     app.registerHandler(
         "/_mb/api/overview",
         [&config, &storage, &io, &cache, &s3Metrics, guard, offload](
             const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&config, &storage, &io, &cache, &s3Metrics, callback,
-                                  offload](const std::string&) {
+            guard(req, callback, Permission::SettingsRead,
+                  [&config, &storage, &io, &cache, &s3Metrics, callback,
+                   offload](const Principal&) {
                 offload(callback, [&config, &storage, &io, &cache, &s3Metrics]() -> HttpResponsePtr {
                     const auto stats      = storage.stats();
                     const auto ioStats    = io.stats();
@@ -690,7 +1245,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     app.registerHandler(
         "/_mb/api/series",
         [state, guard](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [state, callback](const std::string&) {
+            guard(req, callback, Permission::SettingsRead,
+                  [state, callback](const Principal&) {
                 nlohmann::json samples = nlohmann::json::array();
                 for (const auto& sample : state->history.samples()) samples.push_back(toJson(sample));
                 callback(jsonResponse({{"intervalSeconds", state->history.intervalSeconds()},
@@ -705,7 +1261,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     app.registerHandler(
         "/_mb/api/buckets",
         [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+            // Reading the bucket list and changing it are different
+            // permissions, decided by the method for the same reason the
+            // credentials route decides it that way.
+            const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
+                                                                      : Permission::BucketWrite;
+            guard(req, callback, needed,
+                  [&storage, req, callback, offload](const Principal&) {
                 const std::string method = req->getMethodString();
 
                 if (method == "GET") {
@@ -755,7 +1317,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     app.registerHandler(
         "/_mb/api/buckets/access",
         [&storage, &cache, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+            guard(req, callback, Permission::BucketWrite,
+                  [&storage, &cache, req, callback, offload](const Principal&) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
@@ -819,7 +1382,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         "/_mb/api/buckets/cors",
         [&storage, &cache, guard, offload](const HttpRequestPtr& req,
                                            ResponseCallback&& callback) {
-            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+            const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
+                                                                      : Permission::BucketWrite;
+            guard(req, callback, needed,
+                  [&storage, &cache, req, callback, offload](const Principal&) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
@@ -889,7 +1455,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         "/_mb/api/buckets/policy",
         [&storage, &cache, guard, offload](const HttpRequestPtr& req,
                                            ResponseCallback&& callback) {
-            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+            const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
+                                                                      : Permission::BucketWrite;
+            guard(req, callback, needed,
+                  [&storage, &cache, req, callback, offload](const Principal&) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
@@ -968,7 +1537,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     app.registerHandler(
         "/_mb/api/config",
         [&config, &cache, guard](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&config, &cache, callback](const std::string&) {
+            guard(req, callback, Permission::SettingsRead,
+                  [&config, &cache, callback](const Principal&) {
                 const auto& names = settingEnvironmentNames();
 
                 // Bound to a local rather than iterated in place: `items()`
@@ -1007,7 +1577,11 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         "/_mb/api/objects",
         [&storage, &cache, guard, offload](const HttpRequestPtr& req,
                                            ResponseCallback&& callback) {
-            guard(req, callback, [&storage, &cache, req, callback, offload](const std::string&) {
+            // A listing reads; the DELETE this route also serves does not.
+            const Permission needed = req->method() == drogon::Get ? Permission::ObjectRead
+                                                                      : Permission::ObjectWrite;
+            guard(req, callback, needed,
+                  [&storage, &cache, req, callback, offload](const Principal&) {
                 const std::string bucket = req->getParameter("bucket");
                 if (bucket.empty()) {
                     callback(errorJson("a bucket is required", drogon::k400BadRequest));
@@ -1092,8 +1666,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         "/_mb/api/upload",
         [&config, &storage, &cache, guard, offload](const HttpRequestPtr& req,
                                                     ResponseCallback&& callback) {
-            guard(req, callback, [&config, &storage, &cache, req, callback,
-                                  offload](const std::string&) {
+            guard(req, callback, Permission::ObjectWrite,
+                  [&config, &storage, &cache, req, callback, offload](const Principal&) {
                 const std::string bucket = req->getParameter("bucket");
                 const std::string key    = req->getParameter("key");
                 if (bucket.empty() || key.empty()) {
@@ -1148,7 +1722,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     app.registerHandler(
         "/_mb/api/object",
         [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, [&storage, req, callback, offload](const std::string&) {
+            guard(req, callback, Permission::ObjectRead,
+                  [&storage, req, callback, offload](const Principal&) {
                 const std::string bucket = req->getParameter("bucket");
                 const std::string key    = req->getParameter("key");
                 if (bucket.empty() || key.empty()) {
@@ -1181,7 +1756,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         "/_mb/api/presign",
         [&config, &storage, guard, offload](const HttpRequestPtr& req,
                                             ResponseCallback&& callback) {
-            guard(req, callback, [&config, &storage, req, callback, offload](const std::string&) {
+            guard(req, callback, Permission::ObjectRead,
+                  [&config, &storage, req, callback, offload](const Principal&) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));

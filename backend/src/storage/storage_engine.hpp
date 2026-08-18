@@ -144,11 +144,26 @@ public:
 
     // --- Identity ----------------------------------------------------------
 
-    /// The console administrator, or nothing on a store that has never been
-    /// provisioned. Startup refuses to open the listeners in that case unless
-    /// the environment supplies credentials to provision it with.
+    /// One console account, or nothing when there is no such user.
+    std::optional<UserRecord> getUser(std::string_view username);
+
+    /// Every account, ordered by username.
+    std::vector<UserRecord> listUsers();
+
+    void putUser(const UserRecord& user);
+    bool deleteUser(std::string_view username);
+
+    /// How many administrators are currently enabled. Consulted before any
+    /// change that could remove one, so a console cannot be locked out of
+    /// itself by a demotion nobody realised was the last.
+    std::size_t countEnabledAdministrators();
+
+    /// The single administrator record that predates per-user identities.
+    /// Startup migrates it into a UserRecord and drops it; nothing else reads
+    /// these three.
     std::optional<AdminRecord> getAdmin();
     void                       putAdmin(const AdminRecord& admin);
+    void                       deleteAdmin();
 
     /// Resolves an S3 access key id to its record. Called once per signed
     /// request, so it is a point lookup and nothing more.
@@ -160,6 +175,15 @@ public:
     /// False when there was no such key. Revocation takes effect on the next
     /// request: nothing caches the secret between them.
     bool deleteAccessKey(std::string_view accessKeyId);
+
+    // --- Audit -------------------------------------------------------------
+
+    /// Records one security event and returns its sequence number. The log is a
+    /// bounded ring — see MetadataStore::appendAudit.
+    std::uint64_t appendAudit(const AuditRecord& entry);
+
+    /// The newest entries first, at most `limit` of them.
+    std::vector<AuditRecord> listAudit(std::size_t limit);
 
     // --- Consistency check -------------------------------------------------
 

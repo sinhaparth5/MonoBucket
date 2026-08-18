@@ -2,6 +2,8 @@ add_executable(monobucket_tests
     env_test.cpp
     config_test.cpp
     console_session_test.cpp
+    identity_test.cpp
+    identity_migration_test.cpp
     credentials_test.cpp
     password_test.cpp
     asset_store_test.cpp

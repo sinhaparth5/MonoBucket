@@ -15,9 +15,50 @@
 	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 
+	let { data } = $props();
+
 	let config = $state<ServerConfig | null>(null);
 	let error = $state('');
 	let copied = $state('');
+
+	// The one thing on this page that is not read-only, and it is here rather
+	// than under Users because it is the only account-level control every role
+	// holds. Changing somebody else's password lives on the Users page and needs
+	// `user:write`; changing your own needs only the current one.
+	let currentPassword = $state('');
+	let nextPassword = $state('');
+	let confirmPassword = $state('');
+	let passwordError = $state('');
+	let passwordNotice = $state('');
+	let changingPassword = $state(false);
+
+	async function changePassword(event: SubmitEvent) {
+		event.preventDefault();
+		passwordError = '';
+		passwordNotice = '';
+
+		if (nextPassword !== confirmPassword) {
+			passwordError = 'the two new passwords do not match';
+			return;
+		}
+
+		changingPassword = true;
+		try {
+			await api.setPassword(nextPassword, { currentPassword });
+			currentPassword = '';
+			nextPassword = '';
+			confirmPassword = '';
+			// The server ended every session for this account and handed back a
+			// fresh cookie, so this tab keeps working and every other one does
+			// not. Saying so is the point — a password change whose reason is a
+			// leaked copy should visibly have done something.
+			passwordNotice = 'Password changed. Any other session you had open has been signed out.';
+		} catch (cause) {
+			passwordError = cause instanceof ApiError ? cause.message : 'could not change the password';
+		} finally {
+			changingPassword = false;
+		}
+	}
 
 	async function load() {
 		try {
@@ -191,6 +232,85 @@
 			></div>
 		</div>
 	</header>
+
+	<section class="panel surface-raised flex flex-col gap-4 p-6">
+		<div class="flex flex-col gap-1">
+			<span class="eyebrow">Your account</span>
+			<h2 class="text-xl font-bold tracking-tight">
+				Signed in as {data.session.username}
+				<span class="badge badge-primary badge-soft ml-2 align-middle">{data.session.role}</span>
+			</h2>
+			<p class="text-base-content/60 max-w-xl text-sm">
+				This password signs you in to the console. It does not sign S3 requests, so changing it
+				leaves every access key working.
+			</p>
+		</div>
+
+		<form class="grid gap-3 md:grid-cols-3" onsubmit={changePassword}>
+			<fieldset class="fieldset gap-1.5 p-0">
+				<legend class="fieldset-legend text-sm">Current password</legend>
+				<label class="input w-full">
+					<Icon name="shield" class="text-primary size-4" />
+					<input
+						type="password"
+						autocomplete="current-password"
+						bind:value={currentPassword}
+						required
+					/>
+				</label>
+			</fieldset>
+
+			<fieldset class="fieldset gap-1.5 p-0">
+				<legend class="fieldset-legend text-sm">New password</legend>
+				<label class="input w-full">
+					<Icon name="shield" class="text-primary size-4" />
+					<input
+						type="password"
+						autocomplete="new-password"
+						minlength="12"
+						bind:value={nextPassword}
+						placeholder="At least 12 characters"
+						required
+					/>
+				</label>
+			</fieldset>
+
+			<fieldset class="fieldset gap-1.5 p-0">
+				<legend class="fieldset-legend text-sm">Confirm new password</legend>
+				<label class="input w-full">
+					<Icon name="shield" class="text-primary size-4" />
+					<input
+						type="password"
+						autocomplete="new-password"
+						minlength="12"
+						bind:value={confirmPassword}
+						required
+					/>
+				</label>
+			</fieldset>
+
+			{#if passwordError}
+				<div role="alert" class="alert alert-error alert-soft text-sm md:col-span-3">
+					<Icon name="warning" class="size-4" />
+					<span>{passwordError}</span>
+				</div>
+			{/if}
+
+			{#if passwordNotice}
+				<div role="status" class="alert alert-success alert-soft text-sm md:col-span-3">
+					<Icon name="check" class="size-4" />
+					<span>{passwordNotice}</span>
+				</div>
+			{/if}
+
+			<div class="md:col-span-3">
+				<button class="btn btn-primary gap-2" type="submit" disabled={changingPassword}>
+					{#if changingPassword}<span class="loading loading-spinner loading-xs"></span>{/if}
+					Change password
+				</button>
+			</div>
+		</form>
+	</section>
 
 	{#if error}
 		<div

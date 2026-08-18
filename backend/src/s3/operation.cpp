@@ -169,6 +169,63 @@ bool isReadOnly(Operation operation) noexcept {
     }
 }
 
+Permission permissionFor(Operation operation) noexcept {
+    // Exhaustive rather than a default arm. A new operation added to the enum
+    // should fail to compile here, not silently inherit whatever the default
+    // happened to be — which for an authorisation table means either a hole or
+    // an operation nobody can perform.
+    switch (operation) {
+        case Operation::ListBuckets:
+        case Operation::HeadBucket:
+        case Operation::ListObjectsV1:
+        case Operation::ListObjectsV2:
+        case Operation::ListMultipartUploads:
+        case Operation::GetBucketLocation:
+        case Operation::GetBucketVersioning:
+        case Operation::GetBucketPolicy:
+        case Operation::GetBucketAcl:
+        case Operation::GetBucketCors:
+            return Permission::BucketRead;
+
+        case Operation::CreateBucket:
+        case Operation::DeleteBucket:
+        case Operation::PutBucketPolicy:
+        case Operation::DeleteBucketPolicy:
+        case Operation::PutBucketAcl:
+        case Operation::PutBucketCors:
+        case Operation::DeleteBucketCors:
+            return Permission::BucketWrite;
+
+        case Operation::GetObject:
+        case Operation::HeadObject:
+        case Operation::ListParts:
+            return Permission::ObjectRead;
+
+        case Operation::PutObject:
+        case Operation::DeleteObject:
+        case Operation::DeleteObjects:
+        case Operation::CreateMultipartUpload:
+        case Operation::UploadPart:
+        case Operation::CompleteMultipartUpload:
+        case Operation::AbortMultipartUpload:
+            return Permission::ObjectWrite;
+
+        // Answered before authentication runs, so this is only ever reached if
+        // that branch is removed. Reading is the safest thing it could then be
+        // mistaken for.
+        case Operation::Preflight:
+            return Permission::ObjectRead;
+
+        // Neither is dispatched — both throw before a handler is chosen. They
+        // still need an answer, and the most restrictive one is the answer that
+        // cannot become a hole if the order of those checks ever changes.
+        case Operation::Unsupported:
+        case Operation::MethodNotAllowed:
+            return Permission::ObjectWrite;
+    }
+    return Permission::ObjectWrite;
+}
+
 Operation classify(const S3Request& request, std::string& unsupported) {
     // Before the subresource check, and before anything looks at the path: an
     // OPTIONS is a preflight whatever it points at, and answering it 501

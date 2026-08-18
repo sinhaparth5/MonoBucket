@@ -530,6 +530,243 @@ TEST_CASE("counters survive a reopen", "[metadata]") {
 
 // --- Identity ---------------------------------------------------------------
 
+TEST_CASE("a user round-trips through the store", "[metadata]") {
+    TemporaryDirectory root{"users"};
+
+    {
+        auto store = openStore(root);
+        CHECK_FALSE(store->getUser("sam").has_value());
+
+        monobucket::UserRecord user;
+        user.username          = "sam";
+        user.passwordHash      = "pbkdf2-sha256$1000$aabb$ccdd";
+        user.role              = monobucket::Role::Operator;
+        user.createdAt         = 1000;
+        user.updatedAt         = 2000;
+        user.passwordChangedAt = 1500;
+        store->putUser(user);
+    }
+
+    auto       store = openStore(root);
+    const auto user  = store->getUser("sam");
+    REQUIRE(user.has_value());
+    CHECK(user->username == "sam");
+    CHECK(user->passwordHash == "pbkdf2-sha256$1000$aabb$ccdd");
+    CHECK(user->role == monobucket::Role::Operator);
+    CHECK_FALSE(user->disabled);
+    CHECK(user->createdAt == 1000);
+    CHECK(user->updatedAt == 2000);
+    CHECK(user->passwordChangedAt == 1500);
+}
+
+TEST_CASE("users list in username order", "[metadata]") {
+    TemporaryDirectory root{"user-list"};
+    auto               store = openStore(root);
+
+    for (const char* name : {"zoe", "admin", "sam"}) {
+        monobucket::UserRecord user;
+        user.username     = name;
+        user.passwordHash = "hash";
+        user.role         = monobucket::Role::ReadOnly;
+        store->putUser(user);
+    }
+
+    const auto users = store->listUsers();
+    REQUIRE(users.size() == 3);
+    CHECK(users[0].username == "admin");
+    CHECK(users[1].username == "sam");
+    CHECK(users[2].username == "zoe");
+}
+
+TEST_CASE("the enabled administrator count is what the lockout guard reads", "[metadata]") {
+    TemporaryDirectory root{"admin-count"};
+    auto               store = openStore(root);
+
+    const auto put = [&](const char* name, monobucket::Role role, bool disabled) {
+        monobucket::UserRecord user;
+        user.username     = name;
+        user.passwordHash = "hash";
+        user.role         = role;
+        user.disabled     = disabled;
+        store->putUser(user);
+    };
+
+    CHECK(store->countEnabledAdministrators() == 0);
+
+    put("admin", monobucket::Role::Administrator, false);
+    put("sam", monobucket::Role::Operator, false);
+    CHECK(store->countEnabledAdministrators() == 1);
+
+    put("root", monobucket::Role::Administrator, false);
+    CHECK(store->countEnabledAdministrators() == 2);
+
+    // A disabled administrator cannot sign in, so it does not count towards
+    // "there is still somebody who can administer this console".
+    put("root", monobucket::Role::Administrator, true);
+    CHECK(store->countEnabledAdministrators() == 1);
+
+    // Nor does a demoted one.
+    put("admin", monobucket::Role::Operator, false);
+    CHECK(store->countEnabledAdministrators() == 0);
+}
+
+TEST_CASE("deleting a user removes it", "[metadata]") {
+    TemporaryDirectory root{"user-delete"};
+    auto               store = openStore(root);
+
+    monobucket::UserRecord user;
+    user.username     = "sam";
+    user.passwordHash = "hash";
+    store->putUser(user);
+
+    CHECK(store->deleteUser("sam"));
+    CHECK_FALSE(store->getUser("sam").has_value());
+
+    // False rather than an error: deleting something that is already gone is
+    // the state the caller wanted.
+    CHECK_FALSE(store->deleteUser("sam"));
+    CHECK_FALSE(store->deleteUser("never-existed"));
+}
+
+TEST_CASE("an access key remembers who owns it", "[metadata]") {
+    TemporaryDirectory root{"key-owner"};
+
+    {
+        auto store = openStore(root);
+
+        monobucket::AccessKeyRecord key;
+        key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
+        key.secretKey   = "a-secret";
+        key.owner       = "sam";
+        store->putAccessKey(key);
+    }
+
+    auto       store = openStore(root);
+    const auto key   = store->getAccessKey("MBAAAAAAAAAAAAAAAAAA");
+    REQUIRE(key.has_value());
+    CHECK(key->owner == "sam");
+}
+
+// --- Audit -------------------------------------------------------------------
+
+namespace {
+
+monobucket::AuditRecord auditEntry(const char* action, const char* target) {
+    monobucket::AuditRecord entry;
+    entry.atMs   = 1000;
+    entry.actor  = "admin";
+    entry.action = action;
+    entry.target = target;
+    return entry;
+}
+
+}  // namespace
+
+TEST_CASE("audit entries come back newest first", "[metadata]") {
+    TemporaryDirectory root{"audit-order"};
+    auto               store = openStore(root);
+
+    CHECK(store->appendAudit(auditEntry("user.create", "sam")) == 1);
+    CHECK(store->appendAudit(auditEntry("user.update", "sam")) == 2);
+    CHECK(store->appendAudit(auditEntry("user.delete", "sam")) == 3);
+
+    const auto entries = store->listAudit(10);
+    REQUIRE(entries.size() == 3);
+    CHECK(entries[0].action == "user.delete");
+    CHECK(entries[1].action == "user.update");
+    CHECK(entries[2].action == "user.create");
+    CHECK(entries[0].sequence == 3);
+}
+
+TEST_CASE("an audit entry round-trips every field", "[metadata]") {
+    TemporaryDirectory root{"audit-fields"};
+    auto               store = openStore(root);
+
+    monobucket::AuditRecord entry;
+    entry.atMs    = 1'700'000'000'000;
+    entry.actor   = "sam";
+    entry.action  = "authz.denied";
+    entry.target  = "/_mb/api/users";
+    entry.allowed = false;
+    entry.detail  = "user:write required";
+    store->appendAudit(entry);
+
+    const auto entries = store->listAudit(1);
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].atMs == 1'700'000'000'000);
+    CHECK(entries[0].actor == "sam");
+    CHECK(entries[0].action == "authz.denied");
+    CHECK(entries[0].target == "/_mb/api/users");
+    CHECK_FALSE(entries[0].allowed);
+    CHECK(entries[0].detail == "user:write required");
+}
+
+TEST_CASE("the audit sequence resumes after a reopen", "[metadata]") {
+    TemporaryDirectory root{"audit-resume"};
+
+    {
+        auto store = openStore(root);
+        store->appendAudit(auditEntry("user.create", "sam"));
+        store->appendAudit(auditEntry("user.create", "zoe"));
+    }
+
+    auto store = openStore(root);
+    // Restarting at 1 would overwrite the two entries above with the newest
+    // events, and the log would then read as history in the wrong order.
+    CHECK(store->appendAudit(auditEntry("user.create", "kit")) == 3);
+    CHECK(store->listAudit(10).size() == 3);
+}
+
+TEST_CASE("the audit log is a ring rather than a growing file", "[metadata]") {
+    TemporaryDirectory root{"audit-ring"};
+    auto               store = openStore(root);
+
+    // Past the capacity by a margin, which is the case that matters: a burst of
+    // refusals must not be able to grow the store without limit.
+    const std::size_t overflow = monobucket::kAuditCapacity + 25;
+    for (std::size_t i = 0; i < overflow; ++i) {
+        store->appendAudit(auditEntry("authz.denied", std::to_string(i).c_str()));
+    }
+
+    const auto entries = store->listAudit(monobucket::kAuditCapacity * 2);
+    CHECK(entries.size() == monobucket::kAuditCapacity);
+
+    // The newest survive and the oldest are the ones dropped.
+    CHECK(entries.front().sequence == overflow);
+    CHECK(entries.back().sequence == overflow - monobucket::kAuditCapacity + 1);
+}
+
+TEST_CASE("the audit log honours the limit it is asked for", "[metadata]") {
+    TemporaryDirectory root{"audit-limit"};
+    auto               store = openStore(root);
+
+    for (int i = 0; i < 10; ++i) store->appendAudit(auditEntry("user.create", "sam"));
+
+    CHECK(store->listAudit(0).empty());
+    CHECK(store->listAudit(4).size() == 4);
+    CHECK(store->listAudit(100).size() == 10);
+}
+
+TEST_CASE("audit entries do not leak into any other listing", "[metadata]") {
+    TemporaryDirectory root{"audit-isolation"};
+    auto               store = openStore(root);
+
+    store->appendAudit(auditEntry("user.create", "sam"));
+
+    monobucket::UserRecord user;
+    user.username     = "sam";
+    user.passwordHash = "hash";
+    store->putUser(user);
+
+    // Every record type shares one column family under a one-byte tag, so this
+    // is the assertion that the tags actually partition it.
+    CHECK(store->listBuckets().empty());
+    CHECK(store->listAccessKeys().empty());
+    CHECK(store->listUsers().size() == 1);
+    CHECK(store->usage().objects == 0);
+}
+
+
 TEST_CASE("the administrator record survives a reopen", "[metadata]") {
     TemporaryDirectory root{"admin"};
 

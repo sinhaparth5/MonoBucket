@@ -34,33 +34,50 @@ std::int64_t nowSeconds() noexcept {
 
 // --- SessionStore ----------------------------------------------------------
 
-std::string SessionStore::open(const std::string& username) {
-    return openAt(username, nowSeconds());
+std::string SessionStore::open(const std::string& username, Role role) {
+    return openAt(username, role, nowSeconds());
 }
 
-std::string SessionStore::openAt(const std::string& username, std::int64_t atSeconds) {
+std::string SessionStore::openAt(const std::string& username, Role role, std::int64_t atSeconds) {
     std::string                       token = randomToken();
     const std::lock_guard<std::mutex> guard(mutex_);
     sweep(atSeconds);
-    sessions_.emplace(token, Session{username, atSeconds + ttlSeconds_});
+    sessions_.emplace(token, Session{username, role, atSeconds + ttlSeconds_});
     return token;
 }
 
-std::string SessionStore::resolve(const std::string& token) const {
+std::optional<Principal> SessionStore::resolve(const std::string& token) const {
     return resolveAt(token, nowSeconds());
 }
 
-std::string SessionStore::resolveAt(const std::string& token, std::int64_t atSeconds) const {
-    if (token.empty()) return {};
+std::optional<Principal> SessionStore::resolveAt(const std::string& token,
+                                                 std::int64_t       atSeconds) const {
+    if (token.empty()) return std::nullopt;
     const std::lock_guard<std::mutex> guard(mutex_);
     const auto                        it = sessions_.find(token);
-    if (it == sessions_.end() || it->second.expiresAt <= atSeconds) return {};
-    return it->second.username;
+    if (it == sessions_.end() || it->second.expiresAt <= atSeconds) return std::nullopt;
+    return Principal{it->second.username, it->second.role};
 }
 
 void SessionStore::close(const std::string& token) {
     const std::lock_guard<std::mutex> guard(mutex_);
     sessions_.erase(token);
+}
+
+std::size_t SessionStore::closeUser(std::string_view username) {
+    if (username.empty()) return 0;
+
+    const std::lock_guard<std::mutex> guard(mutex_);
+    std::size_t                       closed = 0;
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (it->second.username == username) {
+            it = sessions_.erase(it);
+            ++closed;
+        } else {
+            it = std::next(it);
+        }
+    }
+    return closed;
 }
 
 std::size_t SessionStore::size() const {

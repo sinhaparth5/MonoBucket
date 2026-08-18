@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "core/identity.hpp"
 #include "storage/codec.hpp"
 #include "storage/durability.hpp"
 
@@ -92,13 +93,13 @@ struct BucketRecord {
     std::optional<Durability> durability;
 };
 
-/// The console's single administrator account.
+/// One console account.
 ///
 /// Separate from the S3 credential on purpose: a person signing in to a browser
 /// and a program signing a request are different acts with different lifetimes,
 /// and collapsing them means the only way to revoke a colleague's console
 /// access is to break every S3 client at the same time.
-struct AdminRecord {
+struct UserRecord {
     std::string username;
 
     /// A password verifier, never the password. Produced by
@@ -106,8 +107,68 @@ struct AdminRecord {
     /// iteration count can be raised without stranding existing records.
     std::string passwordHash;
 
+    Role role = Role::ReadOnly;
+
+    /// A disabled account still exists and still owns its access keys. That is
+    /// the difference between disabling and deleting: disabling is reversible
+    /// and keeps the audit trail attributable, deleting takes the keys with it.
+    bool disabled = false;
+
     TimestampMs createdAt = 0;
     TimestampMs updatedAt = 0;
+
+    /// When the verifier was last replaced. Distinct from `updatedAt`, which
+    /// also moves for a role change — "when did this password last change" is a
+    /// question a role change is not an answer to.
+    TimestampMs passwordChangedAt = 0;
+};
+
+/// The single administrator account that predates per-user identities.
+///
+/// Only ever read, and only once: startup converts it into a UserRecord with
+/// the administrator role and deletes it. Kept as a type rather than folded
+/// into UserRecord because its stored layout has no role and no disabled flag,
+/// and a decoder that guessed at them would be inventing authority.
+struct AdminRecord {
+    std::string username;
+    std::string passwordHash;
+    TimestampMs createdAt = 0;
+    TimestampMs updatedAt = 0;
+};
+
+/// One security-relevant thing that happened.
+///
+/// The log is a bounded ring in the metadata store, not a file and not a
+/// stream: it answers "who changed this, and when" for an operator looking at
+/// the console, and it is explicitly not a substitute for shipping logs
+/// somewhere durable. Denied authorisation checks are recorded alongside the
+/// changes, because the attempt is the interesting half.
+struct AuditRecord {
+    /// Assigned by the store, strictly increasing, and what the log is ordered
+    /// by. Not the timestamp: two events in the same millisecond are ordinary,
+    /// and a clock that steps backwards must not reorder history.
+    std::uint64_t sequence = 0;
+
+    TimestampMs atMs = 0;
+
+    /// The username that acted, or empty when the request never got as far as
+    /// naming one.
+    std::string actor;
+
+    /// A dotted verb — `user.create`, `credential.revoke`, `authz.denied`.
+    /// Matched by prefix in the console filter, so the first component is the
+    /// subject and the second is what happened to it.
+    std::string action;
+
+    /// What was acted on: a username, an access key id, a bucket name.
+    std::string target;
+
+    /// False for a refusal. A log that only recorded successes would answer
+    /// "what was done" and never "what was tried".
+    bool allowed = true;
+
+    /// Free text, already safe to render. Never a secret and never a password.
+    std::string detail;
 };
 
 /// One S3 credential pair, issued and revoked from the console.
@@ -124,6 +185,15 @@ struct AccessKeyRecord {
     /// Free text from whoever minted it, so a key can be recognised months
     /// later without a separate note somewhere else.
     std::string description;
+
+    /// The username this key acts as. A signed request is authorised with the
+    /// owner's role, so a key can never do more than the person who issued it —
+    /// and disabling that person stops the key on its next request.
+    ///
+    /// Empty only for records written before keys had owners. Startup adopts
+    /// those into the migrated administrator account rather than leaving them
+    /// unattributable; nothing issues an ownerless key any more.
+    std::string owner;
 
     TimestampMs createdAt = 0;
 

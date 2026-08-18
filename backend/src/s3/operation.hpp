@@ -2,6 +2,7 @@
 
 #include <string_view>
 
+#include "core/identity.hpp"
 #include "s3/request.hpp"
 
 // Which S3 operation a request names.
@@ -69,6 +70,18 @@ std::string_view toString(Operation operation) noexcept;
 /// True for the operations that only read. Used by the public-bucket path,
 /// which must never let an anonymous client mutate anything.
 bool isReadOnly(Operation operation) noexcept;
+
+/// The permission a signed request must hold to perform this operation.
+///
+/// Deliberately coarse: an S3 access key acts as a person, and a person who may
+/// delete an object may delete any object. Per-bucket scoping would be a second
+/// policy system beside the bucket policies already here, and the two would
+/// have to agree about which one denies — see "Known limitations" in README.md.
+///
+/// Anonymous requests never reach this. Whether an unsigned request may be
+/// served is the bucket's own question, answered by authorize() before any
+/// identity exists to ask about.
+Permission permissionFor(Operation operation) noexcept;
 
 /// Classifies a parsed request. `unsupported` is filled with the subresource
 /// that could not be served, for the error message.

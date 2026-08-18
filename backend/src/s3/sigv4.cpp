@@ -360,6 +360,23 @@ bool secureEquals(std::string_view a, std::string_view b) noexcept {
 
 AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryParam>& query,
                          const Credentials& credentials, const AuthOptions& options) {
+    return authenticate(request, query,
+                        [&credentials](std::string_view accessKeyId)
+                            -> std::optional<std::string> {
+                            // Constant time even though an access key id is not
+                            // a secret: a short-circuiting compare would let an
+                            // attacker enumerate a valid id one character at a
+                            // time, and the check costs nothing.
+                            if (!secureEquals(accessKeyId, credentials.accessKey)) {
+                                return std::nullopt;
+                            }
+                            return credentials.secretKey;
+                        },
+                        options);
+}
+
+AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryParam>& query,
+                         const CredentialResolver& resolve, const AuthOptions& options) {
     const std::string_view authorization = request.header("authorization");
     const auto             presignedSignature = findQuery(query, "X-Amz-Signature");
 
@@ -485,10 +502,11 @@ AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryP
                           "The date in the credential scope does not match the request date.");
     }
 
-    // Compared in constant time even though the access key is not a secret: a
-    // short-circuiting compare here would let an attacker enumerate valid key
-    // ids one character at a time, and the check costs nothing.
-    if (!secureEquals(scope.accessKey, credentials.accessKey)) {
+    // A resolver that misses and one that finds a revoked key are the same
+    // answer: nothing. The caller is told InvalidAccessKeyId either way, so a
+    // revoked credential does not report itself as having once been real.
+    const std::optional<std::string> secretKey = resolve(scope.accessKey);
+    if (!secretKey) {
         throw S3Exception(S3ErrorCode::InvalidAccessKeyId);
     }
     outcome.accessKey = scope.accessKey;
@@ -502,8 +520,8 @@ AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryP
     }
 
     outcome.scope      = scope.scope();
-    outcome.signingKey = deriveSigningKey(credentials.secretKey, scope.dateStamp, scope.region,
-                                          scope.service);
+    outcome.signingKey =
+        deriveSigningKey(*secretKey, scope.dateStamp, scope.region, scope.service);
 
     const std::string expected = toLower(providedSignature);
 

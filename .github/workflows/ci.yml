@@ -84,6 +84,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run check
           pnpm run lint
+          pnpm run test
           pnpm run build
           # The embedding step is meaningless without an SPA entry point.
           test -f build/index.html
@@ -118,6 +119,7 @@ jobs:
           set -euo pipefail
           docker run --rm monobucket:ci --version
           docker run -d --name mb -p 9000:9000 -p 9001:9001 \
+            -e MONOBUCKET_ADMIN_PASSWORD=ci-console-password \
             -e MONOBUCKET_ROOT_SECRET_KEY=ci-secret-value monobucket:ci
           for _ in $(seq 1 60); do
             curl -fsS localhost:9000/healthz >/dev/null 2>&1 && break
@@ -135,6 +137,20 @@ jobs:
             | grep -qi 'content-encoding: gzip'
           # The S3 listener must never serve console assets.
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:9000/)" != "200"
+
+          # Sign in with the administrator password and issue an S3 key, which
+          # is the one path that crosses every layer this release changed: the
+          # password verifier, the session cookie, the credential store and the
+          # SigV4 resolver that reads it back.
+          COOKIE=$(curl -fsS -i -X POST localhost:9001/_mb/api/login \
+            -d '{"username":"admin","password":"ci-console-password"}' \
+            | grep -i '^set-cookie:' | sed 's/.*mb_session=\([^;]*\).*/\1/' | tr -d '\r')
+          test -n "$COOKIE"
+          curl -fsS -b "mb_session=$COOKIE" -X POST localhost:9001/_mb/api/credentials \
+            -d '{"description":"ci"}' | grep -q '"secretKey"'
+          # An S3 key pair must not be a console login.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:9001/_mb/api/login \
+            -d '{"accessKey":"monobucket","secretKey":"ci-secret-value"}')" = "401"
 
           # SIGTERM must produce a clean exit, not a timeout kill.
           docker stop --timeout 10 mb

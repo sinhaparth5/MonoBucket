@@ -49,8 +49,9 @@
 		{
 			title: 'Credentials',
 			icon: 'key',
-			blurb: 'One root key pair. The console exchanges it for a session cookie.',
-			keys: ['rootAccessKey', 'rootSecretKey']
+			blurb:
+				'Who signs in here, and the bootstrap S3 pair. Neither is the other: manage day-to-day S3 keys under Access keys.',
+			keys: ['adminUsername', 'rootAccessKey', 'rootSecretKey']
 		},
 		{
 			title: 'Storage',
@@ -324,9 +325,9 @@
 			{/if}
 
 			<p class="text-base-content/45 text-xs">
-				Secrets are redacted by the server before they reach this page. API keys beyond the root
-				pair, and per-bucket overrides of these values, are not implemented — see the roadmap rather
-				than assuming they are hidden somewhere.
+				Secrets are redacted by the server before they reach this page, and the administrator
+				password is not sent at all — not even redacted. Everything here is read once at startup
+				from the environment, so changing a value means restarting with a different one.
 			</p>
 		</div>
 	{/if}

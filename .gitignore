@@ -50,3 +50,4 @@ data/
 #cmake-build-*
 AGENTS.md
 .claude
+.codegraph

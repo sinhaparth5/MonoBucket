@@ -80,6 +80,9 @@ std::string orphanPrefix() { return std::string(1, kOrphan); }
 
 std::string meta(std::string_view name) { return tagged(kMeta, name); }
 
+std::string accessKey(std::string_view accessKeyId) { return tagged(kAccessKey, accessKeyId); }
+std::string accessKeyPrefix() { return std::string(1, kAccessKey); }
+
 std::optional<std::string> upperBound(std::string_view prefix) {
     std::string out(prefix);
     while (!out.empty()) {

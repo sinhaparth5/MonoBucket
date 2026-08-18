@@ -142,6 +142,25 @@ public:
     ObjectRecord completeUpload(std::string_view uploadId,
                                 const std::vector<RequestedPart>& parts);
 
+    // --- Identity ----------------------------------------------------------
+
+    /// The console administrator, or nothing on a store that has never been
+    /// provisioned. Startup refuses to open the listeners in that case unless
+    /// the environment supplies credentials to provision it with.
+    std::optional<AdminRecord> getAdmin();
+    void                       putAdmin(const AdminRecord& admin);
+
+    /// Resolves an S3 access key id to its record. Called once per signed
+    /// request, so it is a point lookup and nothing more.
+    std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId);
+
+    std::vector<AccessKeyRecord> listAccessKeys();
+    void                         putAccessKey(const AccessKeyRecord& key);
+
+    /// False when there was no such key. Revocation takes effect on the next
+    /// request: nothing caches the secret between them.
+    bool deleteAccessKey(std::string_view accessKeyId);
+
     // --- Consistency check -------------------------------------------------
 
     /// What a full check found. Kept as a list of findings rather than a bool

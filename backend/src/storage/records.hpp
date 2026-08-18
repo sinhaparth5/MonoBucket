@@ -92,6 +92,47 @@ struct BucketRecord {
     std::optional<Durability> durability;
 };
 
+/// The console's single administrator account.
+///
+/// Separate from the S3 credential on purpose: a person signing in to a browser
+/// and a program signing a request are different acts with different lifetimes,
+/// and collapsing them means the only way to revoke a colleague's console
+/// access is to break every S3 client at the same time.
+struct AdminRecord {
+    std::string username;
+
+    /// A password verifier, never the password. Produced by
+    /// `password::hash()`; the format identifies its own parameters so the
+    /// iteration count can be raised without stranding existing records.
+    std::string passwordHash;
+
+    TimestampMs createdAt = 0;
+    TimestampMs updatedAt = 0;
+};
+
+/// One S3 credential pair, issued and revoked from the console.
+struct AccessKeyRecord {
+    std::string accessKeyId;
+
+    /// Stored recoverable, not hashed, and that is forced rather than chosen:
+    /// SigV4 is a symmetric HMAC construction, so verifying a signature means
+    /// re-deriving the signing key from the secret itself. There is no verifier
+    /// that authenticates a signature without reproducing the secret. Treat the
+    /// data directory accordingly — see "Known limitations" in README.md.
+    std::string secretKey;
+
+    /// Free text from whoever minted it, so a key can be recognised months
+    /// later without a separate note somewhere else.
+    std::string description;
+
+    TimestampMs createdAt = 0;
+
+    /// When the secret was last replaced, or 0 if it never was. Rotation keeps
+    /// the id and changes the secret, so this is the only record that the value
+    /// a client holds may have stopped working.
+    TimestampMs rotatedAt = 0;
+};
+
 struct ObjectRecord {
     std::string key;
 

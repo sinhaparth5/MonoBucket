@@ -181,6 +181,35 @@ public:
     /// Drops reclamation records once the payloads are gone.
     virtual void forgetOrphans(const std::vector<std::string>& blobIds) = 0;
 
+    // --- Identity ----------------------------------------------------------
+
+    // Credential records are written with Durability::Strict regardless of the
+    // server setting. Everything else in the store can be re-derived or re-sent
+    // by a client; a secret the console displayed exactly once cannot be, and a
+    // credential that survived being shown but not a power cut is worse than
+    // one that was never issued.
+
+    virtual std::optional<AdminRecord> getAdmin() = 0;
+
+    /// Creates the administrator or replaces its verifier. There is exactly one
+    /// account, so this is a write, not an insert.
+    virtual void putAdmin(const AdminRecord& admin) = 0;
+
+    virtual std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId) = 0;
+
+    /// Ordered by access key id, which is the order the console renders.
+    virtual std::vector<AccessKeyRecord> listAccessKeys() = 0;
+
+    /// Issues a new credential or replaces the secret of an existing one.
+    virtual void putAccessKey(const AccessKeyRecord& key) = 0;
+
+    /// Revocation is a delete rather than a flag. A tombstone would have to be
+    /// consulted on the S3 hot path for the rest of the store's life to answer
+    /// a question the absence of the record already answers.
+    ///
+    /// Returns false when there was nothing to revoke.
+    virtual bool deleteAccessKey(std::string_view accessKeyId) = 0;
+
     // --- Introspection -----------------------------------------------------
 
     /// Counters maintained incrementally, not scanned per call — `/metrics` is

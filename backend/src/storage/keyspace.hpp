@@ -33,6 +33,7 @@ inline constexpr char kUploadById  = 'U';  ///< U<uploadId>
 inline constexpr char kPart        = 'p';  ///< p<uploadId>\0<be32 partNumber>
 inline constexpr char kOrphan      = 'x';  ///< x<blobId>
 inline constexpr char kMeta        = 'm';  ///< m<name>
+inline constexpr char kAccessKey   = 'k';  ///< k<accessKeyId>
 
 std::string bucket(std::string_view name);
 std::string bucketPrefix();
@@ -55,6 +56,9 @@ std::string orphan(std::string_view blobId);
 std::string orphanPrefix();
 
 std::string meta(std::string_view name);
+
+std::string accessKey(std::string_view accessKeyId);
+std::string accessKeyPrefix();
 
 /// The exclusive upper bound for iterating `prefix`, for RocksDB's
 /// `iterate_upper_bound`. Returns nothing when the prefix is all 0xFF bytes and

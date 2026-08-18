@@ -32,6 +32,7 @@ public:
 private:
     void prepareDataDirectory();
     void openStorage();
+    void provisionAdministrator();
     void openCache();
     void configureFramework();
     void registerRoutes();

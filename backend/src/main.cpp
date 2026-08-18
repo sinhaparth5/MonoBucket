@@ -42,8 +42,12 @@ void printUsage() {
         << "  MONOBUCKET_CONSOLE_ENABLED         serve the dashboard    (true)\n"
         << "  MONOBUCKET_DATA_DIR                storage root           (/data)\n"
         << "  MONOBUCKET_REGION                  reported S3 region     (us-east-1)\n"
-        << "  MONOBUCKET_ROOT_ACCESS_KEY         root access key\n"
-        << "  MONOBUCKET_ROOT_SECRET_KEY         root secret key\n"
+        << "  MONOBUCKET_ADMIN_USERNAME          console login name     (admin)\n"
+        << "  MONOBUCKET_ADMIN_PASSWORD          console password, >= 12 chars\n"
+        << "  MONOBUCKET_ADMIN_PASSWORD_FILE     read it from a file instead\n"
+        << "  MONOBUCKET_CONSOLE_COOKIE_SECURE   auto | true | false    (auto)\n"
+        << "  MONOBUCKET_ROOT_ACCESS_KEY         root S3 access key\n"
+        << "  MONOBUCKET_ROOT_SECRET_KEY         root S3 secret key\n"
         << "  MONOBUCKET_WORKER_THREADS          0 = hardware_concurrency\n"
         << "  MONOBUCKET_MAX_BODY_BYTES          single-PUT ceiling     (5GiB)\n"
         << "  MONOBUCKET_MAX_MEMORY_BODY_BYTES   spill-to-disk cutoff   (1MiB)\n"
@@ -161,7 +165,7 @@ int main(int argc, char** argv) {
     monobucket::log::info(config.summary());
     if (config.usingDefaultCredentials()) {
         monobucket::log::warn(
-            "running with the built-in demo credentials; set "
+            "running with the built-in demo S3 credentials; set "
             "MONOBUCKET_ROOT_ACCESS_KEY and MONOBUCKET_ROOT_SECRET_KEY before "
             "exposing this server");
     }

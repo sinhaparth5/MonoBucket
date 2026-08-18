@@ -1,5 +1,6 @@
 #include "server/server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include "cache/cache_factory.hpp"
 #include "core/lifecycle.hpp"
 #include "core/logging.hpp"
+#include "core/password.hpp"
 #include "monobucket/version.hpp"
 #include "s3/router.hpp"
 #include "server/console_api.hpp"
@@ -93,6 +95,55 @@ void Server::openStorage() {
         log::debug("metadata flushed");
     });
     Lifecycle::instance().onShutdown("io-executor", [this] { io_->stop(); });
+}
+
+void Server::provisionAdministrator() {
+    // An S3-only deployment has nothing to sign in to, so it is not held to
+    // having an account. A password supplied anyway is still honoured — it
+    // provisions the account ahead of the day the console is turned on.
+    if (!config_.consoleEnabled && config_.adminPassword.empty()) return;
+
+    auto existing = storage_->getAdmin();
+
+    if (config_.adminPassword.empty()) {
+        if (existing) {
+            log::info("console administrator '", existing->username, "' loaded from the store");
+            return;
+        }
+        // Refusing to start is the point. The alternatives are a console with a
+        // documented default password — which is a published credential on
+        // every deployment that skipped the docs — or a console that runs with
+        // no way in, which an operator discovers at the moment they need it.
+        throw ConfigError(
+            "no console administrator has been provisioned for this data directory. Set "
+            "MONOBUCKET_ADMIN_PASSWORD_FILE (preferred) or MONOBUCKET_ADMIN_PASSWORD to at least " +
+            std::to_string(password::kMinimumLength) +
+            " characters and start again; MONOBUCKET_ADMIN_USERNAME chooses the name and defaults "
+            "to 'admin'. Set MONOBUCKET_CONSOLE_ENABLED=false to run the S3 API without a console "
+            "instead.");
+    }
+
+    AdminRecord admin;
+    admin.username     = config_.adminUsername;
+    admin.passwordHash = password::hash(config_.adminPassword);
+    admin.createdAt    = existing ? existing->createdAt : nowMs();
+    admin.updatedAt    = nowMs();
+    storage_->putAdmin(admin);
+
+    // The plaintext is dropped here rather than kept for the process lifetime.
+    // Nothing after this point has a use for it, and a copy that outlives its
+    // use is a copy that can be read out of a core dump.
+    std::fill(config_.adminPassword.begin(), config_.adminPassword.end(), '\0');
+    config_.adminPassword.clear();
+    config_.adminPassword.shrink_to_fit();
+
+    if (existing) {
+        log::warn("console administrator reset to '", admin.username,
+                  "' from the environment; unset the password variable once the new credentials "
+                  "are confirmed so a restart cannot reset it again");
+    } else {
+        log::info("console administrator '", admin.username, "' provisioned");
+    }
 }
 
 void Server::openCache() {
@@ -196,6 +247,7 @@ void Server::watchForShutdown() {
 int Server::run() {
     prepareDataDirectory();
     openStorage();
+    provisionAdministrator();
     openCache();
     configureFramework();
     registerRoutes();

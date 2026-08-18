@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
@@ -31,5 +31,14 @@ export default defineConfig({
 		proxy: {
 			'/_mb': { target: 'http://127.0.0.1:9001', changeOrigin: false }
 		}
+	},
+	// A node-environment suite over `$lib/api.ts` and nothing else. The console
+	// is thin — its logic is which endpoint gets called, with what, and what it
+	// does with the answer — and that is all reachable with a stubbed `fetch`.
+	// A browser runner would add Playwright to CI to assert the same things
+	// through three more layers.
+	test: {
+		environment: 'node',
+		include: ['src/**/*.test.ts']
 	}
 });

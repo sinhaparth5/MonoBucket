@@ -157,6 +157,7 @@ jobs:
             | grep -Fq "${{ needs.prepare.outputs.version }}"
 
           docker run -d --name mb -p 9000:9000 -p 9001:9001 \
+            -e MONOBUCKET_ADMIN_PASSWORD=release-console-password \
             -e MONOBUCKET_ROOT_SECRET_KEY=release-smoke-secret "$REF"
 
           for _ in $(seq 1 60); do

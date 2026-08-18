@@ -38,8 +38,8 @@ ctest --preset dev -R sigv4                      # by discovered test name
 ./build/dev/bin/monobucket_tests --list-tests
 ```
 
-Tags in use: `[assets] [blob] [cache] [codec] [config] [digest] [engine] [env] [io] [keyspace]
-[metadata] [sigv4]`, plus the S3 suites (`s3_*_test.cpp`).
+Tags in use: `[assets] [blob] [cache] [codec] [config] [credentials] [digest] [engine] [env] [io]
+[keyspace] [metadata] [password] [session] [sigv4]`, plus the S3 suites (`s3_*_test.cpp`).
 
 Redis integration tests are skipped without a live server:
 
@@ -138,13 +138,33 @@ listener — a `/_mb/api/...` route on port 9000 would collide with a bucket nam
 `registerSystemRoutes()` must run *before* the S3 catch-all: Drogon prefers exact paths over regex
 handlers, but only when they were registered first.
 
-Console auth is a session cookie (`mb_session`, `SameSite=Strict`, 12 h), not SigV4 — there is one
-account, the root credentials. Consequences that are easy to break: secrets are compared with
-`CRYPTO_memcmp`, failed logins are rate-limited *globally* rather than per-IP (one account, so a
-per-IP bucket just tells an attacker to rotate source addresses), and the cookie's `SameSite=Strict`
-is why `pnpm dev` proxies `/_mb` to `:9001` in `vite.config.ts` instead of calling an absolute URL.
-The session TTL, sampler cadence and rate-limit window are deliberately constants, not
-`MONOBUCKET_*` knobs.
+Console auth is a session cookie (`mb_session`, `SameSite=Strict`, 12 h), not SigV4. The subject is
+the **administrator account** — a username and a PBKDF2-SHA256 verifier in the metadata store — and
+never an S3 credential. Keeping them apart is the point: revoking every access key leaves the
+session working, and signing out leaves every S3 client working. `SessionStore` and `LoginThrottle`
+live in `server/console_session.cpp` with the clock injected, so expiry and lockout are testable
+without a listener.
+
+Consequences that are easy to break: login is posted to `IoExecutor` because the verifier is
+deliberately expensive and the event loop must not pay it; a failed login returns one message for
+every cause *and* runs the verifier against `password::dummyHash()` when the username misses, so
+neither the text nor the timing distinguishes an unknown user from a wrong password; failed logins
+are rate-limited *globally* rather than per-IP (one account, so a per-IP bucket just tells an
+attacker to rotate source addresses); and the cookie's `SameSite=Strict` is why `pnpm dev` proxies
+`/_mb` to `:9001` in `vite.config.ts` instead of calling an absolute URL. The session TTL, sampler
+cadence and rate-limit window are deliberately constants, not `MONOBUCKET_*` knobs.
+
+Startup refuses to open a listener when the console is enabled, no administrator is provisioned and
+no password is configured (`Server::provisionAdministrator`). That is a decision, not an oversight:
+the alternatives are a documented default password or a console nobody can enter.
+
+S3 credentials are issued from `/_mb/api/credentials`. A generated secret crosses the wire exactly
+once, in the response that created or rotated it — `toJson(const AccessKeyRecord&)` has no
+`secretKey` field, so a later handler cannot leak one by reusing it. Revocation deletes the record;
+`s3/router.cpp` resolves the secret from the store on every signed request and caches nothing, which
+is what makes revocation take effect on the next request rather than the next restart. Secrets are
+stored recoverable because SigV4 is symmetric — there is no verifier that authenticates a signature
+without reproducing the secret, and that deviation is recorded in *Known limitations*.
 
 Graph data comes from `MetricsHistory` (`server/metrics_history.cpp`), a fixed ring of 240 samples
 at 5 s — 20 minutes, allocated once. It stores *deltas* between consecutive readings, so the browser
@@ -199,11 +219,11 @@ storing the variants in the same table entry; `assets::encodedFor()` picks one f
 `Accept-Encoding`. Both tools are optional — absent, the table simply has no variants. Nothing
 compresses per request.
 
-The frontend has no test suite: the SvelteKit scaffold's examples were removed along with the
-vitest configuration that existed only to run them. `vitest`, `playwright` and their plugins are
-still in `frontend/package.json` as unused devDependencies — drop them the next time the lockfile
-is regenerated, or re-add a `test` block to `vite.config.ts` if tests come back. `pnpm run check`
-and `pnpm run lint` are what CI runs.
+The frontend suite is `pnpm run test` (vitest, node environment, `src/**/*.test.ts`). It covers
+`$lib/api.ts` against a stubbed `fetch` — which endpoint is called, with what body, and what is done
+with the answer — because that is where the console's logic actually is. A browser runner would drag
+Playwright into CI to assert the same things through three more layers. `pnpm run check` and
+`pnpm run lint` are what CI runs today; add `pnpm run test` when the workflow is next touched.
 
 The console is a client-rendered SPA: `adapter-static` with `fallback: 'index.html'`, and the C++
 asset store hands `index.html` to any unmatched console route so SvelteKit resolves it client-side.
@@ -218,6 +238,10 @@ icon package and no emoji.
 
 ## Project conventions
 
+- **Two credential kinds, kept apart.** The administrator account is for people and the console;
+  S3 access keys are for programs and the S3 listener. Neither authenticates against the other's
+  surface. A change that lets one do the other's job is a regression regardless of how convenient
+  it is.
 - **Configuration is environment only.** Every knob is a `MONOBUCKET_*` variable parsed once at
   startup into the immutable `Config`, validated before the first listener opens. No config file
   format, nothing hot-reloaded. A malformed setting aborts startup with an actionable message rather

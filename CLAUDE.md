@@ -21,6 +21,13 @@ ctest --preset dev
 Other presets: `asan` (ASan+UBSan), `dev-redis` (debug + Redis backend), `release` (LTO, dashboard
 embedded), `release-redis`.
 
+Dependencies resolve `find_package` first and fall back to a pinned `FetchContent`
+(`backend/cmake/Dependencies.cmake`). Drogon is the exception: it is fetched *and patched*
+(`cmake/patches/drogon-expect-100-continue.patch`) because its parser rejects a zero-length body sent
+with `Expect: 100-continue` — how every S3 client writes an empty object. A system Drogon cannot take
+the patch, so configure refuses one unless `MONOBUCKET_ALLOW_SYSTEM_DROGON=ON`. Don't switch to a
+system Drogon to save build time; it silently loses empty-object support.
+
 Running a subset of tests — the suite is one Catch2 binary, `build/<preset>/bin/monobucket_tests`,
 registered with `catch_discover_tests`, so both work:
 
@@ -50,6 +57,12 @@ export MONOBUCKET_DATA_DIR=$PWD/data MONOBUCKET_ROOT_SECRET_KEY=local-dev-secret
 ```
 Port 9000 = S3 API, 9001 = console.
 
+`monobucket --fsck [--deep]` checks a stopped store: it walks the metadata against the payload tree
+and reports every disagreement — referenced-but-absent payloads, length mismatches, files nothing
+references and reclamation does not know about, and names the store could not have written.
+`--deep` additionally re-hashes every payload against the SHA-256 recorded at write time. It
+reports and never repairs. Exit 0 is clean, 2 means it found something, 1 means it could not run.
+
 ### Frontend (pnpm, in `frontend/`)
 
 ```bash
@@ -58,7 +71,6 @@ pnpm dev            # :5173, proxies to the C++ API
 pnpm run check      # svelte-check — CI runs this
 pnpm run lint       # prettier --check + eslint — CI runs this
 pnpm run format
-pnpm run test       # vitest, single run
 pnpm run build      # static output in frontend/build/, consumed by the embed step
 ```
 
@@ -108,10 +120,36 @@ document. Error code ⇄ HTTP status pairs live in one table in `s3_error.cpp` a
 at a call site — clients branch on the code string.
 
 `S3Context` (config, storage, cache, metrics) is passed by reference and never owned. HEAD is routed
-as GET by Drogon, so `handleGetObject` serves both.
+as GET by Drogon, so `handleGetObject` serves both. `CopyObject` deliberately answers 501 rather than
+storing the header's value as an object — that is a decision, not a gap.
+
+`OPTIONS` preflight (`s3/cors.cpp`) is answered *before* signature verification, since a browser
+preflight carries no credentials by definition.
 
 SigV4 is expressed over plain strings, not Drogon types, so it can be tested against the AWS
 reference vectors without a socket. Keep it that way.
+
+### Console backend (`server/console_api.cpp`)
+
+The dashboard is not served by the S3 code path. `registerConsoleApi()` mounts a JSON API under
+`/_mb/api/` (login, logout, session, overview, series, buckets, buckets/access, buckets/cors,
+buckets/policy, config, objects, upload, object, presign) that answers **only** on the console
+listener — a `/_mb/api/...` route on port 9000 would collide with a bucket named `_mb`. Both it and
+`registerSystemRoutes()` must run *before* the S3 catch-all: Drogon prefers exact paths over regex
+handlers, but only when they were registered first.
+
+Console auth is a session cookie (`mb_session`, `SameSite=Strict`, 12 h), not SigV4 — there is one
+account, the root credentials. Consequences that are easy to break: secrets are compared with
+`CRYPTO_memcmp`, failed logins are rate-limited *globally* rather than per-IP (one account, so a
+per-IP bucket just tells an attacker to rotate source addresses), and the cookie's `SameSite=Strict`
+is why `pnpm dev` proxies `/_mb` to `:9001` in `vite.config.ts` instead of calling an absolute URL.
+The session TTL, sampler cadence and rate-limit window are deliberately constants, not
+`MONOBUCKET_*` knobs.
+
+Graph data comes from `MetricsHistory` (`server/metrics_history.cpp`), a fixed ring of 240 samples
+at 5 s — 20 minutes, allocated once. It stores *deltas* between consecutive readings, so the browser
+never sees cumulative counters, and the first reading only establishes a baseline. Longer retention
+is `/metrics` plus a scraper's job; do not grow the ring.
 
 ### Storage invariants (`storage/`)
 
@@ -124,6 +162,9 @@ These are correctness rules, not style:
   to make a leaked or prematurely deleted blob impossible to overlook.
 - A blob is registered in the reclamation log (`trackBlob`) **before** its payload is written, so a
   crash leaves a trace collectable in time proportional to the leak, not to the object count.
+- `MONOBUCKET_DURABILITY` (`none` / `relaxed` / `strict`, `storage/durability.hpp`) decides how much
+  of a write reaches stable storage before it is acknowledged. It is global, not per-bucket, and an
+  unrecognised value fails startup rather than quietly weakening durability.
 - `listOrphans` takes an age cutoff. The grace period is load-bearing, not an optimisation:
   reclaiming an in-flight blob would drop its tracking record and leak it permanently. Startup
   recovery passes "now" because nothing is in flight then.
@@ -158,6 +199,17 @@ storing the variants in the same table entry; `assets::encodedFor()` picks one f
 `Accept-Encoding`. Both tools are optional — absent, the table simply has no variants. Nothing
 compresses per request.
 
+The frontend has no test suite: the SvelteKit scaffold's examples were removed along with the
+vitest configuration that existed only to run them. `vitest`, `playwright` and their plugins are
+still in `frontend/package.json` as unused devDependencies — drop them the next time the lockfile
+is regenerated, or re-add a `test` block to `vite.config.ts` if tests come back. `pnpm run check`
+and `pnpm run lint` are what CI runs.
+
+The console is a client-rendered SPA: `adapter-static` with `fallback: 'index.html'`, and the C++
+asset store hands `index.html` to any unmatched console route so SvelteKit resolves it client-side.
+Routes live under the `(app)` group (dashboard, `buckets`, `buckets/[name]`, `settings`) with `login`
+outside it; all API calls go through `$lib/api.ts`.
+
 Console styling is daisyUI 5 over Tailwind 4. The two themes (`monobucket`, `monobucket-dark`) are
 defined in `frontend/src/app.css`, not borrowed from daisyUI's built-ins; use semantic colour names
 (`bg-primary`, `text-base-content/60`) so both themes stay correct, never `dark:` and never a raw
@@ -174,6 +226,11 @@ icon package and no emoji.
   concurrency. Anything above `MONOBUCKET_MAX_MEMORY_BODY_BYTES` streams in fixed-size chunks;
   queues are bounded; RocksDB's block cache and memtables share one budget.
 - **S3 fidelity over convenience.** Where the spec and ergonomics disagree, match the spec.
+- **Deviations from S3 are deliberate and documented.** MonoBucket refuses two things S3 accepts:
+  object keys containing control characters, and keys containing a path traversal segment
+  (`isValidObjectKey`, `s3/request.cpp`). Both are refused at write time rather than stored as data
+  nothing can later list or address. Record any new deviation in *Known limitations* in
+  `README.md`; an undocumented one is indistinguishable from a bug.
 - **Comments explain the decision, not the code.** The existing comments justify why an alternative
   was rejected (see `keyspace.hpp`, `io_executor.hpp`, `metadata_store.hpp`). Match that register;
   don't add narration.
@@ -181,14 +238,31 @@ icon package and no emoji.
   three `set()` lines and `project(VERSION)`). Don't edit them by hand: `scripts/cut-release.sh`
   bumps the version, promotes the `[Unreleased]` changelog block and tags. `release.yml` refuses to
   publish unless the tag, `CMakeLists.txt` and `CHANGELOG.md` all agree.
-- **Every change ticks its `ROADMAP.md` checkbox and adds a `CHANGELOG.md` entry under
-  `[Unreleased]`, in the same commit.** Run `ctest --preset dev` before pushing.
+- **Every change adds a `CHANGELOG.md` entry under `[Unreleased]` in the same commit.** A change
+  that alters what the project can or cannot do also updates *Known limitations* in `README.md` —
+  that section is now the only record of what is unfinished, so letting it go stale loses the
+  information entirely. Run `ctest --preset dev` before pushing.
 
 ## Status vs. docs
 
-Phases 1–6 are complete: the S3 protocol layer (`backend/src/s3/`), the dashboard and the signed
-multi-arch image pipeline all exist and work. `ROADMAP.md` is the source of truth for what is *not*
-yet done — notably `io_uring`, `fsck`, per-bucket durability, `rediss://` TLS, C++23 `#embed`, and
-the conformance/benchmark suites of Phase 7, which is where any claim about throughput or RSS under
-load has to come from. Where a doc and the source disagree, trust the source and fix the doc in the
-same commit.
+The S3 protocol layer, the dashboard and the signed multi-arch image pipeline all exist and work.
+*Known limitations* in `README.md` is the source of truth for what is **not** done — there is no
+roadmap file. The one that most often trips people up:
+
+**Concurrent single-PUT uploads are not memory-bounded.** Peak RSS tracks concurrency × object size
+(four concurrent 32 MiB PUTs reach roughly 151 MiB). MonoBucket's write path is correctly chunked;
+the residency is Drogon's, which spills a body past `MONOBUCKET_MAX_MEMORY_BODY_BYTES` to a temp
+file and then hands the handler an `mmap` of the whole thing. Multipart is unaffected — each part
+is bounded by the client's part size. The fix is Drogon's `enableRequestStream`, which turns the
+PUT handler push-based and drags the SigV4 chunked verifier with it. Don't claim flat memory for
+single PUTs until that lands.
+
+Also unfinished: `io_uring` (the thread-pooled path is the sanctioned one), `rediss://` TLS
+(refused at startup with the reason), C++23 `#embed` for the asset generator (blocked on the Alpine
+toolchain floor), and LTO on musl.
+
+There is no automated conformance or benchmark suite in this repo; `ctest --preset dev` and
+`--preset asan` are what CI runs. Any claim about throughput or resident memory has to be measured
+before it is made.
+
+Where a doc and the source disagree, trust the source and fix the doc in the same commit.

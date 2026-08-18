@@ -16,9 +16,8 @@ FROM node:22-alpine AS frontend
 WORKDIR /src
 COPY . .
 
-# Playwright is a devDependency of the vitest browser tests and would pull
-# ~150 MB of browsers this stage never runs. pnpm's `allowBuilds` in
-# pnpm-workspace.yaml already blocks the postinstall; this is belt and braces.
+# Playwright lingers as an unused devDependency and its postinstall would pull
+# ~150 MB of browsers this stage has no use for.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # The dashboard is optional during early phases: if frontend/ has not been

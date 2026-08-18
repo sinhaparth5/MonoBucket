@@ -141,7 +141,7 @@ if ! grep -q "^set(MONOBUCKET_VERSION_MICRO $MICRO)$" CMakeLists.txt; then
     die "CMakeLists.txt did not take the version rewrite; check its formatting"
 fi
 
-git add CMakeLists.txt CHANGELOG.md ROADMAP.md
+git add CMakeLists.txt CHANGELOG.md
 git commit -m "Release $VERSION"
 git tag -a "$TAG" -m "MonoBucket $VERSION"
 

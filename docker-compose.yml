@@ -38,7 +38,10 @@ services:
     deploy:
       resources:
         limits:
-          # Memory stays flat by design; a hard cap makes a regression obvious.
+          # Reads and mixed traffic sit a few MiB above idle, so this cap is
+          # generous for them. Concurrent large single-PUT uploads are the
+          # exception and can approach it — see "Known limitations" in
+          # README.md. Raise this if you upload big objects in parallel.
           memory: 256M
 
   # Optional Redis cache backend (Phase 3). Start with:

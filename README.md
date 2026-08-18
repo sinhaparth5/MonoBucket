@@ -11,10 +11,6 @@
 MonoBucket packages a C++20 storage server and a Svelte dashboard into one
 binary. It runs without sidecars or an external database.
 
-> [!WARNING]
-> MonoBucket is pre-alpha software. Do not store the only copy of important
-> data in it. See the [roadmap](ROADMAP.md) before using it outside a test setup.
-
 ## What you get
 
 - An S3 API that works with AWS CLI, boto3, and rclone
@@ -46,8 +42,38 @@ aws --endpoint-url http://localhost:9000 s3 ls
 Change both credentials before exposing the server. The full list of settings
 is in [.env.example](.env.example).
 
+## Known limitations
+
+Every project has them; these are MonoBucket's, and they are worth reading
+before you rely on it:
+
+- **Concurrent single-PUT uploads are not memory-bounded.** Peak resident memory
+  tracks concurrency × object size — four simultaneous 32 MiB PUTs reach about
+  151 MiB. MonoBucket's own write path streams the body into the payload tree in
+  fixed-size chunks; the residency is below it, in Drogon, which spills a body
+  past `MONOBUCKET_MAX_MEMORY_BODY_BYTES` to a temporary file and then hands the
+  handler a memory map of the whole file. The pages are file-backed and
+  evictable rather than anonymous, so this is a weaker hazard than holding the
+  object on the heap, but it is resident. Multipart uploads are unaffected —
+  each part is bounded by the client's part size, which is why the AWS CLI and
+  rclone moving large objects stay flat. Fixing it means adopting Drogon's
+  request-streaming API.
+- **`CopyObject` is not implemented** and answers 501 rather than silently
+  storing the header's value as an object.
+- **No `io_uring` backend.** Blocking I/O runs on a bounded thread pool. Under
+  the workloads measured so far the request path, not the I/O pool, is the
+  limit.
+- **No TLS to Redis.** `rediss://` is refused at startup with the reason;
+  terminate TLS in front of Redis or use a private network.
+- **Object versioning, lifecycle rules, server-side encryption and IAM-style
+  policies** beyond the root credential do not exist.
+
+Two deliberate deviations from S3, both refused at write time rather than stored
+as data nothing can later address: object keys containing control characters,
+and keys containing a path traversal segment.
+
 ## Project links
 
-[Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
+[Changelog](CHANGELOG.md)
 
 MonoBucket is licensed under [GPL-3.0-or-later](LICENSE).

@@ -70,8 +70,7 @@ scripts/cut-release.sh 2026.09.0     # or an explicit version
 ```
 
 It rewrites the version in `CMakeLists.txt`, promotes the `[Unreleased]` block
-below under a dated CalVer heading, commits and tags. Tick the boxes in
-`ROADMAP.md` first — they go in the commit before the release, not in it.
+below under a dated CalVer heading, commits and tags.
 
 Pushing the tag is what publishes. `release.yml` refuses to go on unless the
 tag, `CMakeLists.txt` and this file agree, then builds both architectures on
@@ -100,6 +99,28 @@ them, rather than at the foot of the file:
 ## [Unreleased]
 
 ### Added
+
+<!-- Storage & protocol -->
+
+- **`monobucket --fsck [--deep]`** — the consistency check the reclamation log
+  cannot perform. Walks the metadata and the payload tree and reports every way
+  they disagree: payloads a live row references but that are absent, files whose
+  length does not match the row, files no row names and no reclamation record
+  covers, and names the store could not have written. `--deep` re-hashes every
+  payload against the SHA-256 recorded at write time, which is the only way to
+  see a payload rewritten to the same length. Reports and never repairs — acting
+  on a scan that raced a live writer is how a checker becomes the outage. Exits
+  0 when clean and 2 when it found something, so a caller can tell a damaged
+  store from a check that could not run.
+- **Per-bucket durability override**, settable through the console API
+  (`POST /_mb/api/buckets/access` with `durability`) and reported on the bucket
+  record. Unset means "follow `MONOBUCKET_DURABILITY`", which is not the same as
+  storing today's value: raising the global level lifts every bucket that never
+  asked for something else. The level reaches both the payload fsync and the
+  metadata log sync, because a bucket promised `strict` whose object row sat
+  unflushed would in fact only have been getting `relaxed`. The write-ahead log
+  is shared, so a strict write also flushes what its neighbours had pending —
+  every bucket gets at least what it asked for.
 
 <!-- Phase 6 — Packaging -->
 
@@ -490,10 +511,19 @@ them, rather than at the foot of the file:
   is no `svelte.config.js`.
 - **Tests.** Catch2 suite covering the environment grammar, configuration
   validation and the asset table's sortedness invariant.
-- **Documentation.** `ROADMAP.md` tracking all seven phases, `.env.example`
-  documenting every setting, and this changelog.
+- **Documentation.** `.env.example` documenting every setting, `README.md`
+  covering what works and what does not, and this changelog.
 
 ### Fixed
+
+- A **412 from a failed `If-Match`** was sent without a body, leaving a client
+  no error code to branch on. It now carries the S3 `PreconditionFailed`
+  document; 304 stays bodyless, as RFC 9110 requires, and keeps its validators.
+- **Creating a bucket named for a system route** (`healthz`, `readyz`,
+  `metrics`, `_mb`) returned a bare 405 from Drogon's exact-path router, which
+  matches before the S3 catch-all — so `handleCreateBucket`'s `InvalidBucketName`
+  refusal was unreachable and the client got an unparseable response. Those
+  paths now claim the write verbs and answer with the S3 error document.
 
 - **The release workflow would have failed on its own first tag.** It derived
   the image name from `github.repository`, which is `sinhaparth5/MonoBucket` —
@@ -598,6 +628,14 @@ them, rather than at the foot of the file:
   pushed LTO onto vendored targets that cannot accept it (CMP0069). LTO is now
   applied per-target to our own code only, and Drogon/Trantor are configured
   with deprecation warnings suppressed and their headers marked `SYSTEM`.
+
+### Removed
+
+- **`ROADMAP.md`**. Its open items now live under *Known limitations* in
+  [README.md](README.md), where someone deciding whether to use MonoBucket will
+  actually meet them.
+- The SvelteKit scaffold's example component and unit tests, and the vitest
+  configuration that existed only to run them.
 
 ### Security
 

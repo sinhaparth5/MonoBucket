@@ -328,6 +328,10 @@ const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
         {"dataDir", "MONOBUCKET_DATA_DIR"},
         {"region", "MONOBUCKET_REGION"},
         {"s3Domain", "MONOBUCKET_S3_DOMAIN"},
+        {"s3PublicUrl", "MONOBUCKET_S3_PUBLIC_URL"},
+        {"allocatableBytes", "MONOBUCKET_ALLOCATABLE_BYTES"},
+        {"capacityReservePercent", "MONOBUCKET_CAPACITY_RESERVE_PERCENT"},
+        {"defaultBucketQuotaBytes", "MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES"},
         {"durability", "MONOBUCKET_DURABILITY"},
         {"metadataMemoryBytes", "MONOBUCKET_METADATA_MEMORY_BYTES"},
         {"metadataMaxOpenFiles", "MONOBUCKET_METADATA_MAX_OPEN_FILES"},
@@ -654,6 +658,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                  {"usingDefaultCredentials", config.usingDefaultCredentials()},
                  {"s3Port", config.s3Port},
                  {"s3Domain", config.s3Domain},
+                 // Empty unless an operator stated it. The console falls back to
+                 // its own hostname and the S3 port, which is right for a direct
+                 // deployment and wrong behind any proxy.
+                 {"s3PublicUrl", config.s3PublicUrl},
                  {"version", version::kVersion}}));
         },
         {drogon::Get});

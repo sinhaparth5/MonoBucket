@@ -42,6 +42,8 @@ void printUsage() {
         << "  MONOBUCKET_CONSOLE_ENABLED         serve the dashboard    (true)\n"
         << "  MONOBUCKET_DATA_DIR                storage root           (/data)\n"
         << "  MONOBUCKET_REGION                  reported S3 region     (us-east-1)\n"
+        << "  MONOBUCKET_S3_PUBLIC_URL           public S3 origin, e.g. https://s3.example.com\n"
+        << "  MONOBUCKET_S3_DOMAIN               virtual-host domain    (path style only)\n"
         << "  MONOBUCKET_ADMIN_USERNAME          console login name     (admin)\n"
         << "  MONOBUCKET_ADMIN_PASSWORD          console password, >= 12 chars\n"
         << "  MONOBUCKET_ADMIN_PASSWORD_FILE     read it from a file instead\n"

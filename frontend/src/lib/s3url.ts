@@ -2,11 +2,6 @@ import type { Session } from '$lib/api';
 
 /// The address an S3 client would use for an object.
 ///
-/// Built in the browser, not on the server: `MONOBUCKET_HOST` is normally
-/// 0.0.0.0, so the only hostname known to reach this deployment is the one the
-/// console was itself loaded from. The server contributes the parts the browser
-/// cannot know — the S3 port and the endpoint domain, if one is configured.
-///
 /// With `MONOBUCKET_S3_DOMAIN` set the server accepts virtual-host addressing,
 /// where the bucket is a subdomain; without it, path style is the only form that
 /// works, because there is no way to tell `bucket.example.com` from a host that
@@ -17,17 +12,29 @@ export interface Endpoint {
 	secure: boolean;
 }
 
-/// Where this bucket answers, as far as this browser can tell.
+/// Where this bucket answers.
 ///
-/// Presigning needs the same answer the address bar would arrive at, because the
-/// host is inside the signature — so both callers below go through here rather
-/// than each deciding for themselves.
+/// Presigning needs the same answer the address bar will arrive at, because the
+/// host is *inside the signature* — so both callers below go through here
+/// rather than each deciding for themselves, and getting it wrong presents as
+/// SignatureDoesNotMatch on a link that has already been handed to somebody.
+///
+/// `MONOBUCKET_S3_PUBLIC_URL` is preferred over anything derived from the
+/// browser. Behind a reverse proxy the console is loaded from a different
+/// hostname on a different port from the S3 listener, so `location` describes
+/// the console and not the endpoint; the fallback below is only correct when a
+/// client reaches this server directly.
 export function s3Endpoint(session: Session, bucket: string): Endpoint {
+	const base = session.s3PublicUrl ? new URL(session.s3PublicUrl) : null;
+
 	return {
 		host: session.s3Domain
 			? `${bucket}.${session.s3Domain}`
-			: `${location.hostname}:${session.s3Port}`,
-		secure: location.protocol === 'https:'
+			: (base?.host ?? `${location.hostname}:${session.s3Port}`),
+		// From the stated endpoint when there is one: the console may be served
+		// over TLS by a proxy that talks plain HTTP to a listener, or the other
+		// way round, and the link has to name the scheme the browser will use.
+		secure: base ? base.protocol === 'https:' : location.protocol === 'https:'
 	};
 }
 

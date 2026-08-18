@@ -51,6 +51,21 @@ struct Config {
     /// bucket called "localhost".
     std::string s3Domain;
 
+    /// The origin S3 clients reach this deployment at — `https://s3.example.com`.
+    ///
+    /// Only the console reads it, and only to build a URL: it is what the object
+    /// links are written against and what gets *signed* as the host of a
+    /// presigned URL. Behind a reverse proxy that is not something the browser
+    /// can work out — the console is loaded from a different hostname, on a
+    /// different port, and `MONOBUCKET_HOST` is 0.0.0.0 — so it has to be
+    /// stated. Empty means "the console's own hostname and MONOBUCKET_PORT",
+    /// which is right for a direct deployment and wrong the moment there is a
+    /// proxy in front.
+    ///
+    /// Scheme included, because a presigned URL's signature covers the host and
+    /// the link has to name the scheme the browser will actually use.
+    std::string s3PublicUrl;
+
     /// How much of a write must reach stable storage before it is acknowledged.
     /// `relaxed` survives a process crash; `strict` survives a power cut and
     /// costs an fsync per commit.

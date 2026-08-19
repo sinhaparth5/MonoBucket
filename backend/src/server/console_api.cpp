@@ -337,6 +337,7 @@ const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
         {"metadataMaxOpenFiles", "MONOBUCKET_METADATA_MAX_OPEN_FILES"},
         {"reclaimGraceSeconds", "MONOBUCKET_RECLAIM_GRACE_SECONDS"},
         {"reclaimIntervalSeconds", "MONOBUCKET_RECLAIM_INTERVAL_SECONDS"},
+        {"multipartExpiryHours", "MONOBUCKET_MULTIPART_EXPIRY_HOURS"},
         {"ioThreads", "MONOBUCKET_IO_THREADS"},
         {"ioQueueLimit", "MONOBUCKET_IO_QUEUE_LIMIT"},
         {"rootAccessKey", "MONOBUCKET_ROOT_ACCESS_KEY"},

@@ -252,6 +252,33 @@ struct UploadRecord {
     UserMetadata userMetadata;
 };
 
+/// One page of ListMultipartUploads.
+///
+/// The upload rows are keyed `u<bucket>\0<key>\0<uploadId>`, so a listing
+/// resumes from the pair S3 pages on without a token of our own: the key
+/// marker and the upload-id marker together name the last row returned, and
+/// the next page starts immediately after it.
+struct ListUploadsRequest {
+    std::string prefix;
+
+    /// Exclusive lower bound, both halves. An upload-id marker without a key
+    /// marker is meaningless — S3 refuses that combination and so do we.
+    std::string keyMarker;
+    std::string uploadIdMarker;
+
+    std::uint32_t maxUploads = 1000;
+};
+
+struct ListUploadsResult {
+    std::vector<UploadRecord> uploads;
+
+    bool truncated = false;
+
+    /// What resumes this listing. Only meaningful when truncated.
+    std::string nextKeyMarker;
+    std::string nextUploadIdMarker;
+};
+
 /// One page of ListObjects/ListObjectsV2.
 struct ListObjectsRequest {
     std::string prefix;

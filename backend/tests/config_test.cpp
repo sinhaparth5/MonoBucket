@@ -129,6 +129,25 @@ TEST_CASE("the upload limit must sit inside its ceiling", "[config]") {
     CHECK_NOTHROW(equal.validate());
 }
 
+TEST_CASE("the multipart expiry cannot undercut the reclaim grace", "[config]") {
+    Config cfg = validConfig();
+    cfg.reclaimGraceSeconds  = 3600;
+    cfg.multipartExpiryHours = 0;
+    // Disabled is always allowed: an operator turning the sweep off is not
+    // making a claim about how long an upload takes.
+    CHECK_NOTHROW(cfg.validate());
+
+    // One hour of expiry against one hour of grace is the boundary, and it is
+    // permitted — the two are describing the same window.
+    cfg.multipartExpiryHours = 1;
+    CHECK_NOTHROW(cfg.validate());
+
+    // Any less and the sweep could abort an upload whose newest part has not
+    // finished landing, which the grace period exists to prevent.
+    cfg.reclaimGraceSeconds = 7200;
+    CHECK_THROWS_AS(cfg.validate(), ConfigError);
+}
+
 TEST_CASE("a zero upload limit is refused rather than read as unlimited", "[config]") {
     // Every other byte figure here treats zero as "no limit". A *maximum*
     // upload size that silently meant the opposite is the setting somebody

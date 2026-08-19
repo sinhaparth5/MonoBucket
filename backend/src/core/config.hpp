@@ -89,6 +89,23 @@ struct Config {
     /// reclamation to the deletion path and to startup recovery.
     std::uint32_t reclaimIntervalSeconds = 300;
 
+    /// How long a multipart upload may sit without progress before the sweeper
+    /// aborts it. Zero disables the sweep entirely.
+    ///
+    /// Unlike an orphaned payload, an abandoned upload is not collectable by
+    /// the reclamation log: its parts are properly referenced, so nothing
+    /// treats them as garbage. They stay on disk and stay charged against the
+    /// bucket's allocation until somebody aborts the upload, and an SDK that
+    /// gave up after its retries never will. Without an expiry the only bound
+    /// on that leak is operator attention.
+    ///
+    /// Seven days, which is what AWS's own guidance suggests configuring and
+    /// far longer than any upload a client is still making progress on. The
+    /// figure is deliberately generous: the sweep destroys parts, so the cost
+    /// of being too eager is somebody's transfer, and the cost of being too
+    /// patient is disk.
+    std::uint32_t multipartExpiryHours = 168;
+
     // --- Storage allocations -----------------------------------------------
 
     /// What may be allocated across every bucket. Zero derives it from the

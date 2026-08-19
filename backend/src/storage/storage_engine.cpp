@@ -68,6 +68,8 @@ StorageEngine::Options StorageEngine::optionsFrom(const Config& config) {
     options.metadataMemoryBytes = config.metadataMemoryBytes;
     options.maxOpenFiles        = static_cast<int>(config.metadataMaxOpenFiles);
     options.reclaimGraceMs      = static_cast<std::int64_t>(config.reclaimGraceSeconds) * 1000;
+    options.multipartExpiryMs =
+        static_cast<std::int64_t>(config.multipartExpiryHours) * 60 * 60 * 1000;
     options.allocatableBytes        = config.allocatableBytes;
     options.capacityReservePercent  = config.capacityReservePercent;
     options.defaultBucketQuotaBytes = config.defaultBucketQuotaBytes;
@@ -524,9 +526,54 @@ std::optional<UploadRecord> StorageEngine::getUpload(std::string_view uploadId) 
     return metadata_->getUpload(uploadId);
 }
 
-std::vector<UploadRecord> StorageEngine::listUploads(std::string_view bucket,
-                                                     std::uint32_t    maxUploads) {
-    return metadata_->listUploads(bucket, maxUploads);
+ListUploadsResult StorageEngine::listUploads(std::string_view          bucket,
+                                             const ListUploadsRequest& request) {
+    return metadata_->listUploads(bucket, request);
+}
+
+std::size_t StorageEngine::sweepExpiredUploads(std::size_t limit) {
+    if (options_.multipartExpiryMs <= 0) return 0;
+    return sweepUploadsIdleBefore(limit, nowMs() - options_.multipartExpiryMs);
+}
+
+std::size_t StorageEngine::sweepUploadsIdleBefore(std::size_t limit, TimestampMs cutoff) {
+    // `createdAt` narrows the scan; it does not decide anything. An upload that
+    // was begun a fortnight ago and received a part an hour ago is a client
+    // still working, and aborting it would destroy a transfer that is making
+    // progress — the one outcome this sweep must never produce. So every
+    // candidate is measured on its most recent part instead, and only an
+    // upload whose newest part is also past the cutoff is abandoned.
+    //
+    // The parts are read only for uploads the cheap filter already flagged, so
+    // the extra scan is paid on the stale ones rather than on every upload.
+    const auto candidates = metadata_->listUploadsCreatedBefore(limit, cutoff);
+
+    std::size_t swept = 0;
+    for (const UploadRecord& upload : candidates) {
+        TimestampMs lastActivity = upload.createdAt;
+        for (const PartRecord& part : metadata_->listParts(upload.uploadId)) {
+            lastActivity = std::max(lastActivity, part.uploadedAt);
+        }
+        if (lastActivity >= cutoff) continue;
+
+        try {
+            abortUpload(upload.uploadId);
+        } catch (const StorageError& ex) {
+            // A client that aborted or completed it between the scan and here
+            // wins the race, and there is nothing left to do. Anything else is
+            // worth a line, but never worth abandoning the rest of the sweep.
+            if (ex.code() != StorageErrorCode::NoSuchUpload) {
+                log::warn("could not expire upload ", upload.uploadId, ": ", ex.what());
+            }
+            continue;
+        }
+
+        log::info("expired multipart upload ", upload.uploadId, " for ", upload.bucket, '/',
+                  upload.key, ", idle since ", lastActivity);
+        swept += 1;
+    }
+
+    return swept;
 }
 
 PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t partNumber,
@@ -747,15 +794,22 @@ StorageEngine::FsckReport StorageEngine::fsck(const FsckOptions& options) {
         // Parts of uploads that have not completed. These are live data — an
         // upload survives a restart — so a missing part payload is a real
         // finding, not residue.
-        for (const UploadRecord& upload :
-             metadata_->listUploads(bucket.name, std::numeric_limits<std::uint32_t>::max())) {
-            for (const PartRecord& part : metadata_->listParts(upload.uploadId)) {
-                ++report.partsScanned;
-                referenced.emplace(part.blobId,
-                                   Reference{"upload " + upload.uploadId + " part " +
-                                                 std::to_string(part.partNumber),
-                                             part.size, std::string{}});
+        ListUploadsRequest uploadPage;
+        uploadPage.maxUploads = 1000;
+        while (true) {
+            const ListUploadsResult uploads = metadata_->listUploads(bucket.name, uploadPage);
+            for (const UploadRecord& upload : uploads.uploads) {
+                for (const PartRecord& part : metadata_->listParts(upload.uploadId)) {
+                    ++report.partsScanned;
+                    referenced.emplace(part.blobId,
+                                       Reference{"upload " + upload.uploadId + " part " +
+                                                     std::to_string(part.partNumber),
+                                                 part.size, std::string{}});
+                }
             }
+            if (!uploads.truncated) break;
+            uploadPage.keyMarker      = uploads.nextKeyMarker;
+            uploadPage.uploadIdMarker = uploads.nextUploadIdMarker;
         }
     }
 

@@ -98,7 +98,28 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Abandoned multipart uploads are now reclaimed.** A new
+  `MONOBUCKET_MULTIPART_EXPIRY_HOURS` (default 168, `0` disables) aborts an
+  upload that has gone that long without a part arriving, releasing its parts
+  and the allocation they were charged against. Previously nothing expired
+  them: an upload's parts are properly referenced, so the payload sweeper never
+  treated them as garbage, and a client that crashed mid-transfer left bytes on
+  disk and charged to the bucket for good. What decides is the upload's most
+  recent part rather than when it began, so a slow client is safe for as long
+  as it is still making progress. The sweep rides the existing reclamation
+  tick and is bounded per pass.
+- `ListMultipartUploads` now paginates. `key-marker` and `upload-id-marker` are
+  honoured, `NextKeyMarker`/`NextUploadIdMarker` are returned, and
+  `IsTruncated` reports the truth — it was previously hardcoded to `false`,
+  which left more than `max-uploads` uploads impossible to enumerate. An
+  `upload-id-marker` without a `key-marker` is refused, as S3 refuses it.
+
+### Changed
+
+- `--fsck` pages through a bucket's in-progress uploads rather than requesting
+  them all at once.
 
 ---
 

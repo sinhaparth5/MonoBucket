@@ -152,9 +152,21 @@ public:
 
     virtual std::optional<UploadRecord> getUpload(std::string_view uploadId) = 0;
 
-    /// In progress uploads for one bucket, ordered by key then upload id.
-    virtual std::vector<UploadRecord> listUploads(std::string_view bucket,
-                                                  std::uint32_t    maxUploads) = 0;
+    /// In progress uploads for one bucket, ordered by key then upload id —
+    /// which is the order the row keys already sort in, so a page resumes by
+    /// seeking rather than by counting.
+    virtual ListUploadsResult listUploads(std::string_view          bucket,
+                                          const ListUploadsRequest& request) = 0;
+
+    /// Uploads begun before `cutoff`, across every bucket, capped at `limit`.
+    ///
+    /// Keyed off the `U<uploadId>` index rather than the per-bucket one so a
+    /// sweep is a single scan instead of one per bucket. `createdAt` is a
+    /// filter, not the verdict: an upload that has been receiving parts for a
+    /// week is old by this measure and not abandoned, which is why the caller
+    /// consults the parts before aborting anything.
+    virtual std::vector<UploadRecord> listUploadsCreatedBefore(std::size_t limit,
+                                                               TimestampMs cutoff) = 0;
 
     struct PutPartOutcome {
         /// Re-uploading a part number replaces it; the previous payload is

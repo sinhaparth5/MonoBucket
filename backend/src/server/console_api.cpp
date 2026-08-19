@@ -11,7 +11,6 @@
 
 #include <drogon/drogon.h>
 #include <nlohmann/json.hpp>
-#include <openssl/crypto.h>
 
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
@@ -87,13 +86,6 @@ HttpResponsePtr jsonResponse(const nlohmann::json& body,
 
 HttpResponsePtr errorJson(const std::string& message, drogon::HttpStatusCode status) {
     return jsonResponse({{"error", message}}, status);
-}
-
-/// Equal-length, timing-independent comparison. A byte-by-byte `==` on a secret
-/// leaks its prefix to anyone willing to measure.
-bool secretsMatch(const std::string& a, const std::string& b) noexcept {
-    if (a.size() != b.size()) return false;
-    return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
 /// Decides whether the session cookie carries `Secure`.
@@ -447,13 +439,17 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         entry.allowed = allowed;
         entry.detail  = std::move(detail);
 
-        io.post([&storage, entry = std::move(entry)]() {
+        const auto recorded = entry.action;
+        const bool accepted = io.post([&storage, entry = std::move(entry)]() {
             try {
                 storage.appendAudit(entry);
             } catch (const std::exception& error) {
                 log::warn("could not record the audit entry '", entry.action, "': ", error.what());
             }
         });
+        // Debug, not warn: a full queue means the process is shedding load, and
+        // a line per dropped entry would add to what saturated it.
+        if (!accepted) log::debug("audit entry '", recorded, "' dropped: I/O queue full");
     };
 
     // Every console route shares the same four gates, in this order: it must

@@ -98,7 +98,17 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The console build is warning-free again. `registerConsoleApi()` discarded the
+  `[[nodiscard]]` result of `IoExecutor::post` when writing an audit entry; the
+  drop was always deliberate — a saturated queue must shed the record rather
+  than delay the request it describes — but the call site never said so and now
+  logs the dropped action at debug level.
+- Removed `secretsMatch()` from `console_api.cpp`. It was the timing-safe
+  comparison console sign-in used before authentication moved to a PBKDF2 user
+  verifier, and has been unreachable since; `<openssl/crypto.h>` went with it as
+  the file's only user.
 
 ---
 

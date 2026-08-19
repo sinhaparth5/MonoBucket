@@ -38,8 +38,10 @@ ctest --preset dev -R sigv4                      # by discovered test name
 ./build/dev/bin/monobucket_tests --list-tests
 ```
 
-Tags in use: `[assets] [blob] [cache] [codec] [config] [credentials] [digest] [engine] [env] [io]
-[keyspace] [metadata] [password] [quota] [session] [sigv4]`, plus the S3 suites (`s3_*_test.cpp`).
+Tags are per-suite and there are ~30 of them (`[assets] [blob] [cache] [checksum] [chunked] [codec]
+[config] [cors] [credentials] [digest] [engine] [env] [identity] [io] [keyspace] [metadata]
+[multipart] [operation] [password] [policy] [quota] [reclaim] [recovery] [redis] [request] [session]
+[sigv4] [uri] [xml]` and more); `--list-tests` is the authority, not this list.
 
 Redis integration tests are skipped without a live server:
 
@@ -63,6 +65,13 @@ references and reclamation does not know about, and names the store could not ha
 `--deep` additionally re-hashes every payload against the SHA-256 recorded at write time. It
 reports and never repairs. Exit 0 is clean, 2 means it found something, 1 means it could not run.
 
+`docker-compose.yml` is the deployment reference, and the annotated one: it is where the intended
+value of every `MONOBUCKET_*` knob is written down. The console administrator's password is passed
+as a Docker secret (`secrets/admin_password.txt`, gitignored, see `secrets/README.md`) rather than an
+environment variable, because `environment:` values are readable from `docker inspect` and
+`/proc/<pid>/environ`. That file is read only to create or *reset* the account — leaving it in place
+resets the password on every restart.
+
 ### Frontend (pnpm, in `frontend/`)
 
 ```bash
@@ -70,12 +79,13 @@ pnpm install
 pnpm dev            # :5173, proxies to the C++ API
 pnpm run check      # svelte-check — CI runs this
 pnpm run lint       # prettier --check + eslint — CI runs this
+pnpm run test       # vitest, node environment — CI runs this
 pnpm run format
 pnpm run build      # static output in frontend/build/, consumed by the embed step
 ```
 
 CI (`.github/workflows/ci.yml`) runs backend presets `dev` and `asan`, the frontend
-check/lint/build, and an amd64 image smoke test that also fetches the console out of the running
+check/lint/test/build, and an amd64 image smoke test that also fetches the console out of the running
 container — the one place the embedded dashboard is exercised in its shipping form. On `master` it
 publishes that same image as `edge`. Releases are `release.yml`: two native runners (amd64 and
 `ubuntu-24.04-arm`), push by digest, merge into a manifest list, cosign it keylessly, publish. Never
@@ -95,6 +105,10 @@ C++ formatting is `.clang-format` (Google base, 100 cols, 4-space indent, `SortI
 Everything except `main()` lives in the `monobucket_core` static library so the test binary can link
 it; `main.cpp` is the only file in the `monobucket` executable target. New `.cpp` files must be added
 to `MONOBUCKET_CORE_SOURCES` in `backend/CMakeLists.txt` (and new tests to `backend/tests/CMakeLists.txt`).
+
+`common/` is a separate, header-only target (`MonoBucket::Common`, INTERFACE): `constants.hpp` plus
+`version.hpp.in`, which CMake configures into the build tree. The version therefore reaches the code
+from `CMakeLists.txt` and never from a hand-maintained header — nothing else should re-declare it.
 
 ### Threading rule
 
@@ -132,8 +146,9 @@ reference vectors without a socket. Keep it that way.
 ### Console backend (`server/console_api.cpp`)
 
 The dashboard is not served by the S3 code path. `registerConsoleApi()` mounts a JSON API under
-`/_mb/api/` (login, logout, session, overview, series, buckets, buckets/access, buckets/cors,
-buckets/policy, config, objects, upload, object, presign) that answers **only** on the console
+`/_mb/api/` (login, logout, session, overview, series, audit, buckets, buckets/access, buckets/cors,
+buckets/policy, buckets/quota, config, objects, object, upload, upload-limit, presign, credentials,
+credentials/rotate, users, users/password) that answers **only** on the console
 listener — a `/_mb/api/...` route on port 9000 would collide with a bucket named `_mb`. Both it and
 `registerSystemRoutes()` must run *before* the S3 catch-all: Drogon prefers exact paths over regex
 handlers, but only when they were registered first.
@@ -176,6 +191,14 @@ cadence and rate-limit window are deliberately constants, not `MONOBUCKET_*` kno
 Startup refuses to open a listener when the console is enabled, no administrator is provisioned and
 no password is configured (`Server::provisionAdministrator`). That is a decision, not an oversight:
 the alternatives are a documented default password or a console nobody can enter.
+
+Startup also runs two record-rewriting passes over the store — `core/identity_migration.cpp` (adopts
+ownerless access keys into the administrator account) and `server/policy_reconcile.cpp` (narrows
+bucket access to what this build actually enforces, and names any stored policy it will not
+evaluate). Both are free functions, not `Server` members, for the same reason: they change records
+an operator already has, so they must be testable against a bare store rather than a live listener.
+An unenforceable policy document is left byte-for-byte as written — it is the operator's text, and
+deleting it would destroy the only record of the intent — but it grants nothing.
 
 S3 credentials are issued from `/_mb/api/credentials`. A generated secret crosses the wire exactly
 once, in the response that created or rotated it — `toJson(const AccessKeyRecord&)` has no
@@ -276,19 +299,23 @@ compresses per request.
 The frontend suite is `pnpm run test` (vitest, node environment, `src/**/*.test.ts`). It covers
 `$lib/api.ts` against a stubbed `fetch` — which endpoint is called, with what body, and what is done
 with the answer — because that is where the console's logic actually is. A browser runner would drag
-Playwright into CI to assert the same things through three more layers. `pnpm run check` and
-`pnpm run lint` are what CI runs today; add `pnpm run test` when the workflow is next touched.
+Playwright into CI to assert the same things through three more layers. CI runs `check`, `lint`,
+`test` and `build`.
 
 The console is a client-rendered SPA: `adapter-static` with `fallback: 'index.html'`, and the C++
 asset store hands `index.html` to any unmatched console route so SvelteKit resolves it client-side.
-Routes live under the `(app)` group (dashboard, `buckets`, `buckets/[name]`, `settings`) with `login`
-outside it; all API calls go through `$lib/api.ts`.
+Routes live under the `(app)` group (dashboard, `buckets`, `buckets/[name]`, `activity`,
+`credentials`, `users`, `settings`) with `login` outside it; all API calls go through `$lib/api.ts`.
+Runes mode is forced for everything outside `node_modules` in `vite.config.ts` — write Svelte 5
+runes, not the legacy reactive syntax.
 
 Console styling is daisyUI 5 over Tailwind 4. The two themes (`monobucket`, `monobucket-dark`) are
 defined in `frontend/src/app.css`, not borrowed from daisyUI's built-ins; use semantic colour names
 (`bg-primary`, `text-base-content/60`) so both themes stay correct, never `dark:` and never a raw
-Tailwind palette colour for text. Icons come from `$lib/components/Icon.svelte` — one inline set, no
-icon package and no emoji.
+Tailwind palette colour for text; `app.css` records the measured contrast ratio of every semantic
+pair, so a colour change means re-checking them. Icons come from `$lib/components/Icon.svelte` — one
+inline set, no icon package and no emoji. Charts are LayerChart over the same daisyUI variables
+(`SeriesChart`, `ThroughputChart`), which is why they follow the theme without a second palette.
 
 ## Project conventions
 

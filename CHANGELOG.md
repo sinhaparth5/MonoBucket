@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.7] — 2026-08-19
+
 ### Security
 
 - **A bucket policy containing a `Deny` no longer grants anonymous access.**

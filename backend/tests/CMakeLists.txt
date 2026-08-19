@@ -13,6 +13,7 @@ add_executable(monobucket_tests
     blob_store_test.cpp
     cache_factory_test.cpp
     codec_test.cpp
+    content_headers_test.cpp
     digest_test.cpp
     fallback_cache_test.cpp
     io_executor_test.cpp
@@ -37,8 +38,12 @@ add_executable(monobucket_tests
 # The temporary-directory fixture lives beside the tests that use it.
 target_include_directories(monobucket_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# RocksDB is otherwise private to the core library. The tests link it for one
+# reason: writing a record in an older build's format straight into the store,
+# which is the only way to assert that today's decoder still reads it.
 target_link_libraries(monobucket_tests PRIVATE
     monobucket_core
+    ${MONOBUCKET_ROCKSDB_TARGET}
     Catch2::Catch2WithMain)
 
 include(Catch)

@@ -185,6 +185,12 @@ public:
     /// arrived check is the one that is true.
     void requireWithinUploadLimit(std::uint64_t bytes, std::string_view what) const;
 
+    /// Throws unless every set field of `headers` can be emitted as a response
+    /// header. Checked on the way in rather than escaped on the way out: these
+    /// values are returned on every read of the object, so a CR that got stored
+    /// once would split every response for that key from then on.
+    static void requireStorableContentHeaders(const ContentHeaders& headers);
+
     // --- Objects -----------------------------------------------------------
 
     /// Opens a payload for streaming and registers it for reclamation first, so
@@ -205,6 +211,11 @@ public:
         std::string  key;
         std::string  contentType = "application/octet-stream";
         UserMetadata userMetadata;
+
+        /// Cache-Control and the rest, stored with the object and returned on
+        /// every read. createUpload keeps them on the upload record so that
+        /// completion can put them on the assembled object.
+        ContentHeaders content;
 
         /// What the client asked to have verified, already computed over the
         /// bytes that arrived. Verification is the S3 layer's, not this one's:

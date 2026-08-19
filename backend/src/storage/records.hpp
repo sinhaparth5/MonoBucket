@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/identity.hpp"
@@ -31,6 +32,60 @@ std::string toIso8601(TimestampMs ms);
 /// round-trip through the store is byte-stable, which keeps ETags of the
 /// metadata itself comparable and makes tests deterministic.
 using UserMetadata = std::map<std::string, std::string>;
+
+/// The response headers S3 lets a client attach at write time and returns
+/// unchanged on every read: Cache-Control, Content-Disposition,
+/// Content-Encoding, Content-Language and Expires.
+///
+/// Kept beside contentType rather than folded into UserMetadata, because they
+/// are not user metadata: they are emitted as themselves rather than under the
+/// `x-amz-meta-` prefix, and something downstream acts on them. An object whose
+/// `Content-Encoding: gzip` had been stored as metadata would still be served
+/// as bytes the browser cannot decode.
+///
+/// Empty means the header was never set and nothing is emitted for it. S3 draws
+/// no distinction between an absent header and one set to the empty string, so
+/// neither do we.
+struct ContentHeaders {
+    std::string cacheControl;
+    std::string contentDisposition;
+    std::string contentEncoding;
+    std::string contentLanguage;
+    std::string expires;
+
+    bool empty() const noexcept {
+        return cacheControl.empty() && contentDisposition.empty() &&
+               contentEncoding.empty() && contentLanguage.empty() && expires.empty();
+    }
+};
+
+/// Appended to the object and upload records rather than versioned into them,
+/// for the reason given beside the checksum encoding: bumping the record
+/// version would refuse every row written before this existed. A record from an
+/// older build simply ends before these fields and reads back with none set.
+///
+/// Each header that has a value is written as a one-byte id and a string, so a
+/// build that does not recognise an id can still skip its value and keep
+/// reading, and a header nobody set costs one byte for the whole group.
+void           encodeContentHeaders(codec::Writer& writer, const ContentHeaders& headers);
+ContentHeaders decodeContentHeaders(codec::Reader& reader);
+
+/// Whether a value may be stored and later emitted as a response header.
+///
+/// Refuses the control characters — CR and LF above all — that would let a
+/// stored value close the header and start another one, or a body, in every
+/// response that object is ever served in. That is response splitting, and one
+/// write would poison every subsequent read, so it is refused at the door
+/// rather than escaped on the way out. Bytes at or above 0x80 are allowed: a
+/// Content-Disposition filename is routinely UTF-8.
+///
+/// Declared here rather than beside the S3 request parsing because the storage
+/// engine enforces it too, and the two must not be able to disagree about what
+/// is storable.
+bool isStorableHeaderValue(std::string_view value);
+
+/// Every set field of `headers` satisfies isStorableHeaderValue.
+bool areStorableHeaderValues(const ContentHeaders& headers);
 
 /// One rule of a bucket's CORS configuration.
 ///
@@ -248,6 +303,11 @@ struct ObjectRecord {
     TimestampMs  lastModified = 0;
     UserMetadata userMetadata;
 
+    /// Cache-Control and friends, as given at PutObject or at
+    /// CreateMultipartUpload. Returned on GET and HEAD unless the request
+    /// carries a `response-*` override.
+    ContentHeaders content;
+
     /// The `x-amz-checksum-*` value the client asked to have verified, kept so
     /// a reader can be given the same guarantee the writer got. Absent for an
     /// object uploaded without one, which stays the ordinary case — S3 reports
@@ -276,6 +336,12 @@ struct UploadRecord {
     std::string  contentType = "application/octet-stream";
     TimestampMs  createdAt   = 0;
     UserMetadata userMetadata;
+
+    /// Carried from CreateMultipartUpload to the assembled object, because
+    /// that is the only request in a multipart upload that can name them —
+    /// UploadPart describes a part, and CompleteMultipartUpload has no body of
+    /// its own to describe.
+    ContentHeaders content;
 
     /// The algorithm named at CreateMultipartUpload, if any. Every part is
     /// then checksummed under it whether or not the client sends a value,

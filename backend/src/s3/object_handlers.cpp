@@ -2,6 +2,7 @@
 #include <cctype>
 
 #include "core/config.hpp"
+#include "s3/content_headers.hpp"
 #include "s3/handlers.hpp"
 #include "s3/response.hpp"
 #include "s3/s3_error.hpp"
@@ -13,23 +14,6 @@ namespace {
 
 /// S3 caps one DeleteObjects request at a thousand keys.
 constexpr std::size_t kMaxDeleteKeys = 1000;
-
-/// Query parameters that override response headers. Used by presigned links
-/// that want a browser to download rather than render, which is precisely what
-/// the dashboard's link generator needs.
-struct ResponseOverride {
-    const char* parameter;
-    const char* header;
-};
-
-constexpr ResponseOverride kOverrides[] = {
-    {"response-content-type",        "Content-Type"},
-    {"response-content-disposition", "Content-Disposition"},
-    {"response-content-encoding",    "Content-Encoding"},
-    {"response-content-language",    "Content-Language"},
-    {"response-cache-control",       "Cache-Control"},
-    {"response-expires",             "Expires"},
-};
 
 bool etagMatches(std::string_view header, std::string_view etag) {
     // `If-Match: *` means "any current version", which for a key that exists is
@@ -80,27 +64,31 @@ int evaluatePreconditions(const drogon::HttpRequestPtr& http, const ObjectRecord
     return 0;
 }
 
-void applyObjectHeaders(const drogon::HttpResponsePtr& response, const ObjectRecord& record) {
+void applyObjectHeaders(const drogon::HttpResponsePtr& response, const ObjectRecord& record,
+                        const S3Request& request) {
     response->addHeader(headers::kETag, quoteETag(record.etag));
     response->addHeader("Last-Modified", toHttpDate(record.lastModified));
     response->addHeader("Accept-Ranges", "bytes");
+
+    // What was stored at write time, unless the request overrode it. Resolved
+    // rather than written twice: emitting the stored value and then letting a
+    // second pass overwrite it would rest on addHeader replacing rather than
+    // appending, which is a Drogon detail and not a contract.
+    for (const auto& [name, value] : resolveContentHeaders(record.content, request)) {
+        response->addHeader(std::string(name), value);
+    }
 
     for (const auto& [name, value] : record.userMetadata) {
         response->addHeader("x-amz-meta-" + name, value);
     }
 }
 
-void applyOverrides(const drogon::HttpResponsePtr& response, const S3Request& request) {
-    for (const auto& [parameter, header] : kOverrides) {
-        const auto value = request.queryValue(parameter);
-        if (!value || value->empty()) continue;
-
-        if (std::string_view(header) == "Content-Type") {
-            response->setContentTypeString(*value);
-        } else {
-            response->addHeader(header, *value);
-        }
-    }
+/// Content-Type alone. It is not a ContentHeaders field — the record has kept
+/// it separately since before the others existed — and it is set rather than
+/// added, because Drogon owns the response's content type.
+void applyContentTypeOverride(const drogon::HttpResponsePtr& response, const S3Request& request) {
+    const auto value = request.queryValue("response-content-type");
+    if (value && !value->empty()) response->setContentTypeString(*value);
 }
 
 /// `x-amz-checksum-mode: ENABLED`. Opt-in because reporting the checksum
@@ -146,6 +134,20 @@ drogon::HttpResponsePtr handleGetObject(const S3Context& context, const S3Reques
         auto response = emptyResponse(precondition);
         response->addHeader(headers::kETag, quoteETag(record->etag));
         response->addHeader("Last-Modified", toHttpDate(record->lastModified));
+
+        // The freshness headers too, per RFC 9110 §15.4.5. A 304 is what a CDN
+        // gets when it revalidates, and one that came back without a
+        // Cache-Control would leave the edge with nothing to say how long the
+        // copy it just confirmed may now be kept.
+        //
+        // Only those two. The others describe a representation this response
+        // does not carry.
+        for (const auto& [name, value] : resolveContentHeaders(record->content, request)) {
+            if (name == "Cache-Control" || name == "Expires") {
+                response->addHeader(std::string(name), value);
+            }
+        }
+
         applyCommonHeaders(response, request.requestId);
         return response;
     }
@@ -185,7 +187,7 @@ drogon::HttpResponsePtr handleGetObject(const S3Context& context, const S3Reques
         response->setStatusCode(drogon::k206PartialContent);
     }
 
-    applyObjectHeaders(response, *record);
+    applyObjectHeaders(response, *record, request);
 
     // Only for a whole-object read, and only when asked. The stored checksum
     // covers the entire payload, so returning it beside a range would invite a
@@ -197,7 +199,7 @@ drogon::HttpResponsePtr handleGetObject(const S3Context& context, const S3Reques
                             std::string(checksumTypeOf(record->checksum)));
     }
 
-    applyOverrides(response, request);
+    applyContentTypeOverride(response, request);
     applyCommonHeaders(response, request.requestId);
 
     context.metrics.bytesOut.fetch_add(
@@ -224,6 +226,7 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
     put.key          = request.key;
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
+    put.content      = collectContentHeaders(http);
 
     // Resolved before anything is read: the algorithm decides what is hashed as
     // the payload streams past, and a request that names one we cannot compute

@@ -24,6 +24,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/s3/checksum.cpp
     src/s3/chunked.cpp
     src/s3/bucket_policy.cpp
+    src/s3/content_headers.cpp
     src/s3/cors.cpp
     src/s3/handlers.cpp
     src/s3/multipart_handlers.cpp

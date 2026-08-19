@@ -181,6 +181,11 @@ UserMetadata collectUserMetadata(const drogon::HttpRequestPtr& request);
 /// The content type to store, defaulting the way S3 does.
 std::string contentTypeOf(const drogon::HttpRequestPtr& request);
 
+/// The five response headers S3 stores with an object, read off a PutObject or
+/// CreateMultipartUpload request. Throws InvalidArgument on a value that could
+/// not be emitted safely — see isStorableHeaderValue.
+ContentHeaders collectContentHeaders(const drogon::HttpRequestPtr& request);
+
 /// Verifies a Content-MD5 header when the client sent one. Throws BadDigest on
 /// a mismatch and InvalidDigest when the header is not base64 of 16 bytes.
 ///

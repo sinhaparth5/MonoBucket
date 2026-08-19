@@ -354,6 +354,7 @@ std::string encodeObject(const ObjectRecord& object) {
     writer.varint(static_cast<std::uint64_t>(object.lastModified));
     encodeMetadata(writer, object.userMetadata);
     encodeChecksum(writer, object.checksum);
+    encodeContentHeaders(writer, object.content);
     return out;
 }
 
@@ -370,7 +371,11 @@ ObjectRecord decodeObject(std::string_view key, std::string_view stored) {
     object.contentType  = reader.string();
     object.lastModified = static_cast<TimestampMs>(reader.varint());
     object.userMetadata = decodeMetadata(reader);
+    // Each of these was appended after the format was already in use, so each
+    // is read only if the record is long enough to hold it. A row written
+    // before the field existed stops here and keeps its default.
     if (!reader.exhausted()) object.checksum = decodeChecksum(reader);
+    if (!reader.exhausted()) object.content = decodeContentHeaders(reader);
     return object;
 }
 
@@ -384,6 +389,7 @@ std::string encodeUpload(const UploadRecord& upload) {
     writer.varint(static_cast<std::uint64_t>(upload.createdAt));
     encodeMetadata(writer, upload.userMetadata);
     encodeChecksum(writer, Checksum{upload.checksumAlgorithm, {}, 0});
+    encodeContentHeaders(writer, upload.content);
     return out;
 }
 
@@ -399,6 +405,7 @@ UploadRecord decodeUpload(std::string_view uploadId, std::string_view stored) {
     upload.createdAt    = static_cast<TimestampMs>(reader.varint());
     upload.userMetadata = decodeMetadata(reader);
     if (!reader.exhausted()) upload.checksumAlgorithm = decodeChecksum(reader).algorithm;
+    if (!reader.exhausted()) upload.content = decodeContentHeaders(reader);
     return upload;
 }
 

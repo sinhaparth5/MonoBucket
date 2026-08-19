@@ -78,6 +78,7 @@ drogon::HttpResponsePtr handleCreateMultipartUpload(const S3Context& context,
     put.key          = request.key;
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
+    put.content      = collectContentHeaders(http);
 
     // There is no payload here to checksum, only a decision about what the
     // parts will carry — and it has to be recorded now, because the composite

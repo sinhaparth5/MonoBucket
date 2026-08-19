@@ -18,6 +18,14 @@ inline constexpr std::size_t kMaxKeyLength = 1024;
 inline constexpr std::size_t kMinBucketNameLength = 3;
 inline constexpr std::size_t kMaxBucketNameLength = 63;
 
+/// Ceiling on one stored response header — Cache-Control, Content-Disposition,
+/// Content-Encoding, Content-Language or Expires. S3 publishes no limit of its
+/// own for these, but they are persisted with the object and emitted on every
+/// read, so an unbounded value would let one write inflate every response for
+/// that key indefinitely. Generous next to the longest of them that means
+/// anything: a Content-Disposition carrying a UTF-8 filename.
+inline constexpr std::size_t kMaxContentHeaderLength = 1024;
+
 /// ListObjects/ListObjectsV2 page size when the client does not ask for one.
 inline constexpr std::uint32_t kDefaultMaxKeys = 1000;
 inline constexpr std::uint32_t kMaxMaxKeys     = 1000;

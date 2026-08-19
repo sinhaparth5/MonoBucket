@@ -231,6 +231,18 @@ These are correctness rules, not style:
   reclaiming an in-flight blob would drop its tracking record and leak it permanently. Startup
   recovery passes "now" because nothing is in flight then.
 
+`ObjectRecord` and `UploadRecord` carry the five stored response headers
+(`Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language`,
+`Expires`) as a `ContentHeaders`. Adding a field to `ObjectRecord` touches three
+encodings, not one: the stored record (`rocksdb_metadata_store.cpp`, appended
+and read only if the row is long enough, so no version bump), the cached record
+(`s3/handlers.cpp`, which has its own `kCachedObjectVersion` and *must* be
+bumped — a warm cache that dropped a field would answer differently from a cold
+one), and whatever emits it. `resolveContentHeaders` (`s3/content_headers.cpp`)
+decides stored-value-versus-`response-*`-override as a pure function over
+`S3Request`, deliberately away from Drogon so the precedence presigned links
+depend on is testable without a socket.
+
 All records share one RocksDB column family with a one-byte type tag (`storage/keyspace.hpp`) — a
 family per type would multiply the memtable floor. NUL separates key components (safe: bucket names
 are DNS-restricted, keys are UTF-8) and sorts below everything, so `o<bucket>\0` iterates exactly one

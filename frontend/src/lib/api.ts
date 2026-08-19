@@ -90,6 +90,7 @@ export type PermissionName =
 	| 'object:read'
 	| 'object:write'
 	| 'settings:read'
+	| 'settings:write'
 	| 'capacity:write'
 	| 'credential:read'
 	| 'credential:write'
@@ -113,7 +114,20 @@ export interface Session {
 	/// one. Empty means the console falls back to its own hostname and
 	/// `s3Port`, which is only correct without a proxy in front.
 	s3PublicUrl: string;
+	/// The largest object this instance accepts. The file picker refuses more
+	/// than this before sending anything; the server checks it again, and its
+	/// answer is the one that decides — a tab left open across a change is
+	/// holding a figure that has moved.
+	maxUploadBytes: number;
 	version: string;
+}
+
+/// The upload limit in force, and the most it may be raised to.
+export interface UploadLimit {
+	maxUploadBytes: number;
+	/// MONOBUCKET_MAX_UPLOAD_CEILING_BYTES. Environment only, so the console
+	/// shows it and never offers to change it.
+	ceilingBytes: number;
 }
 
 /// True when the session holds every permission listed.
@@ -467,6 +481,14 @@ export const api = {
 		}),
 
 	config: () => request<ServerConfig>('/config'),
+
+	uploadLimit: () => request<UploadLimit>('/upload-limit'),
+
+	setUploadLimit: (maxUploadBytes: number) =>
+		request<UploadLimit>('/upload-limit', {
+			method: 'POST',
+			body: JSON.stringify({ maxUploadBytes })
+		}),
 
 	credentials: () =>
 		request<{ credentials: Credential[] }>('/credentials').then((r) => r.credentials),

@@ -71,6 +71,8 @@ StorageEngine::Options StorageEngine::optionsFrom(const Config& config) {
     options.allocatableBytes        = config.allocatableBytes;
     options.capacityReservePercent  = config.capacityReservePercent;
     options.defaultBucketQuotaBytes = config.defaultBucketQuotaBytes;
+    options.maxUploadBytes          = config.maxUploadBytes;
+    options.maxUploadCeilingBytes   = config.maxUploadCeilingBytes;
     return options;
 }
 
@@ -91,9 +93,77 @@ StorageEngine::StorageEngine(Options options)
 
     metadata_ = openRocksMetadataStore(metadataOptions);
     seedQuotas();
+    seedUploadLimit();
 
     log::info("storage engine ready: durability=", toString(options_.durability),
               ", chunk=", options_.chunkBytes / 1024, " KiB");
+}
+
+void StorageEngine::seedUploadLimit() {
+    const auto stored = metadata_->getInstanceSettings();
+
+    // The environment figure is a seed, not an override. Once an operator has
+    // set a limit from the console it is the store's, and a redeploy carrying
+    // a stale MONOBUCKET_MAX_UPLOAD_BYTES must not silently undo it — that is
+    // the difference between a persisted setting and a configured one.
+    std::uint64_t limit = (stored && stored->maxUploadBytes != 0) ? stored->maxUploadBytes
+                                                                  : options_.maxUploadBytes;
+
+    // Clamped rather than refused. A ceiling lowered below a limit somebody
+    // set earlier is an operator deliberately tightening the instance, and
+    // refusing to start would leave them with a server they cannot reach the
+    // console of to fix it.
+    if (limit > options_.maxUploadCeilingBytes) {
+        log::warn("stored upload limit of ", limit, " bytes exceeds the configured ceiling of ",
+                  options_.maxUploadCeilingBytes, " bytes; clamping");
+        limit = options_.maxUploadCeilingBytes;
+    }
+
+    maxUploadBytes_.store(limit, std::memory_order_relaxed);
+
+    if (!stored || stored->maxUploadBytes != limit) {
+        MetadataStore::InstanceSettings settings = stored.value_or(MetadataStore::InstanceSettings{});
+        settings.maxUploadBytes                  = limit;
+        metadata_->putInstanceSettings(settings);
+    }
+
+    log::info("maximum object upload: ", limit, " bytes (ceiling ",
+              options_.maxUploadCeilingBytes, ")");
+}
+
+void StorageEngine::setMaxUploadBytes(std::uint64_t bytes) {
+    if (bytes == 0) {
+        throw StorageError(StorageErrorCode::Internal,
+                           "the maximum upload size must be at least 1 byte");
+    }
+    if (bytes > options_.maxUploadCeilingBytes) {
+        throw StorageError(StorageErrorCode::ObjectTooLarge,
+                           "the maximum upload size cannot exceed this instance's ceiling of " +
+                               std::to_string(options_.maxUploadCeilingBytes) +
+                               " bytes, which is set by MONOBUCKET_MAX_UPLOAD_CEILING_BYTES");
+    }
+
+    MetadataStore::InstanceSettings settings =
+        metadata_->getInstanceSettings().value_or(MetadataStore::InstanceSettings{});
+    settings.maxUploadBytes = bytes;
+
+    // Persisted first. Publishing the new figure and then failing to write it
+    // would leave a limit in force that a restart silently reverts, which is
+    // the one behaviour an operator lowering a limit cannot afford.
+    metadata_->putInstanceSettings(settings);
+    maxUploadBytes_.store(bytes, std::memory_order_relaxed);
+
+    log::info("maximum object upload changed to ", bytes, " bytes");
+}
+
+void StorageEngine::requireWithinUploadLimit(std::uint64_t bytes, std::string_view what) const {
+    const std::uint64_t limit = maxUploadBytes();
+    if (bytes <= limit) return;
+
+    throw StorageError(StorageErrorCode::ObjectTooLarge,
+                       std::string(what) + " is " + std::to_string(bytes) +
+                           " bytes, over this instance's maximum upload size of " +
+                           std::to_string(limit) + " bytes");
 }
 
 void StorageEngine::seedQuotas() {
@@ -355,6 +425,13 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
                                std::to_string(limits::kMaxKeyLength) + " bytes");
     }
 
+    // The authoritative size check, and it is here rather than in the handler
+    // because this is the last place a caller cannot skip. Before the commit,
+    // so a refused object is never linked into the payload tree: the writer's
+    // temporary is discarded by its own destructor and the reclamation record
+    // beginWrite() left behind is collected on schedule.
+    requireWithinUploadLimit(writer.written(), "the object");
+
     // Resolved before the payload is flushed, because the level decides how the
     // flush is done — not just how the metadata commit is done.
     const Durability durability = durabilityFor(request.bucket);
@@ -462,6 +539,18 @@ PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t pa
         throw StorageError(StorageErrorCode::NoSuchUpload,
                            "no such upload: " + std::string(uploadId));
     }
+    // A part on its own can never exceed the object limit, and the parts
+    // already stored plus this one cannot either. The second check is what
+    // stops an upload being built past the limit a piece at a time and only
+    // discovered at completion, by which point the bytes are all on disk.
+    //
+    // Two clients racing on different part numbers can each pass this and
+    // together exceed the limit; the check at completion is the one that
+    // closes that, and it is single-point by construction. This one exists to
+    // refuse early, not to be the last word.
+    const std::uint64_t others = uploadedPartBytes(uploadId, partNumber);
+    requireWithinUploadLimit(others + writer.written(), "the completed object");
+
     const Durability durability = durabilityFor(upload->bucket);
 
     const BlobWriter::Committed committed = writer.commit(durability);
@@ -483,6 +572,16 @@ PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t pa
 
 std::vector<PartRecord> StorageEngine::listParts(std::string_view uploadId) {
     return metadata_->listParts(uploadId);
+}
+
+std::uint64_t StorageEngine::uploadedPartBytes(std::string_view uploadId,
+                                               std::uint32_t    exceptPartNumber) {
+    std::uint64_t total = 0;
+    for (const PartRecord& part : metadata_->listParts(uploadId)) {
+        if (part.partNumber == exceptPartNumber) continue;
+        total += part.size;
+    }
+    return total;
 }
 
 void StorageEngine::abortUpload(std::string_view uploadId) {
@@ -550,6 +649,15 @@ ObjectRecord StorageEngine::completeUpload(std::string_view                  upl
                                    std::to_string(limits::kMinPartSize) + " byte minimum");
         }
     }
+
+    // The last word on the limit, and the only check multipart cannot get
+    // around: whatever each part was admitted under, this is the object that
+    // is about to exist. Before the concatenation, so a refusal costs no copy
+    // and leaves the parts exactly as they were — the client can abort the
+    // upload or complete a subset of it, and nothing has been published.
+    std::uint64_t assembledBytes = 0;
+    for (const PartRecord& part : ordered) assembledBytes += part.size;
+    requireWithinUploadLimit(assembledBytes, "the completed object");
 
     // Assemble into one payload. Reading an object then becomes a single
     // sequential file read, and Range requests need no part arithmetic — paid

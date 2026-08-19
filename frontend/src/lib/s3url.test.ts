@@ -16,6 +16,7 @@ function session(overrides: Partial<Session> = {}): Session {
 		s3Port: 9000,
 		s3Domain: '',
 		s3PublicUrl: '',
+		maxUploadBytes: 5 * 1024 * 1024 * 1024,
 		version: 'test',
 		...overrides
 	};

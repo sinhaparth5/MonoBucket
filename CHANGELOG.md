@@ -102,6 +102,64 @@ Nothing yet.
 
 ---
 
+## [2026.08.5] — 2026-08-19
+
+### Added
+
+- **A configurable maximum object-upload size.** One limit for the whole
+  instance, applied to every object whatever path it arrives by: the console
+  uploader, a signed `PutObject`, a streaming (`aws-chunked`) body, and a
+  multipart upload measured across all of its parts. An object over it is
+  refused before any of it is committed — `EntityTooLarge` on the S3 listener,
+  413 on the console API — and leaves no object and no orphaned upload state.
+- `MONOBUCKET_MAX_UPLOAD_BYTES` — the limit a store that has never carried one
+  starts at. **A seed, not an override:** it is written to the metadata store
+  on first start, and from then on the console owns the figure, so a redeploy
+  carrying a stale value cannot silently undo a limit somebody set.
+- `MONOBUCKET_MAX_UPLOAD_CEILING_BYTES` — the most the console may raise the
+  limit to. Environment only, so an administrator cannot lift their own
+  ceiling. Defaults to 5 TiB, S3's own maximum object size.
+- `GET`/`POST /_mb/api/upload-limit`, and a **Maximum object size** control on
+  the settings panel. Reading it is `settings:read`; changing it is a new
+  `settings:write` permission held by administrators alone. Changes are
+  recorded in the audit log as `settings.upload-limit`.
+- The console file picker refuses an oversized selection before sending
+  anything, naming the file and the limit. A courtesy — the backend checks
+  again and is what decides.
+- `monobucket_max_upload_bytes` and `monobucket_max_upload_ceiling_bytes` on
+  `/metrics`.
+
+### Changed
+
+- **Objects assembled by multipart are now capped at 5 GiB by default.** Single
+  PUTs were already bounded by `MONOBUCKET_MAX_BODY_BYTES`; multipart was
+  bounded by nothing. If you store objects larger than that, raise
+  `MONOBUCKET_MAX_UPLOAD_BYTES` before upgrading, or raise the limit from the
+  settings panel afterwards — which needs no restart.
+
+### Removed
+
+- `deploy/` — the compose file and environment template added in 2026.08.4. The
+  repository already ships `docker-compose.yml`, and a second one drifts.
+
+### Notes
+
+- **When a change takes effect.** Every admission decision uses the limit in
+  force at the moment it is taken. A transfer already under way is not
+  interrupted; the next part of a multipart upload is held to the new figure;
+  and a completion is judged against the object it is about to produce, so
+  lowering the limit can refuse an upload whose parts were all accepted under
+  the old one. That upload's parts are left untouched, so the client can abort
+  it or complete a smaller subset.
+- **Scope is the instance, deliberately.** Not per-bucket and not per-user: a
+  limit with more than one scope needs a precedence rule, and a precedence rule
+  is the start of a policy language this server has refused to grow. A bucket's
+  allocation already answers "how much may this bucket hold"; this answers "how
+  large may one object be".
+- `CopyObject` remains 501, so there is no copy path for the limit to bound.
+
+---
+
 ## [2026.08.4] — 2026-08-18
 
 ### Fixed

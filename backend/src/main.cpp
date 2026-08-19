@@ -56,6 +56,8 @@ void printUsage() {
         << "  MONOBUCKET_DEFAULT_BUCKET_QUOTA_BYTES  S3 CreateBucket    (0 = unlimited)\n"
         << "  MONOBUCKET_MAX_BODY_BYTES          single-PUT ceiling     (5GiB)\n"
         << "  MONOBUCKET_MAX_MEMORY_BODY_BYTES   spill-to-disk cutoff   (1MiB)\n"
+        << "  MONOBUCKET_MAX_UPLOAD_BYTES        initial object limit   (5GiB)\n"
+        << "  MONOBUCKET_MAX_UPLOAD_CEILING_BYTES  most it may be raised to (5TiB)\n"
         << "  MONOBUCKET_STREAM_CHUNK_BYTES      streaming chunk size   (1MiB)\n"
         << "  MONOBUCKET_IDLE_TIMEOUT_SECONDS    idle connection reap   (60)\n"
         << "  MONOBUCKET_CACHE_BACKEND           memory | redis         (memory)\n"

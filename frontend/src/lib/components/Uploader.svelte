@@ -16,6 +16,10 @@
 
 	interface Props {
 		bucket: string;
+		/// The instance's maximum object-upload size. A file over it is refused
+		/// here, before a byte is sent — the server refuses it too, and that is
+		/// the enforcement; this is only to save the transfer.
+		maxBytes: number;
 		/// Where the files land. Keys are this plus the file name — a dropped
 		/// folder is not walked, because `webkitdirectory` is the only way to get
 		/// one and it is a different control.
@@ -25,7 +29,7 @@
 		onfinished: () => void;
 	}
 
-	let { bucket, prefix, onfinished }: Props = $props();
+	let { bucket, maxBytes, prefix, onfinished }: Props = $props();
 
 	type Transfer = {
 		id: number;
@@ -64,6 +68,24 @@
 		if (!files || files.length === 0) return;
 
 		for (const file of files) {
+			// Listed as failed rather than dropped silently. A file that
+			// vanishes from a multi-file selection is a file somebody assumes
+			// uploaded, and the whole point of checking here is to say which
+			// one and why.
+			if (maxBytes > 0 && file.size > maxBytes) {
+				transfers.push({
+					id: (nextId += 1),
+					name: file.name,
+					key: prefix + file.name,
+					size: file.size,
+					sent: 0,
+					state: 'failed',
+					error: `over the ${formatBytes(maxBytes)} limit`,
+					handle: undefined
+				});
+				continue;
+			}
+
 			transfers.push({
 				id: (nextId += 1),
 				name: file.name,
@@ -187,7 +209,9 @@
 			{/if}
 		</p>
 		<p class="text-base-content/50 text-xs">
-			Uploaded into <span class="font-mono">{bucket}/{prefix}</span> · a name that already exists is replaced
+			Uploaded into <span class="font-mono">{bucket}/{prefix}</span> · a name that already exists is
+			replaced{#if maxBytes > 0}
+				· up to {formatBytes(maxBytes)} per file{/if}
 		</p>
 		<input
 			bind:this={picker}

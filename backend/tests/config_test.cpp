@@ -115,6 +115,33 @@ TEST_CASE("streaming limits must be internally consistent", "[config]") {
     CHECK_THROWS_AS(other.validate(), ConfigError);
 }
 
+TEST_CASE("the upload limit must sit inside its ceiling", "[config]") {
+    Config cfg = validConfig();
+    cfg.maxUploadBytes        = 2048;
+    cfg.maxUploadCeilingBytes = 1024;
+    CHECK_THROWS_AS(cfg.validate(), ConfigError);
+
+    // Exactly at the ceiling is fine; a ceiling that cannot be reached is a
+    // ceiling one byte lower than it says.
+    Config equal = validConfig();
+    equal.maxUploadBytes        = 1024;
+    equal.maxUploadCeilingBytes = 1024;
+    CHECK_NOTHROW(equal.validate());
+}
+
+TEST_CASE("a zero upload limit is refused rather than read as unlimited", "[config]") {
+    // Every other byte figure here treats zero as "no limit". A *maximum*
+    // upload size that silently meant the opposite is the setting somebody
+    // reaches for in a hurry and gets backwards.
+    Config cfg = validConfig();
+    cfg.maxUploadBytes = 0;
+    CHECK_THROWS_AS(cfg.validate(), ConfigError);
+
+    Config ceiling = validConfig();
+    ceiling.maxUploadCeilingBytes = 0;
+    CHECK_THROWS_AS(ceiling.validate(), ConfigError);
+}
+
 TEST_CASE("selecting redis implies a connection URL", "[config]") {
     Config cfg = validConfig();
     cfg.cacheBackend = CacheBackend::Redis;

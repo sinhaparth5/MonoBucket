@@ -168,6 +168,32 @@ struct Config {
     /// Ceiling for a single-part upload — 5 GiB, matching S3's own limit.
     std::uint64_t maxBodyBytes = 5ull * 1024 * 1024 * 1024;
 
+    /// The largest object this instance accepts, until an administrator sets a
+    /// different one from the console.
+    ///
+    /// The one setting here that is a starting value rather than the value:
+    /// the effective limit is persisted in the metadata store, seeded from
+    /// this on a store that has never carried one, and thereafter owned by the
+    /// console. That is the deliberate exception to "configuration is
+    /// environment only", for the same reason a bucket's allocation is: it is
+    /// a policy figure an operator changes while the server is running, not a
+    /// wiring parameter that decides how the process is built.
+    ///
+    /// 5 GiB, matching what S3 accepts in a single PUT — which is already the
+    /// most a body can be here. It therefore constrains only multipart, and
+    /// deliberately: an object assembled out of parts is still an object
+    /// somebody has to store, read back and pay for.
+    std::uint64_t maxUploadBytes = 5ull * 1024 * 1024 * 1024;
+
+    /// The most `maxUploadBytes` may ever be raised to from the console.
+    ///
+    /// Environment-only and never writable, which is what makes it a ceiling
+    /// rather than a second copy of the limit: an administrator who can raise
+    /// the limit without bound is not being held to anything. 5 TiB is S3's
+    /// own maximum object size, so the default constrains nothing S3 would
+    /// have accepted.
+    std::uint64_t maxUploadCeilingBytes = 5ull * 1024 * 1024 * 1024 * 1024;
+
     /// Above this, request bodies spill to disk instead of being buffered.
     std::uint64_t maxMemoryBodyBytes = 1ull * 1024 * 1024;
 

@@ -7,6 +7,7 @@ add_executable(monobucket_tests
     credentials_test.cpp
     password_test.cpp
     quota_test.cpp
+    upload_limit_test.cpp
     asset_store_test.cpp
     blob_store_test.cpp
     cache_factory_test.cpp

@@ -345,6 +345,7 @@ const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
         {"workerThreads", "MONOBUCKET_WORKER_THREADS"},
         {"maxBodyBytes", "MONOBUCKET_MAX_BODY_BYTES"},
         {"maxMemoryBodyBytes", "MONOBUCKET_MAX_MEMORY_BODY_BYTES"},
+        {"maxUploadCeilingBytes", "MONOBUCKET_MAX_UPLOAD_CEILING_BYTES"},
         {"streamChunkBytes", "MONOBUCKET_STREAM_CHUNK_BYTES"},
         {"idleTimeoutSeconds", "MONOBUCKET_IDLE_TIMEOUT_SECONDS"},
         {"cacheBackend", "MONOBUCKET_CACHE_BACKEND"},
@@ -407,6 +408,8 @@ drogon::HttpStatusCode statusFor(StorageErrorCode code) {
             return drogon::k409Conflict;
         case StorageErrorCode::InsufficientCapacity:
             return drogon::k507InsufficientStorage;
+        case StorageErrorCode::ObjectTooLarge:
+            return drogon::k413RequestEntityTooLarge;
         default:
             return drogon::k500InternalServerError;
     }
@@ -633,7 +636,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // answer rather than an error.
     app.registerHandler(
         "/_mb/api/session",
-        [&config, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
+        [&config, &storage, state](const HttpRequestPtr& req, ResponseCallback&& callback) {
             if (!onConsoleListener(req, config)) {
                 callback(errorJson("not found", drogon::k404NotFound));
                 return;
@@ -662,6 +665,12 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                  // its own hostname and the S3 port, which is right for a direct
                  // deployment and wrong behind any proxy.
                  {"s3PublicUrl", config.s3PublicUrl},
+                 // The effective upload limit, so the file picker can refuse an
+                 // oversized selection without a round trip. An atomic read, not
+                 // a store lookup. A tab left open across a change is held to
+                 // the figure it was given until it reloads, which is why the
+                 // backend checks again and is the one that decides.
+                 {"maxUploadBytes", storage.maxUploadBytes()},
                  {"version", version::kVersion}}));
         },
         {drogon::Get});
@@ -1704,6 +1713,67 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         },
         {drogon::Get});
 
+    // The one figure on the settings panel that is stored rather than
+    // configured, and therefore the one route that writes a setting.
+    //
+    // It is here and not under /_mb/api/config because that route is read-only
+    // by construction — configuration is environment-only, and giving it a
+    // POST arm would invite the next writable-looking value to be added to it
+    // instead of being thought about.
+    app.registerHandler(
+        "/_mb/api/upload-limit",
+        [&storage, guard, offload, audit](const HttpRequestPtr& req,
+                                          ResponseCallback&& callback) {
+            const Permission needed = req->method() == drogon::Get ? Permission::SettingsRead
+                                                                   : Permission::SettingsWrite;
+            guard(req, callback, needed,
+                  [&storage, req, callback, offload, audit](const Principal& principal) {
+                if (req->method() == drogon::Get) {
+                    // Two atomic reads and a copy of an integer. No offload:
+                    // this touches neither RocksDB nor the filesystem, and
+                    // posting it to the I/O pool would put a load-shedding
+                    // queue in front of a field read.
+                    callback(jsonResponse({{"maxUploadBytes", storage.maxUploadBytes()},
+                                           {"ceilingBytes", storage.maxUploadCeilingBytes()}}));
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+                if (!body.contains("maxUploadBytes") ||
+                    !body["maxUploadBytes"].is_number_unsigned()) {
+                    callback(errorJson("maxUploadBytes must be a whole number of bytes",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+                const auto bytes = body["maxUploadBytes"].get<std::uint64_t>();
+                if (bytes == 0) {
+                    // Refused here as well as in the engine so the console
+                    // hears the reason rather than a 500: zero would read as
+                    // "unlimited" everywhere else in this server, and it is
+                    // not what a maximum upload size may mean.
+                    callback(errorJson("the maximum upload size must be at least 1 byte",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+
+                offload(callback, [&storage, audit, bytes,
+                                   actor = principal.username]() -> HttpResponsePtr {
+                    // Above the ceiling comes back from the engine as a
+                    // StorageError and is turned into 413 by statusFor.
+                    storage.setMaxUploadBytes(bytes);
+                    audit(actor, "settings.upload-limit", "", true,
+                          std::to_string(bytes) + " bytes");
+                    return jsonResponse({{"maxUploadBytes", storage.maxUploadBytes()},
+                                         {"ceilingBytes", storage.maxUploadCeilingBytes()}});
+                });
+            });
+        },
+        {drogon::Get, drogon::Post});
+
     // --- Objects -----------------------------------------------------------
 
     // Bucket and key travel as query parameters rather than path segments: an
@@ -1817,6 +1887,18 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 if (key.size() > 1024 || key.front() == '/' || key.find("//") != std::string::npos ||
                     key.find("..") != std::string::npos) {
                     callback(errorJson("that object key is not valid", drogon::k400BadRequest));
+                    return;
+                }
+
+                // The whole body is already resident (as a mapping, above the
+                // in-memory threshold), so its size is exact and the refusal
+                // costs the browser one response instead of a write it would
+                // have thrown away. finishWrite checks the same figure again.
+                if (req->getBody().size() > storage.maxUploadBytes()) {
+                    callback(errorJson("that file is " + std::to_string(req->getBody().size()) +
+                                           " bytes, over this instance's maximum upload size of " +
+                                           std::to_string(storage.maxUploadBytes()) + " bytes",
+                                       drogon::k413RequestEntityTooLarge));
                     return;
                 }
 

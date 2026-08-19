@@ -56,6 +56,16 @@ enum class Permission {
     ObjectWrite,      ///< Upload and delete objects
     SettingsRead,     ///< The resolved configuration and the server overview
 
+    /// Change an instance-wide limit that is stored rather than configured.
+    ///
+    /// Separate from SettingsRead because almost everything on the settings
+    /// panel is environment-only and therefore unwritable by anyone; this is
+    /// the permission for the handful of values that are not, starting with
+    /// the maximum object-upload size. It is an instance-wide policy — one
+    /// number that every bucket and every client is held to — so it is an
+    /// administrator's call for the same reason CapacityWrite is.
+    SettingsWrite,
+
     /// Change an existing bucket's storage allocation.
     ///
     /// Separate from BucketWrite because it is not a decision about one

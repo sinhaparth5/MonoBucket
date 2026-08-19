@@ -275,6 +275,7 @@ S3ErrorCode fromStorage(StorageErrorCode code) noexcept {
         // which never signs an S3 request; if one ever reaches here it is a
         // bad argument, not a full bucket.
         case StorageErrorCode::QuotaBelowUsage:     return S3ErrorCode::InvalidArgument;
+        case StorageErrorCode::ObjectTooLarge:      return S3ErrorCode::EntityTooLarge;
         case StorageErrorCode::InsufficientCapacity:
             return S3ErrorCode::InsufficientCapacity;
         // Corruption, Io and Internal are all "the server broke", and the

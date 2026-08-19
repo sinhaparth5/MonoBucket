@@ -807,14 +807,89 @@ public:
         return loadUpload(uploadId);
     }
 
-    std::vector<UploadRecord> listUploads(std::string_view bucket,
-                                          std::uint32_t    maxUploads) override {
+    ListUploadsResult listUploads(std::string_view          bucket,
+                                  const ListUploadsRequest& request) override {
         std::shared_lock guard(bucketLock_);
         requireBucket(bucket);
 
-        std::vector<UploadRecord> uploads;
-        const std::string         prefix = keys::uploadByKeyPrefix(bucket);
-        const auto                bound  = keys::upperBound(prefix);
+        ListUploadsResult result;
+        if (request.maxUploads == 0) return result;
+
+        const std::string prefix = keys::uploadByKeyPrefix(bucket);
+        const auto        bound  = keys::upperBound(prefix);
+
+        rocksdb::ReadOptions read = readOptions_;
+        rocksdb::Slice       boundSlice;
+        if (bound) {
+            boundSlice               = toSlice(*bound);
+            read.iterate_upper_bound = &boundSlice;
+        }
+
+        // Where the page starts. The row key is the marker pair concatenated,
+        // so resuming is a seek to the last row returned and one step past it
+        // — no scan from the beginning, and no count to get wrong.
+        std::string seek = prefix;
+        if (!request.keyMarker.empty()) {
+            seek = keys::uploadByKey(bucket, request.keyMarker, request.uploadIdMarker);
+        } else if (!request.prefix.empty()) {
+            seek.append(request.prefix);
+        }
+
+        std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(read));
+        for (it->Seek(toSlice(seek)); it->Valid(); it->Next()) {
+            const auto stored = toView(it->key());
+            if (!stored.starts_with(prefix)) break;
+
+            const auto parts = keys::uploadKeyParts(stored, bucket);
+            if (!parts) continue;
+
+            // Both markers are exclusive. With only a key marker given, every
+            // upload id under that key is already past it, which is what S3
+            // means by paging on the key alone.
+            if (!request.keyMarker.empty()) {
+                if (parts->key < request.keyMarker) continue;
+                if (parts->key == request.keyMarker &&
+                    parts->uploadId <= request.uploadIdMarker) {
+                    continue;
+                }
+            }
+
+            if (!request.prefix.empty() && !parts->key.starts_with(request.prefix)) {
+                // The rows are ordered by key, so the first one past the prefix
+                // ends the listing rather than merely failing to match.
+                if (parts->key > request.prefix) break;
+                continue;
+            }
+
+            if (result.uploads.size() == request.maxUploads) {
+                // One row beyond the page proves there is a next page, which is
+                // the only way to answer IsTruncated without a second query.
+                result.truncated = true;
+                break;
+            }
+
+            if (auto upload = loadUpload(parts->uploadId)) {
+                result.nextKeyMarker      = upload->key;
+                result.nextUploadIdMarker = upload->uploadId;
+                result.uploads.push_back(std::move(*upload));
+            }
+        }
+        check(it->status(), "listing multipart uploads");
+
+        if (!result.truncated) {
+            result.nextKeyMarker.clear();
+            result.nextUploadIdMarker.clear();
+        }
+        return result;
+    }
+
+    std::vector<UploadRecord> listUploadsCreatedBefore(std::size_t limit,
+                                                       TimestampMs cutoff) override {
+        std::vector<UploadRecord> stale;
+        if (limit == 0) return stale;
+
+        const std::string prefix{keys::kUploadById};
+        const auto        bound = keys::upperBound(prefix);
 
         rocksdb::ReadOptions read = readOptions_;
         rocksdb::Slice       boundSlice;
@@ -824,17 +899,17 @@ public:
         }
 
         std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(read));
-        for (it->Seek(toSlice(prefix)); it->Valid() && uploads.size() < maxUploads; it->Next()) {
+        for (it->Seek(toSlice(prefix)); it->Valid() && stale.size() < limit; it->Next()) {
             const auto stored = toView(it->key());
             if (!stored.starts_with(prefix)) break;
 
-            const auto parts = keys::uploadKeyParts(stored, bucket);
-            if (!parts) continue;
-
-            if (auto upload = loadUpload(parts->uploadId)) uploads.push_back(std::move(*upload));
+            const std::string_view uploadId = stored.substr(prefix.size());
+            auto                   upload   = decodeUpload(uploadId, toView(it->value()));
+            if (upload.createdAt >= cutoff) continue;
+            stale.push_back(std::move(upload));
         }
-        check(it->status(), "listing multipart uploads");
-        return uploads;
+        check(it->status(), "scanning multipart uploads for expiry");
+        return stale;
     }
 
     PutPartOutcome putPart(std::string_view uploadId, const PartRecord& part,

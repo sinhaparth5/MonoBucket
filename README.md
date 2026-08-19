@@ -252,8 +252,15 @@ before you rely on it:
   anything else can still fill under MonoBucket without any bucket reaching its
   allocation. Set `MONOBUCKET_ALLOCATABLE_BYTES` when the data directory is not
   alone on its volume.
+- **`ListMultipartUploads` ignores `delimiter`.** The parameter is echoed back
+  but no keys are rolled up, so the response carries no `CommonPrefixes`.
+  `prefix`, `key-marker` and `upload-id-marker` all work, so a listing is
+  complete and resumable — it is only the delimiter rollup that is missing.
 - **Object versioning, lifecycle rules, server-side encryption and IAM-style
-  policies** beyond the credentials described above do not exist.
+  policies** beyond the credentials described above do not exist. Abandoned
+  multipart uploads are expired on a timer
+  (`MONOBUCKET_MULTIPART_EXPIRY_HOURS`), which is the one piece of lifecycle
+  behaviour that does exist, because without it they leak.
 
 Two deliberate deviations from S3, both refused at write time rather than stored
 as data nothing can later address: object keys containing control characters,

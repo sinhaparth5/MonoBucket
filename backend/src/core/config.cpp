@@ -127,6 +127,8 @@ Config Config::fromEnvironment() {
         env::number("MONOBUCKET_RECLAIM_GRACE_SECONDS", cfg.reclaimGraceSeconds));
     cfg.reclaimIntervalSeconds = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_RECLAIM_INTERVAL_SECONDS", cfg.reclaimIntervalSeconds));
+    cfg.multipartExpiryHours = static_cast<std::uint32_t>(
+        env::number("MONOBUCKET_MULTIPART_EXPIRY_HOURS", cfg.multipartExpiryHours));
 
     cfg.allocatableBytes = env::bytes("MONOBUCKET_ALLOCATABLE_BYTES", cfg.allocatableBytes);
     cfg.capacityReservePercent = static_cast<std::uint32_t>(
@@ -373,6 +375,18 @@ void Config::validate() const {
             "payload that an upload is still writing to");
     }
 
+    // An expiry shorter than the reclamation grace would abort an upload whose
+    // most recent part is still being written — the sweep reads a part's
+    // recorded arrival, and a part that has not committed yet has not recorded
+    // one. Bounding it by the same figure that protects an in-flight payload
+    // keeps the two sweepers from disagreeing about what is in flight.
+    if (multipartExpiryHours != 0 && multipartExpiryHours * 3600ull < reclaimGraceSeconds) {
+        throw ConfigError(
+            "MONOBUCKET_MULTIPART_EXPIRY_HOURS must cover at least "
+            "MONOBUCKET_RECLAIM_GRACE_SECONDS; a shorter expiry can abort an upload whose part "
+            "is still being written");
+    }
+
     // A reserve of 100% would derive an allocatable capacity of zero, which
     // refuses every allocation and reads as a broken instance rather than as a
     // setting. Refusing it here says which setting is at fault.
@@ -431,6 +445,10 @@ std::string Config::summary() const {
        << "  max upload       : " << env::formatBytes(maxUploadBytes) << " (ceiling "
        << env::formatBytes(maxUploadCeilingBytes) << ")\n"
        << "  stream chunk     : " << env::formatBytes(streamChunkBytes) << '\n'
+       << "  multipart expiry : "
+       << (multipartExpiryHours == 0 ? std::string("disabled")
+                                     : std::to_string(multipartExpiryHours) + "h")
+       << '\n'
        << "  cache backend    : " << toString(cacheBackend) << '\n'
        << "  cache budget     : "
        << (cacheMaxBytes == 0 ? std::string("disabled") : env::formatBytes(cacheMaxBytes)) << '\n'
@@ -459,6 +477,7 @@ nlohmann::json Config::toJson() const {
         {"metadataMaxOpenFiles", metadataMaxOpenFiles},
         {"reclaimGraceSeconds", reclaimGraceSeconds},
         {"reclaimIntervalSeconds", reclaimIntervalSeconds},
+        {"multipartExpiryHours", multipartExpiryHours},
         {"allocatableBytes", allocatableBytes},
         {"capacityReservePercent", capacityReservePercent},
         {"defaultBucketQuotaBytes", defaultBucketQuotaBytes},

@@ -28,6 +28,10 @@ const std::chrono::steady_clock::time_point kStartedAt = std::chrono::steady_clo
 /// whatever is left.
 constexpr std::size_t kReclaimBatch = 512;
 
+/// Bounded for the same reason, and smaller: aborting an upload reads its parts
+/// and writes a batch per upload, where reclaiming a payload is one unlink.
+constexpr std::size_t kUploadSweepBatch = 64;
+
 /// How often expired cache entries are swept. Not configurable: the budget is
 /// held on insert regardless, so this only decides how long an entry nobody
 /// reads again keeps occupying space it is no longer entitled to.
@@ -247,9 +251,19 @@ void Server::scheduleMaintenance() {
     // Deletions reclaim their own payload inline, so this only picks up what a
     // crash left behind. It runs on the I/O pool rather than the loop because
     // unlinking files blocks.
+    //
+    // Expiring abandoned multipart uploads rides the same tick rather than
+    // taking a timer of its own: both are janitorial, both must run on the I/O
+    // pool, and a second timer would only add a way for the two to overlap.
+    // The upload sweep goes first — it turns parts into unreferenced payloads,
+    // which the reclamation pass behind it is then free to collect on its own
+    // schedule.
     drogon::app().getLoop()->runEvery(
         static_cast<double>(config_.reclaimIntervalSeconds), [this] {
-            if (!io_->post([this] { storage_->reclaim(kReclaimBatch); })) {
+            if (!io_->post([this] {
+                    storage_->sweepExpiredUploads(kUploadSweepBatch);
+                    storage_->reclaim(kReclaimBatch);
+                })) {
                 log::debug("skipped a reclamation pass: the io queue is saturated");
             }
         });

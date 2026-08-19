@@ -36,6 +36,10 @@ public:
         /// could still be in the middle of.
         std::int64_t reclaimGraceMs = 60 * 60 * 1000;
 
+        /// How long a multipart upload may go without a part arriving before
+        /// the sweeper aborts it. Zero disables the sweep.
+        std::int64_t multipartExpiryMs = 168ll * 60 * 60 * 1000;
+
         /// What may be allocated across every bucket. Zero means "derive it
         /// from the filesystem holding the data directory", which is what the
         /// server does unless an operator names a figure — a number taken from
@@ -232,7 +236,23 @@ public:
     std::string createUpload(const PutRequest& request);
 
     std::optional<UploadRecord> getUpload(std::string_view uploadId);
-    std::vector<UploadRecord>   listUploads(std::string_view bucket, std::uint32_t maxUploads);
+    ListUploadsResult           listUploads(std::string_view          bucket,
+                                            const ListUploadsRequest& request);
+
+    /// Aborts up to `limit` uploads that have made no progress for longer than
+    /// the configured expiry, and returns how many. Zero when expiry is off.
+    ///
+    /// Bounded per call for the same reason `reclaim` is: a sweep runs on an
+    /// I/O thread the request path is also waiting on, and a store with ten
+    /// thousand abandoned uploads must not hold one for the duration. The
+    /// next tick continues where this one stopped.
+    std::size_t sweepExpiredUploads(std::size_t limit);
+
+    /// Aborts uploads idle since before `cutoff`, ignoring the configured
+    /// expiry. The cutoff is a parameter rather than derived so that the rule
+    /// — which timestamp decides, and what happens either side of it — can be
+    /// tested without a test that waits for a week to pass.
+    std::size_t sweepUploadsIdleBefore(std::size_t limit, TimestampMs cutoff);
 
     /// Publishes one part. Consumes the writer and the claim.
     ///

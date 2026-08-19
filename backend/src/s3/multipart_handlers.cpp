@@ -278,38 +278,41 @@ drogon::HttpResponsePtr handleListMultipartUploads(const S3Context& context,
                                                    const S3Request& request) {
     requireBucket(context, request.bucket);
 
-    std::uint32_t maxUploads = 1000;
+    ListUploadsRequest query;
+    query.maxUploads = 1000;
     if (const auto raw = request.queryValue("max-uploads"); raw && !raw->empty()) {
-        maxUploads = std::min<std::uint32_t>(parseUnsigned(
-                                                *raw, "max-uploads",
-                                                std::numeric_limits<std::uint32_t>::max()),
-                                            1000);
+        query.maxUploads = std::min<std::uint32_t>(parseUnsigned(
+                                                      *raw, "max-uploads",
+                                                      std::numeric_limits<std::uint32_t>::max()),
+                                                  1000);
     }
 
-    const std::string prefix   = request.queryOr("prefix");
-    auto              uploads  = context.storage.listUploads(request.bucket, maxUploads);
+    query.prefix         = request.queryOr("prefix");
+    query.keyMarker      = request.queryOr("key-marker");
+    query.uploadIdMarker = request.queryOr("upload-id-marker");
 
-    if (!prefix.empty()) {
-        uploads.erase(std::remove_if(uploads.begin(), uploads.end(),
-                                     [&prefix](const UploadRecord& upload) {
-                                         return upload.key.rfind(prefix, 0) != 0;
-                                     }),
-                      uploads.end());
+    // S3 refuses this pair rather than guessing which key the id belongs to,
+    // and so do we: an upload id is only unique alongside the key it was begun
+    // under, so resuming from one without the other has no defined answer.
+    if (!query.uploadIdMarker.empty() && query.keyMarker.empty()) {
+        throw S3Exception(S3ErrorCode::InvalidArgument,
+                          "upload-id-marker cannot be used without key-marker.");
     }
+
+    const auto listing = context.storage.listUploads(request.bucket, query);
 
     XmlWriter writer("ListMultipartUploadsResult");
     writer.element("Bucket", request.bucket);
-    writer.element("KeyMarker", "");
-    writer.element("UploadIdMarker", "");
-    writer.element("MaxUploads", static_cast<std::uint64_t>(maxUploads));
-    writer.elementIfSet("Prefix", prefix);
+    writer.element("KeyMarker", query.keyMarker);
+    writer.element("UploadIdMarker", query.uploadIdMarker);
+    writer.element("NextKeyMarker", listing.nextKeyMarker);
+    writer.element("NextUploadIdMarker", listing.nextUploadIdMarker);
+    writer.element("MaxUploads", static_cast<std::uint64_t>(query.maxUploads));
+    writer.elementIfSet("Prefix", query.prefix);
     writer.elementIfSet("Delimiter", request.queryOr("delimiter"));
-    // Pagination is bounded by max-uploads at the storage layer, so a listing
-    // is never truncated in a way the client could resume — the marker fields
-    // above are reported empty rather than invented.
-    writer.booleanElement("IsTruncated", false);
+    writer.booleanElement("IsTruncated", listing.truncated);
 
-    for (const auto& upload : uploads) {
+    for (const auto& upload : listing.uploads) {
         writer.open("Upload");
         writer.element("Key", upload.key);
         writer.element("UploadId", upload.uploadId);

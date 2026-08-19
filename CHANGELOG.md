@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.5] — 2026-08-19
+
 ### Added
 
 - **A configurable maximum object-upload size.** One limit for the whole

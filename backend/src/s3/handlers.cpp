@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <utility>
 
 #include "cache/cache_provider.hpp"
 #include "core/config.hpp"
 #include "s3/base64.hpp"
 #include "s3/chunked.hpp"
+#include "s3/request.hpp"
 #include "s3/s3_error.hpp"
 #include "storage/codec.hpp"
 #include "storage/digest.hpp"
@@ -23,7 +25,7 @@ constexpr std::size_t kMaxUserMetadataBytes = 2048;
 /// own version on purpose: a cache entry is disposable, so this can change
 /// without a migration, and coupling the two would make it look as though it
 /// could not.
-constexpr std::uint8_t kCachedObjectVersion = 2;
+constexpr std::uint8_t kCachedObjectVersion = 3;
 
 std::string encodeObject(const ObjectRecord& record) {
     std::string  out;
@@ -52,6 +54,10 @@ std::string encodeObject(const ObjectRecord& record) {
         writer.string(record.checksum.value);
         writer.varint(record.checksum.parts);
     }
+    // Same argument as the checksum above: an object served from a warm cache
+    // without its Cache-Control would be cached differently downstream than the
+    // same object served cold.
+    encodeContentHeaders(writer, record.content);
     return out;
 }
 
@@ -83,6 +89,7 @@ std::optional<ObjectRecord> decodeObject(std::string_view stored) {
             record.checksum.value     = reader.string();
             record.checksum.parts     = static_cast<std::uint32_t>(reader.varint());
         }
+        record.content = decodeContentHeaders(reader);
         return record;
     } catch (const codec::DecodeError&) {
         // A cache entry we cannot read is not an error: drop it and go to the
@@ -246,6 +253,39 @@ UserMetadata collectUserMetadata(const drogon::HttpRequestPtr& request) {
         metadata.emplace(key, value);
     }
     return metadata;
+}
+
+ContentHeaders collectContentHeaders(const drogon::HttpRequestPtr& request) {
+    // Each header this reads, and the field it is stored in. Content-Type is
+    // not among them: it has its own field on the record, its own default, and
+    // its own aws-chunked workaround in contentTypeOf().
+    static constexpr std::pair<const char*, std::string ContentHeaders::*> kStored[] = {
+        {"cache-control",       &ContentHeaders::cacheControl},
+        {"content-disposition", &ContentHeaders::contentDisposition},
+        {"content-encoding",    &ContentHeaders::contentEncoding},
+        {"content-language",    &ContentHeaders::contentLanguage},
+        {"expires",             &ContentHeaders::expires},
+    };
+
+    ContentHeaders headers;
+    for (const auto& [name, field] : kStored) {
+        const std::string& value = request->getHeader(name);
+        if (value.empty()) continue;
+        if (!isStorableHeaderValue(value)) {
+            throw S3Exception(S3ErrorCode::InvalidArgument,
+                              std::string("The ") + name +
+                                  " header contains characters that cannot be stored.");
+        }
+        headers.*field = value;
+    }
+
+    // `aws-chunked` is framing, not an encoding of the payload — and a client
+    // that gzipped its object sends both, as `aws-chunked,gzip`. Dropping the
+    // framing token keeps the encoding the bytes really carry.
+    if (!headers.contentEncoding.empty()) {
+        headers.contentEncoding = withoutAwsChunked(headers.contentEncoding);
+    }
+    return headers;
 }
 
 std::string contentTypeOf(const drogon::HttpRequestPtr& request) {

@@ -98,6 +98,58 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+### Added
+
+- **Objects now keep `Cache-Control`, `Content-Disposition`, `Content-Encoding`,
+  `Content-Language` and `Expires`.** All five are read from `PutObject` and
+  from `CreateMultipartUpload`, stored with the object, and returned unchanged
+  by `GetObject` and `HeadObject`. Until now only `Content-Type` and the
+  `x-amz-meta-*` headers survived a write, which had three consequences worth
+  naming: a CDN in front of a public bucket had nothing to cache on and
+  revalidated every asset on every request; a pre-compressed object stored with
+  `Content-Encoding: gzip` came back as undecodable bytes labelled as the
+  original type, so there was no way to serve one correctly; and a bucket could
+  not offer a file as a download with a filename.
+- The five are accepted on the console's upload endpoint as well, so an object
+  put through the dashboard is not a second-class one a CDN has to be told
+  about separately, and they are reported by `/_mb/api/object`.
+- `CreateMultipartUpload` is the only request in a multipart upload that can
+  name them — `UploadPart` describes a part and completion has no
+  representation of its own — so they are carried on the upload record and
+  applied to the object at completion.
+
+### Changed
+
+- The `response-cache-control`, `response-content-disposition`,
+  `response-content-encoding`, `response-content-language` and
+  `response-expires` query parameters still override the stored value for that
+  one response, which is what presigned download links rely on. A parameter
+  that is present but blank is not an override: it says nothing and the stored
+  value stands.
+- A `304 Not Modified` now carries `Cache-Control` and `Expires`, per RFC 9110
+  §15.4.5. A 304 is what a CDN gets when it revalidates, and one that came back
+  without them left the edge with nothing to say how long the copy it had just
+  confirmed could be kept.
+- An object written before this release reads back with the five absent and no
+  error. The fields are appended to the stored record and read only if the row
+  is long enough to hold them, so no format version changed and nothing needs
+  migrating. Cached object entries carry them too — the cache's own version byte
+  went from 2 to 3, which makes a rolling upgrade discard the older entries
+  rather than serve an object without its cache directives.
+- `Content-Encoding: aws-chunked` is no longer stored. It describes the upload's
+  framing, which is gone by the time the object exists; a client that gzipped
+  its object and let the SDK frame the upload sends `aws-chunked,gzip`, and the
+  `gzip` is what is kept.
+
+### Security
+
+- A stored response header is refused at write time if it contains a control
+  character — CR and LF above all — or exceeds 1024 bytes. These values are
+  emitted on every read of the object, so one stored CR would split every
+  subsequent response for that key. The check is enforced in the storage engine
+  as well as in the S3 layer, so no write path can skip it. Recorded under
+  *Known limitations* in `README.md` as the third deliberate deviation from S3.
+
 ### Fixed
 
 - The console build is warning-free again. `registerConsoleApi()` discarded the

@@ -360,6 +360,11 @@ nlohmann::json toJson(const ObjectRecord& object) {
             {"size", object.size},
             {"etag", object.etag},
             {"contentType", object.contentType},
+            {"cacheControl", object.content.cacheControl},
+            {"contentDisposition", object.content.contentDisposition},
+            {"contentEncoding", object.content.contentEncoding},
+            {"contentLanguage", object.content.contentLanguage},
+            {"expires", object.content.expires},
             {"lastModified", toIso8601(object.lastModified)},
             {"lastModifiedMs", object.lastModified}};
 }
@@ -1906,8 +1911,24 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 std::string contentType = std::string(req->getHeader("content-type"));
                 if (contentType.empty()) contentType = "application/octet-stream";
 
-                offload(callback, [&config, &storage, &cache, req, bucket, key,
-                                   contentType]() -> HttpResponsePtr {
+                // The same five headers PutObject stores, read the same way, so
+                // an object uploaded from the console is not a second-class one
+                // that a CDN has to be told about separately. Validated here
+                // rather than at the write, because the browser gets a message
+                // it can show instead of a 500.
+                ContentHeaders content;
+                try {
+                    content = s3::collectContentHeaders(req);
+                } catch (const s3::S3Exception&) {
+                    callback(errorJson("a Cache-Control, Content-Disposition, Content-Encoding, "
+                                       "Content-Language or Expires header contains characters "
+                                       "that cannot be stored",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+
+                offload(callback, [&config, &storage, &cache, req, bucket, key, contentType,
+                                   content]() -> HttpResponsePtr {
                     if (!storage.getBucket(bucket)) {
                         return errorJson("no such bucket", drogon::k404NotFound);
                     }
@@ -1916,6 +1937,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     put.bucket      = bucket;
                     put.key         = key;
                     put.contentType = contentType;
+                    put.content     = content;
 
                     // `req` is kept alive by this closure, which is what keeps
                     // the body's mapping valid for the whole write.

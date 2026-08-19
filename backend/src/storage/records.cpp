@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <utility>
+
+#include "monobucket/constants.hpp"
 
 namespace monobucket {
 
@@ -73,6 +76,96 @@ std::vector<CorsRule> decodeCorsRules(codec::Reader& reader) {
         rule.maxAgeSeconds   = hasMaxAge ? static_cast<std::int32_t>(maxAge) : -1;
     }
     return rules;
+}
+
+namespace {
+
+/// Field ids for the content headers. Written into the record, so they are
+/// fixed forever: a new header takes the next free number and never reuses one.
+enum class ContentHeaderId : std::uint8_t {
+    CacheControl       = 1,
+    ContentDisposition = 2,
+    ContentEncoding    = 3,
+    ContentLanguage    = 4,
+    Expires            = 5,
+};
+
+}  // namespace
+
+bool isStorableHeaderValue(std::string_view value) {
+    if (value.size() > limits::kMaxContentHeaderLength) return false;
+
+    for (const char ch : value) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7F) return false;
+    }
+    return true;
+}
+
+bool areStorableHeaderValues(const ContentHeaders& headers) {
+    return isStorableHeaderValue(headers.cacheControl) &&
+           isStorableHeaderValue(headers.contentDisposition) &&
+           isStorableHeaderValue(headers.contentEncoding) &&
+           isStorableHeaderValue(headers.contentLanguage) &&
+           isStorableHeaderValue(headers.expires);
+}
+
+void encodeContentHeaders(codec::Writer& writer, const ContentHeaders& headers) {
+    const std::pair<ContentHeaderId, const std::string&> fields[] = {
+        {ContentHeaderId::CacheControl,       headers.cacheControl},
+        {ContentHeaderId::ContentDisposition, headers.contentDisposition},
+        {ContentHeaderId::ContentEncoding,    headers.contentEncoding},
+        {ContentHeaderId::ContentLanguage,    headers.contentLanguage},
+        {ContentHeaderId::Expires,            headers.expires},
+    };
+
+    std::uint64_t present = 0;
+    for (const auto& [id, value] : fields) present += value.empty() ? 0 : 1;
+
+    writer.varint(present);
+    for (const auto& [id, value] : fields) {
+        if (value.empty()) continue;
+        writer.u8(static_cast<std::uint8_t>(id));
+        writer.string(value);
+    }
+}
+
+ContentHeaders decodeContentHeaders(codec::Reader& reader) {
+    ContentHeaders headers;
+
+    const std::uint64_t count = reader.varint();
+    // There are five of them and a newer build can only have added more of the
+    // same kind. A length past that is not a record we wrote.
+    if (count > 64) throw codec::DecodeError("content header list is implausibly long");
+
+    for (std::uint64_t i = 0; i < count; ++i) {
+        const auto  id    = static_cast<ContentHeaderId>(reader.u8());
+        std::string value = reader.string();
+        switch (id) {
+            case ContentHeaderId::CacheControl:
+                headers.cacheControl = std::move(value);
+                break;
+            case ContentHeaderId::ContentDisposition:
+                headers.contentDisposition = std::move(value);
+                break;
+            case ContentHeaderId::ContentEncoding:
+                headers.contentEncoding = std::move(value);
+                break;
+            case ContentHeaderId::ContentLanguage:
+                headers.contentLanguage = std::move(value);
+                break;
+            case ContentHeaderId::Expires:
+                headers.expires = std::move(value);
+                break;
+            // A header a newer build added. Its value has already been
+            // consumed, so the rest of the record still decodes — which is the
+            // whole point of tagging the fields rather than writing them
+            // positionally.
+            default:
+                break;
+        }
+    }
+    return headers;
 }
 
 }  // namespace monobucket

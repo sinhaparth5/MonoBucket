@@ -259,6 +259,23 @@ TEST_CASE("aws-chunked is recognised in a list of encodings", "[s3][chunked]") {
     REQUIRE_FALSE(isAwsChunked("aws-chunkedx"));
 }
 
+TEST_CASE("stripping aws-chunked leaves what the payload is really encoded in",
+          "[s3][chunked]") {
+    // A client that gzipped its object and let the SDK frame the upload sends
+    // both. What is stored with the object has to be the gzip alone: the
+    // framing is gone by the time anything reads the object back.
+    REQUIRE(withoutAwsChunked("aws-chunked,gzip") == "gzip");
+    REQUIRE(withoutAwsChunked("gzip, aws-chunked") == "gzip");
+    REQUIRE(withoutAwsChunked("aws-chunked") == "");
+    REQUIRE(withoutAwsChunked("gzip") == "gzip");
+    REQUIRE(withoutAwsChunked("") == "");
+
+    // Anything else the header listed is kept, in the order it was given.
+    REQUIRE(withoutAwsChunked("br, aws-chunked, gzip") == "br,gzip");
+    // A near miss is not the token and is not dropped.
+    REQUIRE(withoutAwsChunked("aws-chunkedx") == "aws-chunkedx");
+}
+
 TEST_CASE("a signed trailer block verifies", "[s3][chunked]") {
     const std::string body =
         frameSignedWithTrailer({"abc"}, {{"x-amz-checksum-crc32", "NSRBwg=="}});

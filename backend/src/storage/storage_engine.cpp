@@ -187,6 +187,18 @@ void StorageEngine::requireWithinUploadLimit(std::uint64_t bytes, std::string_vi
                            std::to_string(limit) + " bytes");
 }
 
+void StorageEngine::requireStorableContentHeaders(const ContentHeaders& headers) {
+    if (areStorableHeaderValues(headers)) return;
+
+    // Internal rather than a client-facing code, for the same reason the key
+    // check here is: the S3 layer refuses these with InvalidArgument before a
+    // byte is read, so reaching this line means a caller skipped that and the
+    // useful answer is the one that gets it fixed.
+    throw StorageError(StorageErrorCode::Internal,
+                       "a stored response header contains characters that cannot be emitted, "
+                       "or is over " + std::to_string(limits::kMaxContentHeaderLength) + " bytes");
+}
+
 void StorageEngine::seedQuotas() {
     // The store counted every object as it opened, so the ledger starts from
     // what is actually on disk rather than from a number somebody wrote down
@@ -451,6 +463,8 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
                                std::to_string(limits::kMaxKeyLength) + " bytes");
     }
 
+    requireStorableContentHeaders(request.content);
+
     // The authoritative size check, and it is here rather than in the handler
     // because this is the last place a caller cannot skip. Before the commit,
     // so a refused object is never linked into the payload tree: the writer's
@@ -486,6 +500,7 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
     record.contentType  = request.contentType;
     record.lastModified = nowMs();
     record.userMetadata = request.userMetadata;
+    record.content      = request.content;
     record.checksum     = request.checksum;
 
     const auto outcome = metadata_->putObject(request.bucket, record, durability);
@@ -535,6 +550,8 @@ ListObjectsResult StorageEngine::listObjects(std::string_view          bucket,
 // --- Multipart -------------------------------------------------------------
 
 std::string StorageEngine::createUpload(const PutRequest& request) {
+    requireStorableContentHeaders(request.content);
+
     UploadRecord upload;
     upload.uploadId     = newUploadId();
     upload.bucket       = request.bucket;
@@ -542,6 +559,7 @@ std::string StorageEngine::createUpload(const PutRequest& request) {
     upload.contentType  = request.contentType;
     upload.createdAt    = nowMs();
     upload.userMetadata = request.userMetadata;
+    upload.content      = request.content;
     upload.checksumAlgorithm = request.checksum.algorithm;
 
     metadata_->createUpload(upload);
@@ -788,6 +806,7 @@ ObjectRecord StorageEngine::completeUpload(std::string_view                  upl
     record.contentType  = upload->contentType;
     record.lastModified = nowMs();
     record.userMetadata = upload->userMetadata;
+    record.content      = upload->content;
     record.checksum     = composite;
 
     const auto outcome = metadata_->completeUpload(upload->bucket, uploadId, record, durability);

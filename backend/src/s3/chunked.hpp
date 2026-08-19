@@ -80,4 +80,13 @@ private:
 /// True when the request declares `aws-chunked` framing on its body.
 bool isAwsChunked(std::string_view contentEncoding);
 
+/// The same header with the `aws-chunked` token removed, re-joined with commas.
+///
+/// What is left is what the payload is actually encoded in and therefore what
+/// is worth storing: `aws-chunked` describes framing that is gone by the time
+/// the object exists, and an object that claimed it would tell every future
+/// reader to un-frame bytes that were never framed. Empty when the header named
+/// nothing else.
+std::string withoutAwsChunked(std::string_view contentEncoding);
+
 }  // namespace monobucket::s3

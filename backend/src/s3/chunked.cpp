@@ -201,17 +201,40 @@ void ChunkedDecoder::decode(std::string_view body,
     }
 }
 
-bool isAwsChunked(std::string_view contentEncoding) {
-    // The header may list several encodings, e.g. `aws-chunked,gzip`.
+namespace {
+
+/// Walks the comma-separated tokens of a Content-Encoding, trimmed.
+template <typename Fn>
+void forEachEncoding(std::string_view contentEncoding, Fn&& fn) {
     std::size_t pos = 0;
     while (pos <= contentEncoding.size()) {
         const std::size_t comma = contentEncoding.find(',', pos);
         const std::size_t end = (comma == std::string_view::npos) ? contentEncoding.size() : comma;
-        if (trim(contentEncoding.substr(pos, end - pos)) == "aws-chunked") return true;
+        fn(trim(contentEncoding.substr(pos, end - pos)));
         if (comma == std::string_view::npos) break;
         pos = comma + 1;
     }
-    return false;
+}
+
+}  // namespace
+
+bool isAwsChunked(std::string_view contentEncoding) {
+    // The header may list several encodings, e.g. `aws-chunked,gzip`.
+    bool found = false;
+    forEachEncoding(contentEncoding, [&found](std::string_view token) {
+        if (token == "aws-chunked") found = true;
+    });
+    return found;
+}
+
+std::string withoutAwsChunked(std::string_view contentEncoding) {
+    std::string out;
+    forEachEncoding(contentEncoding, [&out](std::string_view token) {
+        if (token.empty() || token == "aws-chunked") return;
+        if (!out.empty()) out += ',';
+        out += token;
+    });
+    return out;
 }
 
 }  // namespace monobucket::s3

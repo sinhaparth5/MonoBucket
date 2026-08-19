@@ -287,9 +287,13 @@ before you rely on it:
   (`MONOBUCKET_MULTIPART_EXPIRY_HOURS`), which is the one piece of lifecycle
   behaviour that does exist, because without it they leak.
 
-Two deliberate deviations from S3, both refused at write time rather than stored
-as data nothing can later address: object keys containing control characters,
-and keys containing a path traversal segment.
+Three deliberate deviations from S3, all refused at write time rather than
+stored as data nothing can later address: object keys containing control
+characters; keys containing a path traversal segment; and a `Cache-Control`,
+`Content-Disposition`, `Content-Encoding`, `Content-Language` or `Expires`
+header containing a control character or longer than 1024 bytes. Those five are
+stored with the object and returned on every read, so a CR that got stored once
+would split every response for that key from then on.
 
 ## Project links
 

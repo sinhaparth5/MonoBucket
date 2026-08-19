@@ -205,6 +205,14 @@ public:
         std::string  key;
         std::string  contentType = "application/octet-stream";
         UserMetadata userMetadata;
+
+        /// What the client asked to have verified, already computed over the
+        /// bytes that arrived. Verification is the S3 layer's, not this one's:
+        /// the expected value can travel in a trailer that only exists once the
+        /// body has been decoded, and by then the framing is long gone.
+        /// createUpload reads only the algorithm — a multipart upload declares
+        /// one before it has any bytes to checksum.
+        Checksum checksum;
     };
 
     /// Publishes a streamed payload. Consumes the writer and the claim.
@@ -262,7 +270,7 @@ public:
     /// completes holds them indefinitely. They become used bytes only when the
     /// upload completes, and are given back when it is aborted.
     PartRecord finishPart(std::string_view uploadId, std::uint32_t partNumber, BlobWriter writer,
-                          QuotaLedger::Reservation reservation = {});
+                          QuotaLedger::Reservation reservation = {}, Checksum checksum = {});
 
     std::vector<PartRecord> listParts(std::string_view uploadId);
 
@@ -288,8 +296,15 @@ public:
     /// Validates the manifest, concatenates the parts into one payload and
     /// publishes it. Throws StorageError(InvalidPart) when the manifest does
     /// not match what was stored.
+    ///
+    /// `expected` is the full-object checksum the client claims the completed
+    /// object will have. It is compared against the composite computed from the
+    /// stored parts *before* anything is published — a checksum checked after
+    /// the object is visible is a checksum that let a wrong object be read.
+    /// Throws StorageError(ChecksumMismatch) when they disagree.
     ObjectRecord completeUpload(std::string_view uploadId,
-                                const std::vector<RequestedPart>& parts);
+                                const std::vector<RequestedPart>& parts,
+                                const Checksum&                   expected = {});
 
     // --- Identity ----------------------------------------------------------
 

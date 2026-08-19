@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/identity.hpp"
+#include "storage/checksum.hpp"
 #include "storage/codec.hpp"
 #include "storage/durability.hpp"
 
@@ -246,6 +247,12 @@ struct ObjectRecord {
     std::string  contentType = "application/octet-stream";
     TimestampMs  lastModified = 0;
     UserMetadata userMetadata;
+
+    /// The `x-amz-checksum-*` value the client asked to have verified, kept so
+    /// a reader can be given the same guarantee the writer got. Absent for an
+    /// object uploaded without one, which stays the ordinary case — S3 reports
+    /// no checksum for those and neither do we.
+    Checksum checksum;
 };
 
 struct PartRecord {
@@ -254,6 +261,12 @@ struct PartRecord {
     std::uint64_t size = 0;
     std::string   etag;  ///< MD5 hex of this part alone
     TimestampMs   uploadedAt = 0;
+
+    /// This part's own checksum. Retained after the part is consumed only in
+    /// the sense that the completed object's composite is computed from it —
+    /// a composite cannot be recovered once the parts are gone, so it is
+    /// computed at completion and the parts are then free to go.
+    Checksum checksum;
 };
 
 struct UploadRecord {
@@ -263,6 +276,12 @@ struct UploadRecord {
     std::string  contentType = "application/octet-stream";
     TimestampMs  createdAt   = 0;
     UserMetadata userMetadata;
+
+    /// The algorithm named at CreateMultipartUpload, if any. Every part is
+    /// then checksummed under it whether or not the client sends a value,
+    /// because the composite at completion needs all of them and a part
+    /// uploaded without one cannot be re-read cheaply to supply it.
+    std::optional<ChecksumAlgorithm> checksumAlgorithm;
 };
 
 /// One page of ListMultipartUploads.

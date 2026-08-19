@@ -73,6 +73,50 @@ std::string frameUnsigned(const std::vector<std::string>& chunks,
     return out;
 }
 
+/// A signed body whose trailing headers carry their own signature, chained from
+/// the final chunk's. `trailers` are canonical lines without the CRLF.
+std::string frameSignedWithTrailer(const std::vector<std::string>& chunks,
+                                   const std::vector<std::pair<std::string, std::string>>& trailers,
+                                   bool corruptSignature = false) {
+    const std::string key      = signingKey();
+    std::string       previous = kSeed;
+    std::string       out;
+
+    const auto emit = [&](const std::string& payload) {
+        const std::string signature =
+            chunkSignature(key, kAmzDate, kScope, previous, sha256Hex(payload));
+        previous = signature;
+        out += hexSize(payload.size());
+        out += ";chunk-signature=";
+        out += signature;
+        out += "\r\n";
+        out += payload;
+        out += "\r\n";
+    };
+
+    for (const auto& chunk : chunks) emit(chunk);
+
+    const std::string finalSignature =
+        chunkSignature(key, kAmzDate, kScope, previous, sha256Hex(""));
+    out += "0;chunk-signature=";
+    out += finalSignature;
+    out += "\r\n";
+
+    std::string canonical;
+    for (const auto& [name, value] : trailers) {
+        canonical += name + ':' + value + '\n';
+        out += name + ':' + value + "\r\n";
+    }
+
+    std::string signature = trailerSignature(key, kAmzDate, kScope, finalSignature,
+                                             sha256Hex(canonical));
+    if (corruptSignature) signature[0] = signature[0] == 'a' ? 'b' : 'a';
+
+    out += "x-amz-trailer-signature:" + signature + "\r\n";
+    out += "\r\n";
+    return out;
+}
+
 ChunkedDecoder::Options signedOptions(std::uint64_t declaredLength = 0) {
     ChunkedDecoder::Options options;
     options.verifySignatures = true;
@@ -213,4 +257,70 @@ TEST_CASE("aws-chunked is recognised in a list of encodings", "[s3][chunked]") {
     REQUIRE_FALSE(isAwsChunked("gzip"));
     REQUIRE_FALSE(isAwsChunked(""));
     REQUIRE_FALSE(isAwsChunked("aws-chunkedx"));
+}
+
+TEST_CASE("a signed trailer block verifies", "[s3][chunked]") {
+    const std::string body =
+        frameSignedWithTrailer({"abc"}, {{"x-amz-checksum-crc32", "NSRBwg=="}});
+
+    auto options                   = signedOptions();
+    options.expectTrailerSignature = true;
+
+    ChunkedDecoder decoder(std::move(options));
+    REQUIRE(decodeAll(decoder, body) == "abc");
+
+    // The signature line is framing, not a trailer the caller should see.
+    REQUIRE(decoder.trailers().size() == 1);
+    CHECK(decoder.trailers().at("x-amz-checksum-crc32") == "NSRBwg==");
+}
+
+TEST_CASE("a trailer signature that does not verify is refused", "[s3][chunked]") {
+    // An unverified trailer is a checksum anything on the path can rewrite to
+    // match bytes it also rewrote, which makes the checksum worse than absent.
+    const std::string body = frameSignedWithTrailer(
+        {"abc"}, {{"x-amz-checksum-crc32", "NSRBwg=="}}, /*corruptSignature=*/true);
+
+    auto options                   = signedOptions();
+    options.expectTrailerSignature = true;
+
+    ChunkedDecoder decoder(std::move(options));
+    REQUIRE_THROWS_AS(decodeAll(decoder, body), S3Exception);
+}
+
+TEST_CASE("a rewritten trailer value breaks the trailer signature", "[s3][chunked]") {
+    std::string body = frameSignedWithTrailer({"abc"}, {{"x-amz-checksum-crc32", "NSRBwg=="}});
+
+    const std::size_t at = body.find("NSRBwg==");
+    REQUIRE(at != std::string::npos);
+    body.replace(at, 8, "AAAAAA==");
+
+    auto options                   = signedOptions();
+    options.expectTrailerSignature = true;
+
+    ChunkedDecoder decoder(std::move(options));
+    REQUIRE_THROWS_AS(decodeAll(decoder, body), S3Exception);
+}
+
+TEST_CASE("a declared trailer block with no signature is refused", "[s3][chunked]") {
+    const std::string body = frameSigned({"abc"}, "x-amz-checksum-crc32:NSRBwg==\r\n");
+
+    auto options                   = signedOptions();
+    options.expectTrailerSignature = true;
+
+    ChunkedDecoder decoder(std::move(options));
+    REQUIRE_THROWS_AS(decodeAll(decoder, body), S3Exception);
+}
+
+TEST_CASE("an unsigned streaming body carries trailers with nothing to verify",
+          "[s3][chunked]") {
+    // STREAMING-UNSIGNED-PAYLOAD-TRAILER has no signatures at all. That is the
+    // client's choice, not a failure, and it must not be turned into one.
+    const std::string body = frameUnsigned({"abc"}, "x-amz-checksum-crc32:NSRBwg==\r\n");
+
+    ChunkedDecoder::Options options;
+    options.expectTrailerSignature = true;
+
+    ChunkedDecoder decoder(std::move(options));
+    REQUIRE(decodeAll(decoder, body) == "abc");
+    CHECK(decoder.trailers().at("x-amz-checksum-crc32") == "NSRBwg==");
 }

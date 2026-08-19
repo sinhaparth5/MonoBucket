@@ -21,6 +21,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/core/password.cpp
     src/s3/base64.cpp
     src/s3/bucket_handlers.cpp
+    src/s3/checksum.cpp
     src/s3/chunked.cpp
     src/s3/bucket_policy.cpp
     src/s3/cors.cpp
@@ -36,6 +37,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/s3/uri.cpp
     src/s3/xml.cpp
     src/storage/blob_store.cpp
+    src/storage/checksum.cpp
     src/storage/codec.cpp
     src/storage/digest.cpp
     src/storage/durability.cpp

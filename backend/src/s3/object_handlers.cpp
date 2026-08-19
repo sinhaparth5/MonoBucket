@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 
 #include "core/config.hpp"
 #include "s3/handlers.hpp"
@@ -102,6 +103,17 @@ void applyOverrides(const drogon::HttpResponsePtr& response, const S3Request& re
     }
 }
 
+/// `x-amz-checksum-mode: ENABLED`. Opt-in because reporting the checksum
+/// commits the response to a value a client will act on, and S3's own readers
+/// only ask when they intend to verify.
+bool checksumModeEnabled(const drogon::HttpRequestPtr& http) {
+    const std::string& mode = http->getHeader("x-amz-checksum-mode");
+    return std::equal(mode.begin(), mode.end(), std::string_view("enabled").begin(),
+                      std::string_view("enabled").end(), [](char a, char b) {
+                          return std::tolower(static_cast<unsigned char>(a)) == b;
+                      });
+}
+
 void requireValidKey(std::string_view key) {
     if (key.size() > limits::kMaxKeyLength) throw S3Exception(S3ErrorCode::KeyTooLong);
     if (!isValidObjectKey(key)) {
@@ -174,6 +186,17 @@ drogon::HttpResponsePtr handleGetObject(const S3Context& context, const S3Reques
     }
 
     applyObjectHeaders(response, *record);
+
+    // Only for a whole-object read, and only when asked. The stored checksum
+    // covers the entire payload, so returning it beside a range would invite a
+    // client to check it against bytes it is not a checksum of.
+    if (ranged != RangeResult::Satisfiable && record->checksum.present() &&
+        checksumModeEnabled(http)) {
+        applyChecksumHeader(response, record->checksum);
+        response->addHeader("x-amz-checksum-type",
+                            std::string(checksumTypeOf(record->checksum)));
+    }
+
     applyOverrides(response, request);
     applyCommonHeaders(response, request.requestId);
 
@@ -201,6 +224,11 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
     put.key          = request.key;
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
+
+    // Resolved before anything is read: the algorithm decides what is hashed as
+    // the payload streams past, and a request that names one we cannot compute
+    // has to be refused now rather than answered 200 with nothing checked.
+    const ChecksumRequest wanted = resolveChecksumRequest(checksumHeaders(http));
 
     // Refused on what the client declared, before a byte is read back out of
     // the body. This is the earliest point the size is knowable to us —
@@ -232,7 +260,7 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
     // that declares one byte and sends ten gigabytes is stopped here or not at
     // all. finishWrite checks the final figure again, which is what makes this
     // an optimisation rather than the enforcement.
-    body.streamTo([&writer, &written, limit](std::string_view chunk) {
+    const auto sink = [&writer, &written, limit](std::string_view chunk) {
         written += chunk.size();
         if (written > limit) {
             throw S3Exception(S3ErrorCode::EntityTooLarge,
@@ -240,7 +268,9 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
                                   std::to_string(limit) + " bytes.");
         }
         writer.write(chunk);
-    });
+    };
+
+    put.checksum = verifiedChecksum(http, wanted, body, sink);
 
     const ObjectRecord record =
         context.storage.finishWrite(put, std::move(writer), std::move(reservation));
@@ -253,6 +283,7 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
 
     auto response = emptyResponse(200);
     response->addHeader(headers::kETag, quoteETag(record.etag));
+    applyChecksumHeader(response, record.checksum);
     applyCommonHeaders(response, request.requestId);
     return response;
 }

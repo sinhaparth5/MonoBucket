@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.10] — 2026-08-19
+
 ### Added
 
 - **Objects now keep `Cache-Control`, `Content-Disposition`, `Content-Encoding`,

@@ -229,6 +229,21 @@ before you rely on it:
   stored and ignored. Signed requests never consult the policy at all: they are
   authorised by the role of the access key's owner. A policy is therefore only
   ever a statement about clients carrying no credentials.
+- **Checksums are verified, but not every shape of them.** The
+  `x-amz-checksum-*` family is checked on `PutObject` and `UploadPart` —
+  CRC32, CRC32C, CRC64NVME, SHA1 and SHA256, sent as a header or as an
+  `aws-chunked` trailer — and a value that does not match the bytes received is
+  refused with `BadDigest`. Three gaps remain. A multipart object always gets
+  the **composite** checksum (a checksum of the parts' checksums, `-N`
+  suffixed); `x-amz-checksum-type: FULL_OBJECT` is refused at
+  `CreateMultipartUpload` rather than answered with a composite the client did
+  not ask for. Per-part `<ChecksumCRC32>` elements inside a
+  `CompleteMultipartUpload` manifest are not compared — each part's ETag already
+  pins it, and the composite is checked against the completion's own
+  `x-amz-checksum-*` header when one is sent. And `ListObjectsV2` does not report
+  a per-object `ChecksumAlgorithm`. An algorithm this build cannot compute is
+  refused rather than stored unchecked: a checksum accepted and discarded is
+  indistinguishable, to the client, from one that was verified.
 - **Authorisation is per identity, not per bucket or per key.** A key inherits
   its owner's role and nothing narrower: there is no per-key scoping, no bucket
   restriction and no way to give one program read access to one bucket. An

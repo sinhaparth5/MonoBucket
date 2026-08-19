@@ -23,6 +23,7 @@ add_executable(monobucket_tests
     redis_url_test.cpp
     s3_chunked_test.cpp
     s3_bucket_policy_test.cpp
+    s3_checksum_test.cpp
     s3_cors_test.cpp
     s3_error_test.cpp
     s3_operation_test.cpp

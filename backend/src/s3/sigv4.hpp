@@ -124,6 +124,14 @@ struct AuthOutcome {
 
     PayloadMode payload = PayloadMode::Unsigned;
 
+    /// The client declared a trailing header block — one of the two `-TRAILER`
+    /// payload markers. Kept separate from PayloadMode because it decides
+    /// something the mode does not: whether a trailer signature is *required*.
+    /// A signed streaming body without trailers has none to verify, and one
+    /// with trailers that carried no signature is a body whose checksum
+    /// anything on the path could have rewritten.
+    bool trailerExpected = false;
+
     /// Set for PayloadMode::Signed: the digest the body must hash to.
     std::string payloadSha256;
 

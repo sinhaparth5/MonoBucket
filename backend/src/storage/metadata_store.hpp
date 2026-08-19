@@ -46,6 +46,12 @@ enum class StorageErrorCode {
     /// two codes are different.
     ObjectTooLarge,
 
+    /// A checksum the client supplied does not match what was stored or
+    /// assembled. Distinct from Corruption, which is the store disagreeing with
+    /// itself: this one is the client and the store disagreeing, and only the
+    /// client can act on it.
+    ChecksumMismatch,
+
     Corruption,
     Io,
     Internal,

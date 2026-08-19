@@ -192,10 +192,10 @@ HttpResponsePtr dispatch(const S3Context& context, const S3Request& request, Ope
 
         case Operation::CreateMultipartUpload:
             return handleCreateMultipartUpload(context, request, http);
-        case Operation::UploadPart:     return handleUploadPart(context, request, body);
+        case Operation::UploadPart:     return handleUploadPart(context, request, http, body);
         case Operation::ListParts:      return handleListParts(context, request);
         case Operation::CompleteMultipartUpload:
-            return handleCompleteMultipartUpload(context, request, body);
+            return handleCompleteMultipartUpload(context, request, http, body);
         case Operation::AbortMultipartUpload:
             return handleAbortMultipartUpload(context, request);
         case Operation::ListMultipartUploads:

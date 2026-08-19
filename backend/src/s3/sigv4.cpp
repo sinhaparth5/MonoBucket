@@ -488,7 +488,9 @@ AuthOutcome authenticate(const SigningRequest& request, const std::vector<QueryP
                               "A signed request must carry x-amz-content-sha256.");
         }
         outcome.payload = payloadModeFor(contentSha256, outcome.payloadSha256);
-        payloadHash     = std::string(contentSha256);
+        outcome.trailerExpected = contentSha256 == kStreamingSignedTrailer ||
+                                  contentSha256 == kStreamingUnsignedTrailer;
+        payloadHash = std::string(contentSha256);
     }
 
     const CredentialScope scope = parseCredential(credential);

@@ -309,6 +309,39 @@ AuditRecord decodeAudit(std::uint64_t sequence, std::string_view stored) {
     return entry;
 }
 
+/// Appended to the object, part and upload records rather than versioned into
+/// them. Bumping kRecordVersion would refuse every row an older build wrote,
+/// which is exactly what a store that predates checksums contains — see the
+/// note beside the CORS rules for the same decision.
+///
+/// Zero is "no checksum", and every algorithm is one past its enumerator, so a
+/// record written before this existed reads back as absent rather than as
+/// CRC32 of nothing.
+void encodeChecksum(codec::Writer& writer, const Checksum& checksum) {
+    if (!checksum.algorithm) {
+        writer.u8(0);
+        return;
+    }
+    writer.u8(static_cast<std::uint8_t>(*checksum.algorithm) + 1);
+    writer.string(checksum.value);
+    writer.varint(checksum.parts);
+}
+
+Checksum decodeChecksum(codec::Reader& reader) {
+    Checksum checksum;
+
+    const std::uint8_t tag = reader.u8();
+    if (tag == 0) return checksum;
+    if (tag > static_cast<std::uint8_t>(ChecksumAlgorithm::Sha256) + 1) {
+        throw codec::DecodeError("unknown checksum algorithm " + std::to_string(tag));
+    }
+
+    checksum.algorithm = static_cast<ChecksumAlgorithm>(tag - 1);
+    checksum.value     = reader.string();
+    checksum.parts     = static_cast<std::uint32_t>(reader.varint());
+    return checksum;
+}
+
 std::string encodeObject(const ObjectRecord& object) {
     std::string   out;
     codec::Writer writer(out);
@@ -320,6 +353,7 @@ std::string encodeObject(const ObjectRecord& object) {
     writer.string(object.contentType);
     writer.varint(static_cast<std::uint64_t>(object.lastModified));
     encodeMetadata(writer, object.userMetadata);
+    encodeChecksum(writer, object.checksum);
     return out;
 }
 
@@ -336,6 +370,7 @@ ObjectRecord decodeObject(std::string_view key, std::string_view stored) {
     object.contentType  = reader.string();
     object.lastModified = static_cast<TimestampMs>(reader.varint());
     object.userMetadata = decodeMetadata(reader);
+    if (!reader.exhausted()) object.checksum = decodeChecksum(reader);
     return object;
 }
 
@@ -348,6 +383,7 @@ std::string encodeUpload(const UploadRecord& upload) {
     writer.string(upload.contentType);
     writer.varint(static_cast<std::uint64_t>(upload.createdAt));
     encodeMetadata(writer, upload.userMetadata);
+    encodeChecksum(writer, Checksum{upload.checksumAlgorithm, {}, 0});
     return out;
 }
 
@@ -362,6 +398,7 @@ UploadRecord decodeUpload(std::string_view uploadId, std::string_view stored) {
     upload.contentType  = reader.string();
     upload.createdAt    = static_cast<TimestampMs>(reader.varint());
     upload.userMetadata = decodeMetadata(reader);
+    if (!reader.exhausted()) upload.checksumAlgorithm = decodeChecksum(reader).algorithm;
     return upload;
 }
 
@@ -373,6 +410,7 @@ std::string encodePart(const PartRecord& part) {
     writer.varint(part.size);
     writer.string(part.etag);
     writer.varint(static_cast<std::uint64_t>(part.uploadedAt));
+    encodeChecksum(writer, part.checksum);
     return out;
 }
 
@@ -386,6 +424,7 @@ PartRecord decodePart(std::uint32_t partNumber, std::string_view stored) {
     part.size       = reader.varint();
     part.etag       = reader.string();
     part.uploadedAt = static_cast<TimestampMs>(reader.varint());
+    if (!reader.exhausted()) part.checksum = decodeChecksum(reader);
     return part;
 }
 
@@ -1557,6 +1596,7 @@ std::string_view toString(StorageErrorCode code) {
         case StorageErrorCode::QuotaExceeded:       return "QuotaExceeded";
         case StorageErrorCode::QuotaBelowUsage:     return "QuotaBelowUsage";
         case StorageErrorCode::ObjectTooLarge:      return "ObjectTooLarge";
+        case StorageErrorCode::ChecksumMismatch:    return "ChecksumMismatch";
         case StorageErrorCode::InsufficientCapacity:return "InsufficientCapacity";
         case StorageErrorCode::Corruption:          return "Corruption";
         case StorageErrorCode::Io:                  return "Io";

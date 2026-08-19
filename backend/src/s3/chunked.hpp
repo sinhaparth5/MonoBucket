@@ -38,6 +38,13 @@ public:
         std::string scope;
         std::string seedSignature;  ///< the request signature
 
+        /// The client declared a trailing header block, so the body must end
+        /// with an `x-amz-trailer-signature` covering it. Only meaningful
+        /// alongside `verifySignatures`: the unsigned streaming framing carries
+        /// trailers with nothing to verify them by, and that is the client's
+        /// choice to make, not a failure.
+        bool expectTrailerSignature = false;
+
         /// `x-amz-decoded-content-length`. Zero means the client did not send
         /// it, in which case the decoded length is whatever the framing says.
         std::uint64_t declaredLength = 0;
@@ -56,10 +63,12 @@ public:
     /// Total payload bytes handed to the sink.
     std::uint64_t decodedLength() const noexcept { return decoded_; }
 
-    /// Trailing headers, lowercased. Parsed so that a client sending them gets
-    /// a valid response rather than a framing error; their values are not acted
-    /// on, and the trailer signature is not verified — see the note in
-    /// decode()'s implementation.
+    /// Trailing headers, lowercased, `x-amz-trailer-signature` excluded — that
+    /// one is framing rather than content, and it has already been checked by
+    /// the time a caller can read this.
+    ///
+    /// Only populated once decode() has run: a trailer is, by construction, a
+    /// fact about the body that is not knowable until the body has been read.
     const std::map<std::string, std::string>& trailers() const noexcept { return trailers_; }
 
 private:

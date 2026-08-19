@@ -40,6 +40,25 @@ std::string_view unquote(std::string_view etag) {
 
 namespace {
 
+/// The algorithm a completed upload's composite is computed under: the one
+/// declared at CreateMultipartUpload, or — when none was — the one every part
+/// happens to carry, since a client may checksum each part without having said
+/// so up front.
+///
+/// Nothing when the parts disagree or any of them has none. A composite over
+/// some of the parts is a number that verifies against nothing, and publishing
+/// it would be worse than publishing no checksum at all.
+std::optional<ChecksumAlgorithm> compositeAlgorithm(const UploadRecord&            upload,
+                                                    const std::vector<PartRecord>& parts) {
+    std::optional<ChecksumAlgorithm> algorithm = upload.checksumAlgorithm;
+    for (const PartRecord& part : parts) {
+        if (!part.checksum.present()) return std::nullopt;
+        if (!algorithm) algorithm = part.checksum.algorithm;
+        if (part.checksum.algorithm != algorithm) return std::nullopt;
+    }
+    return algorithm;
+}
+
 /// What this instance may allocate to buckets in total.
 ///
 /// Derived from the filesystem rather than defaulted to a constant, and
@@ -467,6 +486,7 @@ ObjectRecord StorageEngine::finishWrite(const PutRequest& request, BlobWriter wr
     record.contentType  = request.contentType;
     record.lastModified = nowMs();
     record.userMetadata = request.userMetadata;
+    record.checksum     = request.checksum;
 
     const auto outcome = metadata_->putObject(request.bucket, record, durability);
     quotas_.recordObject(request.bucket, std::move(reservation), record.size,
@@ -522,6 +542,7 @@ std::string StorageEngine::createUpload(const PutRequest& request) {
     upload.contentType  = request.contentType;
     upload.createdAt    = nowMs();
     upload.userMetadata = request.userMetadata;
+    upload.checksumAlgorithm = request.checksum.algorithm;
 
     metadata_->createUpload(upload);
     return upload.uploadId;
@@ -582,7 +603,8 @@ std::size_t StorageEngine::sweepUploadsIdleBefore(std::size_t limit, TimestampMs
 }
 
 PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t partNumber,
-                                     BlobWriter writer, QuotaLedger::Reservation reservation) {
+                                     BlobWriter writer, QuotaLedger::Reservation reservation,
+                                     Checksum checksum) {
     // A part belongs to its upload's bucket, so it inherits that bucket's
     // level. Parts are payloads like any other and a strict bucket wants them
     // on disk before the part row that names them exists.
@@ -614,6 +636,7 @@ PartRecord StorageEngine::finishPart(std::string_view uploadId, std::uint32_t pa
     part.size       = committed.size;
     part.etag       = committed.md5;
     part.uploadedAt = nowMs();
+    part.checksum   = std::move(checksum);
 
     const auto outcome = metadata_->putPart(uploadId, part, durability);
     quotas_.recordPart(upload->bucket, std::move(reservation), part.size, outcome.replacedBytes);
@@ -650,7 +673,8 @@ void StorageEngine::abortUpload(std::string_view uploadId) {
 }
 
 ObjectRecord StorageEngine::completeUpload(std::string_view                  uploadId,
-                                           const std::vector<RequestedPart>& requested) {
+                                           const std::vector<RequestedPart>& requested,
+                                           const Checksum&                   expected) {
     const auto upload = metadata_->getUpload(uploadId);
     if (!upload) {
         throw StorageError(StorageErrorCode::NoSuchUpload, "no such upload: " + std::string(uploadId));
@@ -711,6 +735,32 @@ ObjectRecord StorageEngine::completeUpload(std::string_view                  upl
     for (const PartRecord& part : ordered) assembledBytes += part.size;
     requireWithinUploadLimit(assembledBytes, "the completed object");
 
+    // The composite is computed from the parts' own checksums, so it costs no
+    // read of the payload — and it is computed *before* the concatenation, so a
+    // client whose figure disagrees is refused while its parts are still
+    // intact. It can then correct the manifest or abort; nothing was published
+    // and nothing was copied.
+    Checksum composite;
+    if (const auto algorithm = compositeAlgorithm(*upload, ordered)) {
+        std::vector<std::string> partChecksums;
+        partChecksums.reserve(ordered.size());
+        for (const PartRecord& part : ordered) partChecksums.push_back(part.checksum.value);
+        composite = compositeChecksum(*algorithm, partChecksums);
+    }
+
+    if (expected.present()) {
+        if (!composite.present() || expected.algorithm != composite.algorithm) {
+            throw StorageError(StorageErrorCode::ChecksumMismatch,
+                               "the completion supplied a checksum, but this upload's parts carry "
+                               "no checksum under that algorithm");
+        }
+        if (expected.value != composite.value || expected.parts != composite.parts) {
+            throw StorageError(StorageErrorCode::ChecksumMismatch,
+                               "the checksum supplied for the completed object does not match the "
+                               "checksums of the parts it names");
+        }
+    }
+
     // Assemble into one payload. Reading an object then becomes a single
     // sequential file read, and Range requests need no part arithmetic — paid
     // for with one copy here, at the only moment the client is expecting to
@@ -738,6 +788,7 @@ ObjectRecord StorageEngine::completeUpload(std::string_view                  upl
     record.contentType  = upload->contentType;
     record.lastModified = nowMs();
     record.userMetadata = upload->userMetadata;
+    record.checksum     = composite;
 
     const auto outcome = metadata_->completeUpload(upload->bucket, uploadId, record, durability);
     // No fresh admission: the parts have been charged since they were stored,

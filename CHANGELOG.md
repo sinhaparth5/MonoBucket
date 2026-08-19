@@ -102,6 +102,54 @@ Nothing yet.
 
 ---
 
+## [2026.08.8] — 2026-08-19
+
+### Security
+
+- **The `x-amz-checksum-*` family is verified instead of discarded.** Every
+  current AWS SDK computes a checksum on upload and sends it; MonoBucket parsed
+  it, threw it away, and answered `200`. A client whose object was corrupted in
+  transit was told the upload had been verified end to end. CRC32, CRC32C,
+  CRC64NVME, SHA1 and SHA256 are now checked on `PutObject` and `UploadPart`,
+  whether the value arrives as a header or as an `aws-chunked` trailer, and a
+  mismatch is refused with `BadDigest` before anything is committed. An
+  algorithm this build cannot compute is refused rather than accepted and
+  ignored.
+- **The trailer signature on a signed streaming upload is verified.**
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` bodies carry an
+  `x-amz-trailer-signature` chained from the final chunk's signature; it was
+  parsed and dropped. An unverified trailer is a checksum anything on the path
+  can rewrite to match bytes it also rewrote, so a declared trailer block
+  without a valid signature is now `SignatureDoesNotMatch`.
+- **`Content-MD5` is now checked on `PutObject` and `UploadPart`.** It was only
+  ever verified on `DeleteObjects`; on an upload the header was accepted and
+  never compared. A request that sends both `Content-MD5` and an
+  `x-amz-checksum-*` value has both checked.
+
+### Added
+
+- Checksums are stored with the object and returned on `GetObject`/`HeadObject`
+  when the request carries `x-amz-checksum-mode: ENABLED`, alongside
+  `x-amz-checksum-type`. Whole-object reads only — the stored value does not
+  describe a range.
+- `CreateMultipartUpload` honours `x-amz-checksum-algorithm`: every part is then
+  checksummed under it, and a part naming a different algorithm is refused.
+- `CompleteMultipartUpload` returns the composite checksum (a checksum of the
+  parts' raw checksums, `-N` suffixed) and validates the client's own
+  `x-amz-checksum-*` header against it *before* the object is published, so a
+  disagreement leaves the parts intact and nothing visible. `ListParts` reports
+  each part's checksum and the upload's algorithm.
+### Changed
+
+- The object cache entry format carries the checksum, so a warm read and a cold
+  read answer a checksum-mode `GET` identically.
+- `x-amz-checksum-type: FULL_OBJECT` is refused at `CreateMultipartUpload`.
+  Multipart objects get the composite form; answering a `FULL_OBJECT` request
+  with a composite would hand back a number computed the other way from the one
+  the client is about to compare it against.
+
+---
+
 ## [2026.08.7] — 2026-08-19
 
 ### Security

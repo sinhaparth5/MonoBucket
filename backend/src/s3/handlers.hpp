@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -8,6 +9,7 @@
 #include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 
+#include "s3/checksum.hpp"
 #include "s3/metrics.hpp"
 #include "s3/operation.hpp"
 #include "s3/request.hpp"
@@ -62,11 +64,24 @@ public:
         return chunked_ ? decodedLength_ : raw_.size();
     }
 
+    /// The trailing headers an aws-chunked body ended with, lowercased. Empty
+    /// until streamTo() has run, and empty for a body that carried none.
+    ///
+    /// This is where a modern SDK puts its checksum, which is the whole reason
+    /// verification cannot happen before the payload is read: the expected
+    /// value arrives after the bytes it describes.
+    const std::map<std::string, std::string>& trailers() const noexcept { return trailers_; }
+
 private:
     std::string_view raw_;
     const AuthOutcome& auth_;
     bool          chunked_ = false;
     std::uint64_t decodedLength_ = 0;
+
+    /// Mutable because streamTo() is logically const — it does not change the
+    /// body — while the trailers are a fact about that body which only decoding
+    /// it can reveal.
+    mutable std::map<std::string, std::string> trailers_;
 };
 
 /// Resolves the bucket, throwing NoSuchBucket rather than returning nullopt:
@@ -150,9 +165,11 @@ drogon::HttpResponsePtr handleDeleteObject(const S3Context&, const S3Request&);
 
 drogon::HttpResponsePtr handleCreateMultipartUpload(const S3Context&, const S3Request&,
                                                     const drogon::HttpRequestPtr&);
-drogon::HttpResponsePtr handleUploadPart(const S3Context&, const S3Request&, const S3Body&);
+drogon::HttpResponsePtr handleUploadPart(const S3Context&, const S3Request&,
+                                         const drogon::HttpRequestPtr&, const S3Body&);
 drogon::HttpResponsePtr handleListParts(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handleCompleteMultipartUpload(const S3Context&, const S3Request&,
+                                                      const drogon::HttpRequestPtr&,
                                                       const S3Body&);
 drogon::HttpResponsePtr handleAbortMultipartUpload(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handleListMultipartUploads(const S3Context&, const S3Request&);
@@ -166,6 +183,40 @@ std::string contentTypeOf(const drogon::HttpRequestPtr& request);
 
 /// Verifies a Content-MD5 header when the client sent one. Throws BadDigest on
 /// a mismatch and InvalidDigest when the header is not base64 of 16 bytes.
+///
+/// Kept working alongside the x-amz-checksum family rather than superseded by
+/// it. A client that sends both is asking for both to be checked, and the older
+/// header is still the only integrity check some tooling knows how to send.
 void verifyContentMd5(const drogon::HttpRequestPtr& request, std::string_view payload);
+
+/// The checksum-bearing headers of one request, lowercased — what
+/// resolveChecksumRequest() reads. Only those headers are copied; the rules
+/// need to enumerate them, and enumerating the whole table per request would
+/// cost more than the checksum does.
+ChecksumHeaders checksumHeaders(const drogon::HttpRequestPtr& request);
+
+/// Streams the body through `sink` while computing every integrity check the
+/// request asked for over the same bytes, then verifies them and returns the
+/// checksum to store.
+///
+/// Both families are checked here: the `x-amz-checksum-*` value in `wanted`,
+/// and `Content-MD5` when the request carries one. A client that sends both is
+/// asking for both, and the older header is still the only integrity check some
+/// tooling knows how to send.
+///
+/// The sink is wrapped rather than each caller being asked to remember to
+/// update a digest of its own: a checksum taken over a subset of the bytes that
+/// were written is worse than no checksum, and this is the only place the two
+/// can be kept in step by construction.
+///
+/// Throws BadDigest on a mismatch, before anything is committed. Returns an
+/// empty Checksum when the request named none, which is an ordinary upload.
+Checksum verifiedChecksum(const drogon::HttpRequestPtr& request, const ChecksumRequest& wanted,
+                          const S3Body& body, const std::function<void(std::string_view)>& sink);
+
+/// Adds `x-amz-checksum-<alg>` when there is one to report. Every write path
+/// answers with what it stored, so a client can compare without reading the
+/// object back.
+void applyChecksumHeader(const drogon::HttpResponsePtr& response, const Checksum& checksum);
 
 }  // namespace monobucket::s3

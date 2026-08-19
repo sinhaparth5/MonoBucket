@@ -142,11 +142,18 @@ void ChunkedDecoder::decode(std::string_view body,
 
     if (!sawFinalChunk) malformed("the body ended without a zero-length chunk");
 
-    // Trailers. They are parsed rather than skipped so that a client which
-    // sends them gets a valid response, but neither their values nor the
-    // x-amz-trailer-signature are acted on: the only trailers S3 defines are
-    // checksums, and a checksum we do not verify is one we must not pretend to
-    // have verified. Verifying them belongs with the checksum work, not here.
+    // Trailers. The only ones S3 defines are checksums, and a checksum is worth
+    // exactly as much as the thing that authenticates it: on a signed streaming
+    // body the trailer block carries its own signature, chained from the final
+    // chunk's, and anything on the path could otherwise rewrite the checksum to
+    // match bytes it had also rewritten.
+    //
+    // The canonical form the signature covers is the trailing headers as
+    // `name:value\n`, lowercased and trimmed, in the order they were sent, with
+    // the signature line itself excluded — it cannot cover itself.
+    std::string canonicalTrailers;
+    std::string declaredSignature;
+
     while (!body.empty()) {
         const std::string_view line = takeLine(body, kMaxChunkHeaderBytes);
         if (line.empty()) break;
@@ -154,8 +161,36 @@ void ChunkedDecoder::decode(std::string_view body,
 
         const std::size_t colon = line.find(':');
         if (colon == std::string_view::npos) malformed("a trailing header has no colon");
-        trailers_.emplace(toLower(trim(line.substr(0, colon))),
-                          std::string(trim(line.substr(colon + 1))));
+
+        std::string       name  = toLower(trim(line.substr(0, colon)));
+        const std::string value = std::string(trim(line.substr(colon + 1)));
+
+        if (name == "x-amz-trailer-signature") {
+            declaredSignature = toLower(value);
+            continue;
+        }
+
+        canonicalTrailers += name;
+        canonicalTrailers += ':';
+        canonicalTrailers += value;
+        canonicalTrailers += '\n';
+        trailers_.emplace(std::move(name), value);
+    }
+
+    if (options_.verifySignatures && options_.expectTrailerSignature) {
+        if (declaredSignature.empty()) {
+            throw S3Exception(S3ErrorCode::SignatureDoesNotMatch,
+                              "A signed streaming upload declared trailing headers but sent no "
+                              "x-amz-trailer-signature.");
+        }
+
+        const std::string expected =
+            trailerSignature(options_.signingKey, options_.amzDate, options_.scope,
+                             previousSignature, sha256Hex(canonicalTrailers));
+        if (!secureEquals(expected, declaredSignature)) {
+            throw S3Exception(S3ErrorCode::SignatureDoesNotMatch,
+                              "The signature of the trailing header block does not match.");
+        }
     }
 
     if (options_.declaredLength != 0 && decoded_ != options_.declaredLength) {

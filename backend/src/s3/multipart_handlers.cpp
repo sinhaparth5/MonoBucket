@@ -79,6 +79,26 @@ drogon::HttpResponsePtr handleCreateMultipartUpload(const S3Context& context,
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
 
+    // There is no payload here to checksum, only a decision about what the
+    // parts will carry — and it has to be recorded now, because the composite
+    // at completion needs every part to have been hashed under the same
+    // algorithm and a part already stored cannot be re-hashed cheaply.
+    const ChecksumRequest wanted = resolveChecksumRequest(checksumHeaders(http));
+    put.checksum.algorithm       = wanted.algorithm;
+
+    // A multipart object here always gets the composite form — a checksum of
+    // the parts' checksums. FULL_OBJECT would mean checksumming the assembled
+    // payload, which is knowable only by reading every part back at completion,
+    // and a client that asked for it would compare our answer against a number
+    // computed the other way. Refused rather than answered with a composite it
+    // did not ask for.
+    if (const std::string& type = http->getHeader("x-amz-checksum-type");
+        !type.empty() && type != "COMPOSITE") {
+        throw S3Exception(S3ErrorCode::InvalidRequest,
+                          "MonoBucket computes COMPOSITE checksums for multipart uploads; "
+                          "x-amz-checksum-type: " + type + " is not supported.");
+    }
+
     const std::string uploadId = context.storage.createUpload(put);
 
     XmlWriter writer("InitiateMultipartUploadResult");
@@ -87,15 +107,34 @@ drogon::HttpResponsePtr handleCreateMultipartUpload(const S3Context& context,
     writer.element("UploadId", uploadId);
 
     auto response = xmlResponse(writer.finish());
+    if (wanted.algorithm) {
+        response->addHeader("x-amz-checksum-algorithm", std::string(toString(*wanted.algorithm)));
+    }
     applyCommonHeaders(response, request.requestId);
     return response;
 }
 
 drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Request& request,
-                                         const S3Body& body) {
+                                         const drogon::HttpRequestPtr& http, const S3Body& body) {
     const std::string  uploadId   = requireUploadId(request);
     const std::uint32_t partNumber = parsePartNumber(request);
     const UploadRecord  upload     = requireUpload(context, request, uploadId);
+
+    ChecksumRequest wanted = resolveChecksumRequest(checksumHeaders(http));
+    if (upload.checksumAlgorithm) {
+        // A part that names nothing is still hashed under what the upload
+        // declared: the composite needs all of them, and a part is only cheap
+        // to checksum while its bytes are going past.
+        if (!wanted.algorithm) {
+            wanted.algorithm = upload.checksumAlgorithm;
+        } else if (*wanted.algorithm != *upload.checksumAlgorithm) {
+            throw S3Exception(S3ErrorCode::InvalidRequest,
+                              "This upload was begun under " +
+                                  std::string(toString(*upload.checksumAlgorithm)) +
+                                  ", so a part cannot carry a " +
+                                  std::string(toString(*wanted.algorithm)) + " checksum.");
+        }
+    }
 
     // What the other parts already amount to, so this part is judged against
     // the object it is being built into rather than on its own. Read once,
@@ -116,7 +155,7 @@ drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Reque
     BlobWriter    writer  = context.storage.beginWrite();
     std::uint64_t written = 0;
 
-    body.streamTo([&writer, &written, limit, others](std::string_view chunk) {
+    const auto sink = [&writer, &written, limit, others](std::string_view chunk) {
         written += chunk.size();
         if (others + written > limit) {
             throw S3Exception(S3ErrorCode::EntityTooLarge,
@@ -125,14 +164,17 @@ drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Reque
                                   std::to_string(limit) + " bytes.");
         }
         writer.write(chunk);
-    });
+    };
 
-    const PartRecord part =
-        context.storage.finishPart(uploadId, partNumber, std::move(writer), std::move(reservation));
+    const Checksum checksum = verifiedChecksum(http, wanted, body, sink);
+
+    const PartRecord part = context.storage.finishPart(
+        uploadId, partNumber, std::move(writer), std::move(reservation), checksum);
     context.metrics.bytesIn.fetch_add(written, std::memory_order_relaxed);
 
     auto response = emptyResponse(200);
     response->addHeader(headers::kETag, quoteETag(part.etag));
+    applyChecksumHeader(response, part.checksum);
     applyCommonHeaders(response, request.requestId);
     return response;
 }
@@ -177,6 +219,9 @@ drogon::HttpResponsePtr handleListParts(const S3Context& context, const S3Reques
     writer.element("MaxParts", static_cast<std::uint64_t>(maxParts));
     writer.booleanElement("IsTruncated", truncated);
     writer.element("StorageClass", kStorageClass);
+    if (upload.checksumAlgorithm) {
+        writer.element("ChecksumAlgorithm", std::string(toString(*upload.checksumAlgorithm)));
+    }
 
     for (const auto& part : parts) {
         writer.open("Part");
@@ -184,6 +229,10 @@ drogon::HttpResponsePtr handleListParts(const S3Context& context, const S3Reques
         writer.element("LastModified", toIso8601(part.uploadedAt));
         writer.element("ETag", quoteETag(part.etag));
         writer.element("Size", part.size);
+        if (part.checksum.present()) {
+            writer.element(checksumElementName(*part.checksum.algorithm),
+                           encodeChecksum(part.checksum));
+        }
         writer.close();
     }
 
@@ -193,8 +242,9 @@ drogon::HttpResponsePtr handleListParts(const S3Context& context, const S3Reques
 }
 
 drogon::HttpResponsePtr handleCompleteMultipartUpload(const S3Context& context,
-                                                      const S3Request& request,
-                                                      const S3Body& body) {
+                                                      const S3Request&              request,
+                                                      const drogon::HttpRequestPtr& http,
+                                                      const S3Body&                 body) {
     const std::string uploadId = requireUploadId(request);
     requireUpload(context, request, uploadId);
 
@@ -246,7 +296,24 @@ drogon::HttpResponsePtr handleCompleteMultipartUpload(const S3Context& context,
         throw S3Exception(S3ErrorCode::MalformedXML, "The manifest lists no parts.");
     }
 
-    const ObjectRecord record = context.storage.completeUpload(uploadId, manifest);
+    // The checksum the client says the finished object will have. Decoded here
+    // and compared inside completeUpload, which is the only place that knows
+    // the composite — and the only place that can still refuse without having
+    // published anything.
+    Checksum expected;
+    if (const ChecksumRequest wanted = resolveChecksumRequest(checksumHeaders(http));
+        wanted.algorithm && !wanted.expected.empty()) {
+        const auto decoded = decodeChecksum(*wanted.algorithm, wanted.expected);
+        if (!decoded) {
+            throw S3Exception(S3ErrorCode::InvalidRequest,
+                              "The " + checksumHeaderName(*wanted.algorithm) +
+                                  " value is not base64 of a " +
+                                  std::string(toString(*wanted.algorithm)) + " digest.");
+        }
+        expected = *decoded;
+    }
+
+    const ObjectRecord record = context.storage.completeUpload(uploadId, manifest, expected);
     invalidateObject(context, request.bucket, request.key);
 
     XmlWriter writer("CompleteMultipartUploadResult");
@@ -256,8 +323,14 @@ drogon::HttpResponsePtr handleCompleteMultipartUpload(const S3Context& context,
     writer.element("Bucket", request.bucket);
     writer.element("Key", request.key);
     writer.element("ETag", quoteETag(record.etag));
+    if (record.checksum.present()) {
+        writer.element(checksumElementName(*record.checksum.algorithm),
+                       encodeChecksum(record.checksum));
+        writer.element("ChecksumType", std::string(checksumTypeOf(record.checksum)));
+    }
 
     auto response = xmlResponse(writer.finish());
+    applyChecksumHeader(response, record.checksum);
     applyCommonHeaders(response, request.requestId);
     return response;
 }

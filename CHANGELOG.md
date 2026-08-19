@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.8] — 2026-08-19
+
 ### Security
 
 - **The `x-amz-checksum-*` family is verified instead of discarded.** Every

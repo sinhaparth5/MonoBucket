@@ -98,12 +98,6 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
-
----
-
-## [2026.08.9] — 2026-08-19
-
 ### Changed
 
 - **The console now uses MonoBucket's Sulu green visual system.** Both DaisyUI

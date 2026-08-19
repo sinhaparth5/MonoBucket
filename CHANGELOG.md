@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.6] — 2026-08-19
+
 ### Added
 
 - **Abandoned multipart uploads are now reclaimed.** A new

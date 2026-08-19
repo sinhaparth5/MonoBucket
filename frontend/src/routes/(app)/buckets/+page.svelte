@@ -270,7 +270,7 @@
 		>
 			<img
 				src="/images/empty-bucket.webp"
-				alt="Colourful empty storage bucket with file tiles above it"
+				alt="Green glass storage bucket with file tiles above it"
 				width="768"
 				height="768"
 				loading="lazy"
@@ -434,7 +434,7 @@
 			<div class="relative h-32 overflow-hidden">
 				<img
 					src="/images/bucket-create.webp"
-					alt="Colourful storage rings assembling into a new bucket"
+					alt="Luminous green storage rings assembling into a new bucket"
 					width="480"
 					height="480"
 					loading="lazy"

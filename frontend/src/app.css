@@ -9,11 +9,9 @@
    console whose only colours are its alert states gives a reader nothing to
    navigate by.
 
-   The two share one hue axis (264-268, a cool slate-indigo) so that flipping to
-   dark changes the light level and nothing else. Surfaces carry a trace of that
-   hue rather than being pure grey; at C=0.003–0.02 it is not a colour anyone
-   would name, but it is the difference between a page that looks designed and
-   one that looks unstyled.
+   The two share the Sulu green scale. Light mode uses the pale end for quiet
+   surfaces and forest tones for readable controls; dark mode reverses that
+   relationship without turning the whole interface into neon.
 
    Contrast, measured against the surface each is used on:
      light  base-content on base-100  ~13:1     dark  ~12:1
@@ -31,22 +29,22 @@
 	prefersdark: false;
 	color-scheme: light;
 
-	--color-base-100: oklch(99.2% 0.006 275);
-	--color-base-200: oklch(96.4% 0.012 275);
-	--color-base-300: oklch(91.5% 0.023 275);
-	--color-base-content: oklch(25% 0.04 272);
-	--color-primary: oklch(55% 0.21 276);
-	--color-primary-content: oklch(98.5% 0.012 268);
-	--color-secondary: oklch(62% 0.14 220);
-	--color-secondary-content: oklch(98.5% 0.01 216);
-	--color-accent: oklch(61% 0.22 325);
-	--color-accent-content: oklch(98.5% 0.01 325);
-	--color-neutral: oklch(32% 0.03 266);
-	--color-neutral-content: oklch(97% 0.008 266);
-	--color-info: oklch(58% 0.13 232);
-	--color-info-content: oklch(98.5% 0.01 232);
-	--color-success: oklch(58% 0.14 152);
-	--color-success-content: oklch(98.5% 0.01 152);
+	--color-base-100: #fbfff7;
+	--color-base-200: #f2ffe5;
+	--color-base-300: #e1ffc7;
+	--color-base-content: #103102;
+	--color-primary: #338506;
+	--color-primary-content: #ffffff;
+	--color-secondary: #42af01;
+	--color-secondary-content: #103102;
+	--color-accent: #7bf526;
+	--color-accent-content: #103102;
+	--color-neutral: #103102;
+	--color-neutral-content: #f2ffe5;
+	--color-info: #2c690b;
+	--color-info-content: #ffffff;
+	--color-success: #338506;
+	--color-success-content: #ffffff;
 	--color-warning: oklch(74% 0.15 72);
 	--color-warning-content: oklch(26% 0.05 72);
 	--color-error: oklch(57% 0.2 25);
@@ -71,22 +69,22 @@
 	prefersdark: true;
 	color-scheme: dark;
 
-	--color-base-100: oklch(21% 0.028 274);
-	--color-base-200: oklch(16.5% 0.025 274);
-	--color-base-300: oklch(29% 0.038 274);
-	--color-base-content: oklch(93% 0.015 272);
-	--color-primary: oklch(72% 0.17 276);
-	--color-primary-content: oklch(17% 0.04 268);
-	--color-secondary: oklch(76% 0.13 215);
-	--color-secondary-content: oklch(17% 0.03 216);
-	--color-accent: oklch(73% 0.18 325);
-	--color-accent-content: oklch(17% 0.03 325);
-	--color-neutral: oklch(30% 0.022 264);
-	--color-neutral-content: oklch(93% 0.012 264);
-	--color-info: oklch(73% 0.12 232);
-	--color-info-content: oklch(17% 0.03 232);
-	--color-success: oklch(74% 0.15 152);
-	--color-success-content: oklch(17% 0.03 152);
+	--color-base-100: #173b0d;
+	--color-base-200: #103102;
+	--color-base-300: #27580f;
+	--color-base-content: #f2ffe5;
+	--color-primary: #7bf526;
+	--color-primary-content: #103102;
+	--color-secondary: #adfe72;
+	--color-secondary-content: #103102;
+	--color-accent: #c4ff95;
+	--color-accent-content: #103102;
+	--color-neutral: #0a2104;
+	--color-neutral-content: #f2ffe5;
+	--color-info: #adfe72;
+	--color-info-content: #103102;
+	--color-success: #7bf526;
+	--color-success-content: #103102;
 	--color-warning: oklch(80% 0.14 72);
 	--color-warning-content: oklch(20% 0.04 72);
 	--color-error: oklch(68% 0.18 25);
@@ -122,9 +120,34 @@
 		U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
+@font-face {
+	font-family: 'Space Grotesk Variable';
+	font-style: normal;
+	font-display: swap;
+	font-weight: 300 700;
+	src: url('@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2')
+		format('woff2-variations');
+	unicode-range:
+		U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+		U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @theme {
 	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-display: 'Space Grotesk Variable', 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
 	--font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+	--color-sulu-50: #f2ffe5;
+	--color-sulu-100: #e1ffc7;
+	--color-sulu-200: #c4ff95;
+	--color-sulu-300: #adfe72;
+	--color-sulu-400: #7bf526;
+	--color-sulu-500: #5adb07;
+	--color-sulu-600: #42af01;
+	--color-sulu-700: #338506;
+	--color-sulu-800: #2c690b;
+	--color-sulu-900: #27580f;
+	--color-sulu-950: #103102;
 
 	/* The sanctioned scale. Seven steps, no arbitrary values anywhere else:
 	   xs   captions, table meta, timestamps
@@ -182,6 +205,11 @@
 		background-attachment: fixed;
 		-webkit-font-smoothing: antialiased;
 		-moz-osx-font-smoothing: grayscale;
+	}
+
+	:where(h1, h2, h3, .brand-text) {
+		font-family: var(--font-display);
+		letter-spacing: -0.035em;
 	}
 
 	:focus-visible {
@@ -243,7 +271,7 @@
 		background-image: linear-gradient(
 			135deg,
 			color-mix(in oklab, var(--color-primary) 8%, var(--color-base-100)),
-			color-mix(in oklab, var(--color-accent) 3%, var(--color-base-100)) 55%,
+			color-mix(in oklab, var(--color-secondary) 4%, var(--color-base-100)) 55%,
 			var(--color-base-100)
 		);
 	}
@@ -278,7 +306,7 @@
 	}
 
 	.brand-text {
-		background-image: linear-gradient(90deg, var(--color-primary), var(--color-accent));
+		background-image: linear-gradient(100deg, var(--color-primary), var(--color-secondary));
 		background-clip: text;
 		color: transparent;
 	}

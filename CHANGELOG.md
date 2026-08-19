@@ -102,6 +102,26 @@ Nothing yet.
 
 ---
 
+## [2026.08.9] — 2026-08-19
+
+### Changed
+
+- **The console now uses MonoBucket's Sulu green visual system.** Both DaisyUI
+  themes have been rebuilt around the same eleven-step palette, with separate
+  light and dark surface mappings and accessible foreground pairs. Buttons,
+  navigation, panels, charts, focus states and status treatments now share one
+  brand language instead of the previous indigo, cyan and magenta mix.
+- Headings and product names use the self-hosted Space Grotesk variable font;
+  Inter remains the body face for dense controls, tables and object metadata.
+  Neither font requires a request outside the MonoBucket binary.
+- The MonoBucket mark has been redrawn as a reusable SVG for the console,
+  favicon and documentation. The login hero, dashboard banner, bucket states,
+  workspace and settings illustrations have also been regenerated in the Sulu
+  palette and kept as size-matched WebP assets so the new artwork does not
+  shift the layouts that contain it.
+
+---
+
 ## [2026.08.8] — 2026-08-19
 
 ### Security

@@ -265,7 +265,7 @@
 		<div class="relative min-h-44 overflow-hidden lg:min-h-full">
 			<img
 				src="/images/settings-runtime.webp"
-				alt="Colourful configuration controls orbiting a storage core"
+				alt="Luminous green configuration controls orbiting a storage core"
 				width="900"
 				height="600"
 				decoding="async"

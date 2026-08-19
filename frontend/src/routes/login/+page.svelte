@@ -149,14 +149,14 @@
 	>
 		<img
 			src="/images/console-login.webp"
-			alt="Abstract file objects flowing into a colourful storage vessel"
+			alt="Luminous green file objects flowing into a storage vessel"
 			width="1536"
 			height="1024"
 			fetchpriority="high"
 			class="absolute inset-4 size-[calc(100%_-_2rem)] rounded-[2rem] object-cover"
 		/>
 		<div
-			class="absolute inset-4 rounded-[2rem] bg-gradient-to-t from-[#07091f]/90 via-transparent to-transparent"
+			class="absolute inset-4 rounded-[2rem] bg-gradient-to-t from-sulu-950/95 via-sulu-950/20 to-transparent"
 		></div>
 		<div class="absolute right-12 bottom-12 left-12 text-white">
 			<p class="max-w-xl text-2xl leading-snug font-semibold">

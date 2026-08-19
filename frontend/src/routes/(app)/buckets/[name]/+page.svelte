@@ -722,7 +722,7 @@
 		<div class="relative min-h-32 overflow-hidden sm:min-h-40 lg:min-h-full">
 			<img
 				src="/images/bucket-workspace.webp"
-				alt="Colourful folders flowing into an object storage gateway"
+				alt="Luminous green folders flowing into an object storage gateway"
 				width="1200"
 				height="545"
 				decoding="async"
@@ -764,7 +764,7 @@
 		>
 			<img
 				src="/images/empty-bucket.webp"
-				alt="Colourful storage bucket ready for file uploads"
+				alt="Green glass storage bucket ready for file uploads"
 				width="768"
 				height="768"
 				loading="lazy"

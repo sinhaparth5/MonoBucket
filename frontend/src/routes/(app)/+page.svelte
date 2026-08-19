@@ -122,7 +122,7 @@
 	>
 		<img
 			src="/images/dashboard-fabric.webp"
-			alt="Colorful data paths flowing into a luminous storage core"
+			alt="Luminous green data paths flowing into a storage core"
 			width="1600"
 			height="593"
 			class="absolute inset-0 size-full object-cover object-[68%_center] sm:object-center"

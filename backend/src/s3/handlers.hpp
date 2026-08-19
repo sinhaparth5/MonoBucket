@@ -113,17 +113,9 @@ drogon::HttpResponsePtr handleGetBucketPolicy(const S3Context&, const S3Request&
 drogon::HttpResponsePtr handlePutBucketPolicy(const S3Context&, const S3Request&, const S3Body&);
 drogon::HttpResponsePtr handleDeleteBucketPolicy(const S3Context&, const S3Request&);
 
-/// Throws `S3Exception(InvalidArgument)` for a document S3 itself would refuse:
-/// empty, larger than 20 KB, or not JSON.
-void validateBucketPolicy(const std::string& document);
-
-/// Whether a policy document grants anonymous reads of this bucket's objects.
-///
-/// Deliberately a narrow reading of one shape of policy rather than an IAM
-/// evaluator: a document it does not recognise grants nothing. Exposed because
-/// the console writes policies too, and two readings of the same document would
-/// eventually be two different answers to "is this bucket public".
-bool policyGrantsAnonymousRead(const std::string& document, std::string_view bucket);
+// Policy reading and validation now live in `s3/bucket_policy.hpp`. The console
+// writes policies too, and two readings of the same document would eventually
+// be two different answers to "is this bucket public".
 drogon::HttpResponsePtr handleDeleteObjects(const S3Context&, const S3Request&,
                                             const drogon::HttpRequestPtr&, const S3Body&);
 

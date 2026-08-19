@@ -72,11 +72,24 @@ struct BucketRecord {
     std::string name;
     TimestampMs createdAt = 0;
 
-    /// Anonymous GETs are allowed when set. Phase 4 reads this on the
-    /// unauthenticated path; a full policy document lands with bucket policies.
+    /// Anonymous GETs of objects are allowed when set — `s3:GetObject` for
+    /// Principal `*`, and nothing wider.
     bool publicRead = false;
 
-    /// Reserved for the Phase 4 policy editor. Empty means "no policy".
+    /// Anonymous listing of the bucket's keys is allowed when set —
+    /// `s3:ListBucket`.
+    ///
+    /// Separate from `publicRead` because they are different exposures and a
+    /// policy says which it means: publishing objects somebody already has the
+    /// name of is not publishing the names. They were once one flag, which
+    /// meant a policy granting only `s3:GetObject` also opened the bucket to
+    /// anonymous enumeration — a grant no document had asked for.
+    bool publicList = false;
+
+    /// The policy document as written, or empty for no policy. Stored verbatim
+    /// so `GetBucketPolicy` returns what was put; the flags above are what is
+    /// actually enforced, and a document that cannot be reduced to them is
+    /// refused at write time rather than stored.
     std::string policy;
 
     /// Empty means CORS is not enabled, which is not the same as enabled with

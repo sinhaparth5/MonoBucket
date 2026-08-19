@@ -124,7 +124,35 @@ void authorize(const S3Context& context, const S3Request& request, Operation ope
     if (request.bucket.empty()) throw S3Exception(S3ErrorCode::AccessDenied);
 
     const BucketRecord bucket = requireBucket(context, request.bucket);
-    if (!bucket.publicRead) throw S3Exception(S3ErrorCode::AccessDenied);
+
+    // Matched against what the policy actually granted rather than against
+    // "read-only", which is a far wider set than any policy can express. A
+    // document granting s3:GetObject once opened the bucket to anonymous
+    // ListObjectsV2 — and to GetBucketPolicy and GetBucketCors with it —
+    // because every one of those is a read and one flag covered them all.
+    switch (operation) {
+        case Operation::GetObject:
+        case Operation::HeadObject:
+            if (!bucket.publicRead) throw S3Exception(S3ErrorCode::AccessDenied);
+            break;
+
+        // HeadBucket sits with listing rather than with reading: it answers
+        // whether a bucket exists, which is the first thing an enumeration
+        // wants and nothing a client fetching a known object needs.
+        case Operation::ListObjectsV1:
+        case Operation::ListObjectsV2:
+        case Operation::HeadBucket:
+            if (!bucket.publicList) throw S3Exception(S3ErrorCode::AccessDenied);
+            break;
+
+        // Everything else read-only — the bucket's policy, its CORS rules, its
+        // uploads in flight — is never anonymous however public the bucket is.
+        // No policy this server accepts can grant them, so there is no figure
+        // to consult: they describe how the bucket is configured rather than
+        // what it holds.
+        default:
+            throw S3Exception(S3ErrorCode::AccessDenied);
+    }
 
     context.metrics.anonymous.fetch_add(1, std::memory_order_relaxed);
 }

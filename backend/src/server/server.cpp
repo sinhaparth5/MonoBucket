@@ -1,3 +1,4 @@
+#include "server/policy_reconcile.hpp"
 #include "server/server.hpp"
 
 #include <algorithm>
@@ -289,6 +290,7 @@ int Server::run() {
     prepareDataDirectory();
     openStorage();
     provisionAdministrator();
+    reconcileBucketPolicies(*storage_);
     openCache();
     configureFramework();
     registerRoutes();

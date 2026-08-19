@@ -109,7 +109,8 @@ public:
 
     /// Stores a bucket policy document together with the anonymous-read flag
     /// derived from it. An empty document removes the policy.
-    void setBucketPolicy(std::string_view name, std::string policy, bool publicRead);
+    void setBucketPolicy(std::string_view name, std::string policy, bool publicRead,
+                         bool publicList);
 
     /// Replaces the bucket's CORS rules. An empty vector disables CORS, which
     /// is what DeleteBucketCors means.

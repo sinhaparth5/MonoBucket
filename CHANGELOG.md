@@ -98,7 +98,35 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- **A bucket policy containing a `Deny` no longer grants anonymous access.**
+  `Deny` statements were skipped entirely while evaluating a document, so a
+  policy publishing a bucket *except* one prefix published the prefix too, and
+  nothing in the response, the stored document or the logs said the exclusion
+  had not taken. Policies are now held to a closed grammar and anything outside
+  it — `Deny`, `Condition`, `NotAction`/`NotResource`/`NotPrincipal`, a named
+  principal, an unsupported action, or a resource scoped to a key prefix — is
+  refused at `PutBucketPolicy` with a message naming the element. A policy that
+  is stored is a policy that is enforced.
+- **Granting `s3:GetObject` no longer opens a bucket to anonymous listing.**
+  Anonymous access was gated on one `publicRead` flag against every read-only
+  operation, so a policy granting object reads also permitted anonymous
+  `ListObjectsV2`, `GetBucketPolicy`, `GetBucketCors` and `ListMultipartUploads`.
+  Object reads and key listing are now separate grants, matched against the
+  operation, and the bucket-configuration reads are never anonymous.
+- **Policies stored by an earlier build are re-read at startup.** The enforced
+  flags are derived data, so a policy whose `Deny` was silently ignored is
+  stored with the bucket marked public; the flags are re-derived on every start
+  and a document this build will not evaluate now grants nothing. The document
+  itself is left untouched. Affected buckets are named in the log.
+
+### Changed
+
+- The console's policy editor shows object reads and key listing separately and
+  states which subset of the policy language is enforced.
+- The console's public-access toggle grants anonymous object reads only. Key
+  listing is the wider exposure and is now asked for explicitly, with a policy.
 
 ---
 
@@ -122,8 +150,35 @@ Nothing yet.
   which left more than `max-uploads` uploads impossible to enumerate. An
   `upload-id-marker` without a `key-marker` is refused, as S3 refuses it.
 
+### Security
+
+- **A bucket policy containing a `Deny` no longer grants anonymous access.**
+  `Deny` statements were skipped entirely while evaluating a document, so a
+  policy publishing a bucket *except* one prefix published the prefix too, and
+  nothing in the response, the stored document or the logs said the exclusion
+  had not taken. Policies are now held to a closed grammar and anything outside
+  it — `Deny`, `Condition`, `NotAction`/`NotResource`/`NotPrincipal`, a named
+  principal, an unsupported action, or a resource scoped to a key prefix — is
+  refused at `PutBucketPolicy` with a message naming the element. A policy that
+  is stored is a policy that is enforced.
+- **Granting `s3:GetObject` no longer opens a bucket to anonymous listing.**
+  Anonymous access was gated on one `publicRead` flag against every read-only
+  operation, so a policy granting object reads also permitted anonymous
+  `ListObjectsV2`, `GetBucketPolicy`, `GetBucketCors` and `ListMultipartUploads`.
+  Object reads and key listing are now separate grants, matched against the
+  operation, and the bucket-configuration reads are never anonymous.
+- **Policies stored by an earlier build are re-read at startup.** The enforced
+  flags are derived data, so a policy whose `Deny` was silently ignored is
+  stored with the bucket marked public; the flags are re-derived on every start
+  and a document this build will not evaluate now grants nothing. The document
+  itself is left untouched. Affected buckets are named in the log.
+
 ### Changed
 
+- The console's policy editor shows object reads and key listing separately and
+  states which subset of the policy language is enforced.
+- The console's public-access toggle grants anonymous object reads only. Key
+  listing is the wider exposure and is now asked for explicitly, with a policy.
 - `--fsck` pages through a bucket's in-progress uploads rather than requesting
   them all at once.
 

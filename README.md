@@ -219,6 +219,16 @@ before you rely on it:
   every bucket and every client; there is no per-bucket or per-user limit, and
   no precedence rule to learn. A bucket's allocation bounds how much it holds,
   not how large one object in it may be.
+- **Bucket policies are a small, closed grammar, not IAM.** What is evaluated:
+  `Allow` statements granting `s3:GetObject` or `s3:ListBucket` to
+  `Principal "*"` over a whole bucket (`arn:aws:s3:::<bucket>`,
+  `arn:aws:s3:::<bucket>/*`, or `*`). That is the entire language. A document
+  containing anything else — a `Deny`, a `Condition`, a `NotAction`, a named
+  principal, an action other than those two, or a resource scoped to a key
+  prefix — is **refused** at `PutBucketPolicy`, naming the element, rather than
+  stored and ignored. Signed requests never consult the policy at all: they are
+  authorised by the role of the access key's owner. A policy is therefore only
+  ever a statement about clients carrying no credentials.
 - **Authorisation is per identity, not per bucket or per key.** A key inherits
   its owner's role and nothing narrower: there is no per-key scoping, no bucket
   restriction and no way to give one program read access to one bucket. An

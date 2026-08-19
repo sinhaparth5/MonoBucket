@@ -22,6 +22,7 @@
 #include "core/password.hpp"
 #include "monobucket/version.hpp"
 #include "s3/cors.hpp"
+#include "s3/bucket_policy.hpp"
 #include "s3/handlers.hpp"
 #include "s3/metrics.hpp"
 #include "s3/s3_error.hpp"
@@ -149,6 +150,7 @@ nlohmann::json toJson(const BucketRecord& bucket, const BucketCapacity& capacity
             {"createdAt", toIso8601(bucket.createdAt)},
             {"createdAtMs", bucket.createdAt},
             {"publicRead", bucket.publicRead},
+            {"publicList", bucket.publicList},
             {"hasPolicy", !bucket.policy.empty()},
             {"corsRules", bucket.cors.size()},
             // null rather than the level it currently resolves to: the bucket
@@ -1644,7 +1646,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                                                  : nlohmann::json(nullptr);
                     document = policy.is_string() ? policy.get<std::string>() : policy.dump();
                     try {
-                        s3::validateBucketPolicy(document);
+                        s3::validateBucketPolicy(document, name);
                     } catch (const s3::S3Exception& error) {
                         callback(errorJson(error.what(), drogon::k400BadRequest));
                         return;
@@ -1654,19 +1656,21 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 // Deleting the policy removes the access it granted; leaving
                 // the flag set would keep a bucket public with nothing left in
                 // the record to say why.
-                const bool publicRead =
-                    !document.empty() && s3::policyGrantsAnonymousRead(document, name);
+                const s3::AnonymousGrants grants =
+                    document.empty() ? s3::AnonymousGrants{}
+                                     : s3::analyseBucketPolicy(document, name).grants;
 
-                offload(callback, [&storage, &cache, name, document, publicRead]()
+                offload(callback, [&storage, &cache, name, document, grants]()
                                       -> HttpResponsePtr {
-                    storage.setBucketPolicy(name, document, publicRead);
+                    storage.setBucketPolicy(name, document, grants.readObjects, grants.listBucket);
                     cache.del(s3::bucketCacheKey(name));
 
                     const auto record = storage.getBucket(name);
                     if (!record) return errorJson("no such bucket", drogon::k404NotFound);
                     return jsonResponse({{"bucket", name},
                                          {"policy", record->policy},
-                                         {"publicRead", record->publicRead}});
+                                         {"publicRead", record->publicRead},
+                                         {"publicList", record->publicList}});
                 });
             });
         },

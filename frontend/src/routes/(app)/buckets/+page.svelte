@@ -386,6 +386,11 @@
 									<span class="text-base-content/50 text-xs">
 										{bucket.publicRead ? 'public' : 'private'}
 									</span>
+									{#if bucket.publicList}
+										<!-- Only a policy can grant this, and it is the wider of the two
+										     exposures, so it is called out rather than folded into "public". -->
+										<span class="badge badge-xs badge-warning badge-soft">listable</span>
+									{/if}
 								</label>
 							</td>
 							<td>

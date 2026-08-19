@@ -22,6 +22,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/s3/base64.cpp
     src/s3/bucket_handlers.cpp
     src/s3/chunked.cpp
+    src/s3/bucket_policy.cpp
     src/s3/cors.cpp
     src/s3/handlers.cpp
     src/s3/multipart_handlers.cpp
@@ -46,6 +47,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/server/console_api.cpp
     src/server/console_session.cpp
     src/server/metrics_history.cpp
+    src/server/policy_reconcile.cpp
     src/server/server.cpp
     src/server/system_routes.cpp
 )

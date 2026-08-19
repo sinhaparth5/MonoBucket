@@ -471,6 +471,7 @@
 	let policySaved = $state(false);
 	let hasPolicy = $state(false);
 	let policyPublicRead = $state(false);
+	let policyPublicList = $state(false);
 
 	/// Client-side only, and only to keep the Save button from sending something
 	/// the server will certainly refuse. The server validates again — it has to,
@@ -494,6 +495,7 @@
 			const current = await api.bucketPolicy(bucket);
 			hasPolicy = current.policy.length > 0;
 			policyPublicRead = current.publicRead;
+			policyPublicList = current.publicList;
 			// Pretty-printed on the way in so a document written by a client on
 			// one line is readable here, and left exactly as typed on the way
 			// back out.
@@ -526,6 +528,7 @@
 			const saved = await api.setBucketPolicy(bucket, policyDraft.trim());
 			hasPolicy = saved.policy.length > 0;
 			policyPublicRead = saved.publicRead;
+			policyPublicList = saved.publicList;
 			publicRead = saved.publicRead;
 			policySaved = true;
 			setTimeout(() => (policySaved = false), 2000);
@@ -543,6 +546,7 @@
 			const saved = await api.clearBucketPolicy(bucket);
 			hasPolicy = false;
 			policyPublicRead = saved.publicRead;
+			policyPublicList = saved.publicList;
 			publicRead = saved.publicRead;
 			policyDraft = '';
 			policySaved = true;
@@ -560,6 +564,7 @@
 			.then((current) => {
 				hasPolicy = current.policy.length > 0;
 				policyPublicRead = current.publicRead;
+				policyPublicList = current.publicList;
 			})
 			.catch(() => (hasPolicy = false));
 	});
@@ -1244,9 +1249,16 @@
 							{#if policyPublicRead}
 								<span class="badge badge-sm badge-success badge-soft gap-1">
 									<Icon name="globe" class="size-3" />
-									grants anonymous read
+									anonymous object reads
 								</span>
-							{:else}
+							{/if}
+							{#if policyPublicList}
+								<span class="badge badge-sm badge-warning badge-soft gap-1">
+									<Icon name="globe" class="size-3" />
+									anonymous key listing
+								</span>
+							{/if}
+							{#if !policyPublicRead && !policyPublicList}
 								<span class="badge badge-sm badge-ghost">grants no anonymous access</span>
 							{/if}
 						{/if}
@@ -1281,8 +1293,20 @@
 					<p class="text-error text-xs">{policyMalformed}</p>
 				{:else}
 					<p class="text-base-content/50 text-xs">
-						Up to 20 KB. Saving replaces whatever is there; the derived anonymous-read flag is
-						recomputed on every write, so removing the statement removes the access it granted.
+						Up to 20 KB. Saving replaces whatever is there, and the access shown above is recomputed
+						on every write, so removing a statement removes the access it granted.
+					</p>
+					<p class="text-base-content/50 text-xs">
+						A policy that saves here is a policy that is enforced. MonoBucket evaluates
+						<span class="font-mono">Allow</span> statements granting
+						<span class="font-mono">s3:GetObject</span> or
+						<span class="font-mono">s3:ListBucket</span> to
+						<span class="font-mono">Principal "*"</span> over a whole bucket, and refuses anything
+						else — a <span class="font-mono">Deny</span>, a
+						<span class="font-mono">Condition</span>, a named principal or a key-prefix resource —
+						naming what it could not evaluate rather than storing a document nobody is held to.
+						Signed requests are authorised by the role of the access key's owner and never by this
+						document.
 					</p>
 				{/if}
 			</div>

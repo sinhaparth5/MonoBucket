@@ -273,19 +273,24 @@ void StorageEngine::setBucketPublicRead(std::string_view name, bool publicRead) 
         throw StorageError(StorageErrorCode::NoSuchBucket, "no such bucket: " + std::string(name));
     }
     bucket->publicRead = publicRead;
+    // The console's toggle publishes the objects, not the key names. Listing is
+    // the wider exposure of the two and is asked for explicitly, with a policy.
+    bucket->publicList = false;
     metadata_->updateBucket(*bucket);
 }
 
-void StorageEngine::setBucketPolicy(std::string_view name, std::string policy, bool publicRead) {
+void StorageEngine::setBucketPolicy(std::string_view name, std::string policy, bool publicRead,
+                                    bool publicList) {
     auto bucket = metadata_->getBucket(name);
     if (!bucket) {
         throw StorageError(StorageErrorCode::NoSuchBucket, "no such bucket: " + std::string(name));
     }
-    // The document and the flag derived from it are committed together. Stored
-    // separately they could disagree, and the flag is what the read path
+    // The document and the flags derived from it are committed together. Stored
+    // separately they could disagree, and the flags are what the read path
     // actually consults.
     bucket->policy     = std::move(policy);
     bucket->publicRead = publicRead;
+    bucket->publicList = publicList;
     metadata_->updateBucket(*bucket);
 }
 

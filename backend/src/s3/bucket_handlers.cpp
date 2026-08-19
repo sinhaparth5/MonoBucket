@@ -5,6 +5,7 @@
 
 #include "core/config.hpp"
 #include "s3/base64.hpp"
+#include "s3/bucket_policy.hpp"
 #include "s3/handlers.hpp"
 #include "s3/response.hpp"
 #include "s3/s3_error.hpp"
@@ -70,80 +71,6 @@ std::string decodeContinuation(std::string_view token) {
 }
 
 }  // namespace
-
-void validateBucketPolicy(const std::string& document) {
-    if (document.empty()) {
-        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is empty.");
-    }
-    if (document.size() > 20 * 1024) {
-        throw S3Exception(S3ErrorCode::InvalidArgument,
-                          "The policy document exceeds the maximum size of 20 KB.");
-    }
-    if (!nlohmann::json::accept(document)) {
-        throw S3Exception(S3ErrorCode::InvalidArgument, "The policy document is not valid JSON.");
-    }
-}
-
-// A document this does not recognise is stored and reported back unchanged but
-// grants nothing — refusing to guess is the only safe direction to be wrong in.
-bool policyGrantsAnonymousRead(const std::string& document, std::string_view bucket) {
-    nlohmann::json policy;
-    try {
-        policy = nlohmann::json::parse(document);
-    } catch (const nlohmann::json::exception&) {
-        return false;
-    }
-    if (!policy.is_object() || !policy.contains("Statement")) return false;
-
-    const auto& statements = policy["Statement"];
-    if (!statements.is_array()) return false;
-
-    const auto matches = [](const nlohmann::json& field, auto&& predicate) {
-        if (field.is_string()) return predicate(field.get<std::string>());
-        if (field.is_array()) {
-            return std::any_of(field.begin(), field.end(), [&](const nlohmann::json& item) {
-                return item.is_string() && predicate(item.get<std::string>());
-            });
-        }
-        return false;
-    };
-
-    for (const auto& statement : statements) {
-        if (!statement.is_object()) continue;
-        if (statement.value("Effect", "") != "Allow") continue;
-
-        // A statement carrying a Condition is not evaluated, so it must not be
-        // treated as an unconditional grant.
-        if (statement.contains("Condition")) continue;
-
-        if (!statement.contains("Principal")) continue;
-        const auto& principal = statement["Principal"];
-        bool        anonymous = false;
-        if (principal.is_string()) {
-            anonymous = principal.get<std::string>() == "*";
-        } else if (principal.is_object() && principal.contains("AWS")) {
-            anonymous = matches(principal["AWS"], [](const std::string& value) {
-                return value == "*";
-            });
-        }
-        if (!anonymous) continue;
-
-        if (!statement.contains("Action")) continue;
-        const bool reads = matches(statement["Action"], [](const std::string& value) {
-            return value == "s3:GetObject" || value == "s3:*" || value == "*";
-        });
-        if (!reads) continue;
-
-        if (!statement.contains("Resource")) continue;
-        const std::string prefix = "arn:aws:s3:::" + std::string(bucket);
-        const bool        covers = matches(statement["Resource"], [&prefix](const std::string& value) {
-            return value == prefix + "/*" || value == prefix + "*" || value == "*";
-        });
-        if (covers) return true;
-    }
-
-    return false;
-}
 
 drogon::HttpResponsePtr handleListBuckets(const S3Context& context, const S3Request& request) {
     XmlWriter writer("ListAllMyBucketsResult");
@@ -448,10 +375,18 @@ drogon::HttpResponsePtr handlePutBucketPolicy(const S3Context& context, const S3
     requireBucket(context, request.bucket);
 
     const std::string document = body.materialise();
-    validateBucketPolicy(document);
 
-    const bool publicRead = policyGrantsAnonymousRead(document, request.bucket);
-    context.storage.setBucketPolicy(request.bucket, document, publicRead);
+    // Throws, naming the element, when the document is outside the grammar
+    // this server evaluates. Refusing here is the whole point: a policy that
+    // is stored is a policy that is enforced, and one that is only half
+    // understood cannot be half applied — the half not understood is exactly
+    // as likely to have been the restriction.
+    validateBucketPolicy(document, request.bucket);
+
+    const AnonymousGrants grants =
+        analyseBucketPolicy(document, request.bucket).grants;
+    context.storage.setBucketPolicy(request.bucket, document, grants.readObjects,
+                                    grants.listBucket);
     invalidateBucket(context, request.bucket);
 
     auto response = emptyResponse(204);
@@ -463,9 +398,9 @@ drogon::HttpResponsePtr handleDeleteBucketPolicy(const S3Context& context,
                                                  const S3Request& request) {
     requireBucket(context, request.bucket);
 
-    // Removing the policy removes the anonymous access it granted. Leaving the
+    // Removing the policy removes the anonymous access it granted. Leaving a
     // flag set would keep a bucket public with nothing left to say why.
-    context.storage.setBucketPolicy(request.bucket, std::string(), false);
+    context.storage.setBucketPolicy(request.bucket, std::string(), false, false);
     invalidateBucket(context, request.bucket);
 
     auto response = emptyResponse(204);

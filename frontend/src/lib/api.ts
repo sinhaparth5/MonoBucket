@@ -285,6 +285,9 @@ export interface Bucket {
 	createdAt: string;
 	createdAtMs: number;
 	publicRead: boolean;
+	/// Anonymous key listing, which only a policy can grant — the access toggle
+	/// publishes the objects and never their names.
+	publicList: boolean;
 	hasPolicy: boolean;
 	corsRules: number;
 	/// The bucket's storage allocation. Zero means unlimited — buckets made by
@@ -376,6 +379,10 @@ export interface BucketPolicy {
 	/// What the server derived from that document, which is the half that
 	/// actually decides whether an unsigned GET works.
 	publicRead: boolean;
+	/// Whether the document also grants `s3:ListBucket` — anonymous
+	/// enumeration of the keys, which is a wider exposure than serving an
+	/// object to someone who already knows its name.
+	publicList: boolean;
 }
 
 export interface Setting {

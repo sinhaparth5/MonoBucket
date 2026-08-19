@@ -114,6 +114,11 @@ std::string encodeBucket(const BucketRecord& bucket) {
     // counts is a counter that can disagree with them after any interrupted
     // write, and nothing could then say which of the two was right.
     writer.varint(bucket.quotaBytes);
+    // Appended on the same terms as everything after the CORS rules: a bucket
+    // written before anonymous listing was distinguishable from anonymous
+    // reading reads back with listing off, which is the safe direction and the
+    // one an operator would have chosen had they been asked.
+    writer.boolean(bucket.publicList);
     return out;
 }
 
@@ -151,6 +156,12 @@ BucketRecord decodeBucket(std::string_view name, std::string_view stored) {
         // Appended again, on the same terms. A bucket written before storage
         // allocations existed reads back with none, which is what it had.
         if (!reader.exhausted()) bucket.quotaBytes = reader.varint();
+
+        // And once more. A bucket written while anonymous read and anonymous
+        // listing were the same flag reads back with listing off: the pair
+        // cannot be recovered from one boolean, and of the two possible
+        // answers only this one cannot widen an exposure.
+        if (!reader.exhausted()) bucket.publicList = reader.boolean();
     }
 
     return bucket;

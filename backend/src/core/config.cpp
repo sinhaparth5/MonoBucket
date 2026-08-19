@@ -161,6 +161,9 @@ Config Config::fromEnvironment() {
     cfg.maxBodyBytes  = env::bytes("MONOBUCKET_MAX_BODY_BYTES", cfg.maxBodyBytes);
     cfg.maxMemoryBodyBytes =
         env::bytes("MONOBUCKET_MAX_MEMORY_BODY_BYTES", cfg.maxMemoryBodyBytes);
+    cfg.maxUploadBytes = env::bytes("MONOBUCKET_MAX_UPLOAD_BYTES", cfg.maxUploadBytes);
+    cfg.maxUploadCeilingBytes =
+        env::bytes("MONOBUCKET_MAX_UPLOAD_CEILING_BYTES", cfg.maxUploadCeilingBytes);
     cfg.streamChunkBytes = env::bytes("MONOBUCKET_STREAM_CHUNK_BYTES", cfg.streamChunkBytes);
     cfg.idleTimeoutSeconds = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_IDLE_TIMEOUT_SECONDS", cfg.idleTimeoutSeconds));
@@ -306,6 +309,21 @@ void Config::validate() const {
             "MONOBUCKET_MAX_MEMORY_BODY_BYTES must not exceed MONOBUCKET_MAX_BODY_BYTES");
     }
 
+    // Zero is refused rather than read as "unlimited". Every other byte figure
+    // here treats zero as "no limit", and a maximum upload size that silently
+    // means the opposite of what the name says is the kind of setting somebody
+    // reaches for in a hurry and gets backwards.
+    if (maxUploadCeilingBytes == 0) {
+        throw ConfigError("MONOBUCKET_MAX_UPLOAD_CEILING_BYTES must be at least 1");
+    }
+    if (maxUploadBytes == 0) {
+        throw ConfigError("MONOBUCKET_MAX_UPLOAD_BYTES must be at least 1");
+    }
+    if (maxUploadBytes > maxUploadCeilingBytes) {
+        throw ConfigError(
+            "MONOBUCKET_MAX_UPLOAD_BYTES must not exceed MONOBUCKET_MAX_UPLOAD_CEILING_BYTES");
+    }
+
     if (cacheBackend == CacheBackend::Redis) {
         if (redisUrl.empty()) {
             throw ConfigError("MONOBUCKET_REDIS_URL is required when the cache backend is 'redis'");
@@ -410,6 +428,8 @@ std::string Config::summary() const {
        << "  io threads       : " << ioThreads << " (queue " << ioQueueLimit << ")\n"
        << "  max body         : " << env::formatBytes(maxBodyBytes) << '\n'
        << "  in-memory body   : " << env::formatBytes(maxMemoryBodyBytes) << '\n'
+       << "  max upload       : " << env::formatBytes(maxUploadBytes) << " (ceiling "
+       << env::formatBytes(maxUploadCeilingBytes) << ")\n"
        << "  stream chunk     : " << env::formatBytes(streamChunkBytes) << '\n'
        << "  cache backend    : " << toString(cacheBackend) << '\n'
        << "  cache budget     : "
@@ -453,6 +473,12 @@ nlohmann::json Config::toJson() const {
         {"workerThreads", workerThreads},
         {"maxBodyBytes", maxBodyBytes},
         {"maxMemoryBodyBytes", maxMemoryBodyBytes},
+        // The ceiling only. `maxUploadBytes` is a seed for a store that has
+        // never carried a limit, so after the first start it is not what is
+        // enforced — and a settings panel showing a stale figure beside the
+        // variable that produced it is worse than not showing it at all. The
+        // limit actually in force comes from /_mb/api/upload-limit.
+        {"maxUploadCeilingBytes", maxUploadCeilingBytes},
         {"streamChunkBytes", streamChunkBytes},
         {"idleTimeoutSeconds", idleTimeoutSeconds},
         {"cacheBackend", std::string(toString(cacheBackend))},

@@ -742,7 +742,12 @@
 
 	{#if uploadOpen}
 		<div transition:fly={{ y: motionDistance(-8), duration: motionDuration(200) }}>
-			<Uploader {bucket} {prefix} onfinished={() => loadFirstPage(bucket, prefix)} />
+			<Uploader
+				{bucket}
+				{prefix}
+				maxBytes={data.session.maxUploadBytes}
+				onfinished={() => loadFirstPage(bucket, prefix)}
+			/>
 		</div>
 	{/if}
 

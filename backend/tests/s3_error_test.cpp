@@ -91,6 +91,11 @@ TEST_CASE("every storage condition maps to a code a client can act on",
     // not a full bucket, and saying "QuotaExceeded" would send the reader off
     // to delete objects that were never the problem.
     REQUIRE(fromStorage(StorageErrorCode::QuotaBelowUsage) == S3ErrorCode::InvalidArgument);
+    // Not QuotaExceeded: a bucket that is full and an object that is too large
+    // are different problems with different fixes, and clients branch on the
+    // code string rather than on the message.
+    REQUIRE(fromStorage(StorageErrorCode::ObjectTooLarge) == S3ErrorCode::EntityTooLarge);
+    REQUIRE(describe(S3ErrorCode::EntityTooLarge).status == 400);
 
     // Corruption, Io and Internal are all "the server broke" and the client's
     // recourse is identical; distinguishing them on the wire would only tell an

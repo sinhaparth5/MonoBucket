@@ -97,14 +97,34 @@ drogon::HttpResponsePtr handleUploadPart(const S3Context& context, const S3Reque
     const std::uint32_t partNumber = parsePartNumber(request);
     const UploadRecord  upload     = requireUpload(context, request, uploadId);
 
+    // What the other parts already amount to, so this part is judged against
+    // the object it is being built into rather than on its own. Read once,
+    // before the body: the storage layer checks it again with the figure that
+    // actually arrived, and again at completion.
+    const std::uint64_t limit  = context.storage.maxUploadBytes();
+    const std::uint64_t others = context.storage.uploadedPartBytes(uploadId, partNumber);
+    if (others + body.decodedLength() > limit) {
+        throw S3Exception(S3ErrorCode::EntityTooLarge,
+                          "This part would bring the upload to " +
+                              std::to_string(others + body.decodedLength()) +
+                              " bytes, over this instance's maximum upload size of " +
+                              std::to_string(limit) + " bytes.");
+    }
+
     auto reservation = context.storage.reserveSpace(upload.bucket, body.decodedLength());
 
     BlobWriter    writer  = context.storage.beginWrite();
     std::uint64_t written = 0;
 
-    body.streamTo([&writer, &written](std::string_view chunk) {
-        writer.write(chunk);
+    body.streamTo([&writer, &written, limit, others](std::string_view chunk) {
         written += chunk.size();
+        if (others + written > limit) {
+            throw S3Exception(S3ErrorCode::EntityTooLarge,
+                              "This part takes the upload over this instance's maximum upload "
+                              "size of " +
+                                  std::to_string(limit) + " bytes.");
+        }
+        writer.write(chunk);
     });
 
     const PartRecord part =

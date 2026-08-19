@@ -124,6 +124,14 @@ std::string renderMetrics(const Config& config, StorageEngine& storage, IoExecut
        << "# TYPE monobucket_unallocated_buckets gauge\n"
        << "monobucket_unallocated_buckets " << capacity.unlimitedBuckets << '\n';
 
+    os << "# HELP monobucket_max_upload_bytes Largest object this instance accepts.\n"
+       << "# TYPE monobucket_max_upload_bytes gauge\n"
+       << "monobucket_max_upload_bytes " << storage.maxUploadBytes() << '\n';
+
+    os << "# HELP monobucket_max_upload_ceiling_bytes Most the upload limit may be raised to.\n"
+       << "# TYPE monobucket_max_upload_ceiling_bytes gauge\n"
+       << "monobucket_max_upload_ceiling_bytes " << storage.maxUploadCeilingBytes() << '\n';
+
     // Per-bucket series, which is the pair an alert is actually written
     // against: a bucket approaching its allocation is the thing an operator
     // wants to hear about, and the instance total cannot say which one.

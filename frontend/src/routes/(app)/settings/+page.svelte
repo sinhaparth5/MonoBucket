@@ -10,8 +10,16 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { fly } from 'svelte/transition';
-	import { api, ApiError, type ServerConfig, type Setting } from '$lib/api';
-	import { formatBytes, formatDuration, plural } from '$lib/format';
+	import { api, ApiError, can, type ServerConfig, type Setting, type UploadLimit } from '$lib/api';
+	import {
+		ALLOCATION_UNITS,
+		allocationBytes,
+		formatBytes,
+		formatDuration,
+		plural,
+		splitAllocation,
+		type AllocationUnit
+	} from '$lib/format';
 	import { motionDistance, motionDuration } from '$lib/motion';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 
@@ -60,9 +68,45 @@
 		}
 	}
 
+	// The one figure on this page that is stored rather than configured, so it
+	// is the one control here that has a save button. Everything else is
+	// environment-only and could not honour one.
+	const mayWriteSettings = $derived(can(data.session, 'settings:write'));
+
+	let limit = $state<UploadLimit | null>(null);
+	let limitAmount = $state(1);
+	let limitUnit = $state<AllocationUnit>('GiB');
+	let limitError = $state('');
+	let limitNotice = $state('');
+	let savingLimit = $state(false);
+
+	const limitBytes = $derived(allocationBytes(limitAmount, limitUnit));
+	const overCeiling = $derived(limit !== null && limitBytes > limit.ceilingBytes);
+
+	async function saveLimit(event: SubmitEvent) {
+		event.preventDefault();
+		limitError = '';
+		limitNotice = '';
+		savingLimit = true;
+		try {
+			limit = await api.setUploadLimit(limitBytes);
+			// Read back from the answer rather than kept from the form: the
+			// server is what decides, and showing the figure it stored is the
+			// only way this panel cannot drift from what is enforced.
+			({ amount: limitAmount, unit: limitUnit } = splitAllocation(limit.maxUploadBytes));
+			limitNotice = `Uploads over ${formatBytes(limit.maxUploadBytes)} are now refused. Transfers already under way finish.`;
+		} catch (cause) {
+			limitError = cause instanceof ApiError ? cause.message : 'could not change the limit';
+		} finally {
+			savingLimit = false;
+		}
+	}
+
 	async function load() {
 		try {
 			config = await api.config();
+			limit = await api.uploadLimit();
+			({ amount: limitAmount, unit: limitUnit } = splitAllocation(limit.maxUploadBytes));
 			error = '';
 		} catch (cause) {
 			if (cause instanceof ApiError && cause.unauthorized) {
@@ -311,6 +355,85 @@
 			</div>
 		</form>
 	</section>
+
+	{#if limit}
+		<section class="panel surface-raised flex flex-col gap-4 p-6">
+			<div class="flex flex-col gap-1">
+				<span class="eyebrow">Uploads</span>
+				<h2 class="text-xl font-bold tracking-tight">Maximum object size</h2>
+				<p class="text-base-content/60 max-w-xl text-sm">
+					One limit for the whole instance, applied to every object however it arrives — the console
+					uploader, a signed PUT, and a multipart upload measured across its parts. It is stored
+					rather than configured, so it survives a restart and takes effect on the next request.
+				</p>
+			</div>
+
+			<div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+				<span class="text-2xl font-bold tabular-nums">{formatBytes(limit.maxUploadBytes)}</span>
+				<span class="text-base-content/50 text-xs">
+					ceiling {formatBytes(limit.ceilingBytes)} · raise it with MONOBUCKET_MAX_UPLOAD_CEILING_BYTES
+				</span>
+			</div>
+
+			{#if mayWriteSettings}
+				<form class="flex flex-wrap items-end gap-3" onsubmit={saveLimit}>
+					<fieldset class="fieldset gap-1 p-0">
+						<legend class="fieldset-legend text-sm">New limit</legend>
+						<div class="join">
+							<input
+								class="input join-item w-32"
+								type="number"
+								min="1"
+								step="1"
+								bind:value={limitAmount}
+								aria-label="Maximum upload amount"
+								required
+							/>
+							<select
+								class="select join-item w-24"
+								bind:value={limitUnit}
+								aria-label="Maximum upload unit"
+							>
+								{#each ALLOCATION_UNITS as option (option.label)}
+									<option value={option.label}>{option.label}</option>
+								{/each}
+							</select>
+						</div>
+					</fieldset>
+
+					<button
+						class="btn btn-primary gap-2"
+						type="submit"
+						disabled={savingLimit || overCeiling || limitBytes === limit.maxUploadBytes}
+					>
+						{#if savingLimit}<span class="loading loading-spinner loading-xs"></span>{/if}
+						Save limit
+					</button>
+
+					{#if overCeiling}
+						<p class="text-warning w-full text-xs">
+							That is above this instance's ceiling of {formatBytes(limit.ceilingBytes)}.
+						</p>
+					{/if}
+				</form>
+			{:else}
+				<p class="text-base-content/50 text-xs">Only an administrator can change this.</p>
+			{/if}
+
+			{#if limitError}
+				<div role="alert" class="alert alert-error alert-soft text-sm">
+					<Icon name="warning" class="size-4" />
+					<span>{limitError}</span>
+				</div>
+			{/if}
+			{#if limitNotice}
+				<div role="status" class="alert alert-success alert-soft text-sm">
+					<Icon name="check" class="size-4" />
+					<span>{limitNotice}</span>
+				</div>
+			{/if}
+		</section>
+	{/if}
 
 	{#if error}
 		<div

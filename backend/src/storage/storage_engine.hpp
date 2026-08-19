@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -54,6 +55,14 @@ public:
         /// bucket unlimited, which is what every bucket was before allocations
         /// existed and therefore what an upgrade must not change.
         std::uint64_t defaultBucketQuotaBytes = 0;
+
+        /// The maximum object-upload size to fall back on when the store has
+        /// never carried one. Seeded from MONOBUCKET_MAX_UPLOAD_BYTES.
+        std::uint64_t maxUploadBytes = 5ull * 1024 * 1024 * 1024;
+
+        /// The most the persisted limit may ever be raised to. Environment
+        /// only, so the console cannot lift its own ceiling.
+        std::uint64_t maxUploadCeilingBytes = 5ull * 1024 * 1024 * 1024 * 1024;
     };
 
     static Options optionsFrom(const Config& config);
@@ -132,6 +141,45 @@ public:
     /// otherwise `MONOBUCKET_DURABILITY`.
     Durability durabilityFor(std::string_view bucket);
 
+    // --- Upload limit ------------------------------------------------------
+    //
+    // One number, instance-wide, applying to every object however it arrives.
+    //
+    // Not per-bucket and not per-user, and that is the decision rather than
+    // the first increment of one: the moment a limit has more than one scope
+    // it needs a precedence rule, and a precedence rule is the beginning of a
+    // policy language this server has deliberately refused to grow. A bucket's
+    // allocation already answers "how much may this bucket hold"; this answers
+    // "how large may one object be", and the two compose without either
+    // needing to know about the other.
+
+    /// The largest object this instance accepts. Never zero.
+    std::uint64_t maxUploadBytes() const noexcept {
+        return maxUploadBytes_.load(std::memory_order_relaxed);
+    }
+
+    /// The most `setMaxUploadBytes` will accept.
+    std::uint64_t maxUploadCeilingBytes() const noexcept {
+        return options_.maxUploadCeilingBytes;
+    }
+
+    /// Replaces the limit and persists it.
+    ///
+    /// Throws `StorageErrorCode::Internal` for zero and
+    /// `StorageErrorCode::ObjectTooLarge` for a figure above the ceiling. The
+    /// new limit is published only after the record is written, so a limit the
+    /// store refused is not one the next request is held to.
+    void setMaxUploadBytes(std::uint64_t bytes);
+
+    /// Throws `ObjectTooLarge` when `bytes` is over the limit, with a message
+    /// naming both figures.
+    ///
+    /// Public because every write path checks it twice — once against what the
+    /// client declared, before a byte is read, and again against what actually
+    /// arrived. The declared check is the one that saves the transfer; the
+    /// arrived check is the one that is true.
+    void requireWithinUploadLimit(std::uint64_t bytes, std::string_view what) const;
+
     // --- Objects -----------------------------------------------------------
 
     /// Opens a payload for streaming and registers it for reclamation first, so
@@ -196,6 +244,17 @@ public:
                           QuotaLedger::Reservation reservation = {});
 
     std::vector<PartRecord> listParts(std::string_view uploadId);
+
+    /// What this upload's stored parts already amount to, ignoring
+    /// `exceptPartNumber` — which is the part about to replace it.
+    ///
+    /// A prefix scan per part, which is what makes an upload refusable before
+    /// its next part is sent rather than only at completion. The scan is over
+    /// one upload's part rows, so it is bounded by the 10,000-part maximum and
+    /// not by the object count; against a part that is at least five megabytes
+    /// it does not register.
+    std::uint64_t uploadedPartBytes(std::string_view uploadId,
+                                    std::uint32_t    exceptPartNumber = 0);
 
     void abortUpload(std::string_view uploadId);
 
@@ -372,6 +431,11 @@ private:
     /// the constructor, before anything can write.
     void seedQuotas();
 
+    /// Reads the persisted upload limit, or stamps the seed from the
+    /// environment on a store that has never carried one. Called once, from
+    /// the constructor.
+    void seedUploadLimit();
+
     Options                        options_;
     BlobStore                      blobs_;
     std::unique_ptr<MetadataStore> metadata_;
@@ -379,6 +443,12 @@ private:
     /// Declared after `metadata_` and seeded from it: the ledger is only
     /// meaningful once the store has counted what is already there.
     QuotaLedger quotas_;
+
+    /// The effective upload limit. Atomic rather than guarded, because it is
+    /// read on every write and changed roughly never; a relaxed load is the
+    /// whole cost, and a request that crosses the change is held to one of the
+    /// two figures rather than to something in between.
+    std::atomic<std::uint64_t> maxUploadBytes_{0};
 };
 
 /// Renders a finding kind for logs and the `--fsck` report.

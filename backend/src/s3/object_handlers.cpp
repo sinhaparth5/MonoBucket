@@ -202,6 +202,19 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
     put.contentType  = contentTypeOf(http);
     put.userMetadata = collectUserMetadata(http);
 
+    // Refused on what the client declared, before a byte is read back out of
+    // the body. This is the earliest point the size is knowable to us —
+    // Content-Length has already been consumed by the framework by the time
+    // any handler runs — and it is what turns an oversized PUT into an
+    // immediate answer rather than a transfer that is thrown away at the end.
+    const std::uint64_t limit = context.storage.maxUploadBytes();
+    if (body.decodedLength() > limit) {
+        throw S3Exception(S3ErrorCode::EntityTooLarge,
+                          "The object is " + std::to_string(body.decodedLength()) +
+                              " bytes, over this instance's maximum upload size of " +
+                              std::to_string(limit) + " bytes.");
+    }
+
     // Claimed before a byte is written to the tree, so a bucket that is full
     // refuses the request instead of storing a payload it will then have to
     // reclaim. finishWrite settles the claim against what actually arrived.
@@ -212,9 +225,21 @@ drogon::HttpResponsePtr handlePutObject(const S3Context& context, const S3Reques
 
     // Verification happens inside streamTo, before any byte reaches the writer,
     // and an exception here leaves the writer to discard its own temporary.
-    body.streamTo([&writer, &written](std::string_view chunk) {
-        writer.write(chunk);
+    //
+    // The running total is checked before each chunk is written rather than
+    // after: a chunked body declares its decoded length in a header the
+    // decoder only verifies once it has fed every byte through, so a client
+    // that declares one byte and sends ten gigabytes is stopped here or not at
+    // all. finishWrite checks the final figure again, which is what makes this
+    // an optimisation rather than the enforcement.
+    body.streamTo([&writer, &written, limit](std::string_view chunk) {
         written += chunk.size();
+        if (written > limit) {
+            throw S3Exception(S3ErrorCode::EntityTooLarge,
+                              "The object exceeds this instance's maximum upload size of " +
+                                  std::to_string(limit) + " bytes.");
+        }
+        writer.write(chunk);
     });
 
     const ObjectRecord record =

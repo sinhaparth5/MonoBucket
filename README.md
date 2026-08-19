@@ -215,6 +215,10 @@ before you rely on it:
   reproducing the secret. Anyone who can read the data directory can read every
   issued S3 secret. Console passwords are not stored this way — those are
   PBKDF2-SHA256 verifiers, and a stolen data directory does not yield a login.
+- **The upload limit is instance-wide only.** One maximum object size applies to
+  every bucket and every client; there is no per-bucket or per-user limit, and
+  no precedence rule to learn. A bucket's allocation bounds how much it holds,
+  not how large one object in it may be.
 - **Authorisation is per identity, not per bucket or per key.** A key inherits
   its owner's role and nothing narrower: there is no per-key scoping, no bucket
   restriction and no way to give one program read access to one bucket. An

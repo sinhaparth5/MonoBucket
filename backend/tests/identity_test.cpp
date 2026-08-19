@@ -35,6 +35,7 @@ constexpr Expected kMatrix[] = {
     {Role::Administrator, Permission::ObjectRead, true},
     {Role::Administrator, Permission::ObjectWrite, true},
     {Role::Administrator, Permission::SettingsRead, true},
+    {Role::Administrator, Permission::SettingsWrite, true},
     {Role::Administrator, Permission::CapacityWrite, true},
     {Role::Administrator, Permission::CredentialRead, true},
     {Role::Administrator, Permission::CredentialWrite, true},
@@ -48,6 +49,9 @@ constexpr Expected kMatrix[] = {
     {Role::Operator, Permission::ObjectRead, true},
     {Role::Operator, Permission::ObjectWrite, true},
     {Role::Operator, Permission::SettingsRead, true},
+    // Reading the resolved configuration is part of running the storage;
+    // changing an instance-wide limit that every bucket is held to is not.
+    {Role::Operator, Permission::SettingsWrite, false},
     // Sizing the bucket you are creating is BucketWrite; moving capacity
     // between buckets that already exist is not an operator's decision.
     {Role::Operator, Permission::CapacityWrite, false},
@@ -63,6 +67,7 @@ constexpr Expected kMatrix[] = {
     {Role::ReadOnly, Permission::ObjectRead, true},
     {Role::ReadOnly, Permission::ObjectWrite, false},
     {Role::ReadOnly, Permission::SettingsRead, true},
+    {Role::ReadOnly, Permission::SettingsWrite, false},
     {Role::ReadOnly, Permission::CapacityWrite, false},
     {Role::ReadOnly, Permission::CredentialRead, true},
     {Role::ReadOnly, Permission::CredentialWrite, false},
@@ -90,6 +95,7 @@ TEST_CASE("every role is decided for every permission", "[identity]") {
 TEST_CASE("only the administrator can manage users or read the audit log", "[identity]") {
     for (const Role role : kRoles) {
         const bool isAdmin = role == Role::Administrator;
+        CHECK(allows(role, Permission::SettingsWrite) == isAdmin);
         CHECK(allows(role, Permission::CapacityWrite) == isAdmin);
         CHECK(allows(role, Permission::UserRead) == isAdmin);
         CHECK(allows(role, Permission::UserWrite) == isAdmin);

@@ -37,6 +37,15 @@ enum class StorageErrorCode {
     /// An allocation would put the instance over its allocatable capacity.
     InsufficientCapacity,
 
+    /// A write is larger than the instance's maximum object-upload size.
+    ///
+    /// Distinct from QuotaExceeded on purpose: a bucket that is full is a
+    /// capacity problem somebody fixes by deleting or reallocating, and an
+    /// object over the upload limit is a policy refusal that no amount of free
+    /// space changes. Clients branch on the S3 code these map to, and those
+    /// two codes are different.
+    ObjectTooLarge,
+
     Corruption,
     Io,
     Internal,
@@ -280,6 +289,33 @@ public:
     ///
     /// Returns false when there was nothing to revoke.
     virtual bool deleteAccessKey(std::string_view accessKeyId) = 0;
+
+    // --- Instance settings -------------------------------------------------
+
+    /// The instance-wide policy figures an operator changes while the server
+    /// is running, rather than by restarting it with a different environment.
+    ///
+    /// One record, not a bag of key-value pairs. A generic settings table is a
+    /// place for a value to be written that nothing reads and nothing
+    /// validates; a struct is a value the compiler knows the shape of, and a
+    /// field added to it has to be given a meaning here before it can be
+    /// stored.
+    struct InstanceSettings {
+        /// The largest object this instance accepts. Zero means the operator
+        /// has never set one, which is what a store written before this
+        /// existed reads back as — the server then falls back to the figure
+        /// the environment seeded.
+        std::uint64_t maxUploadBytes = 0;
+    };
+
+    /// Nothing when this store has never carried settings.
+    virtual std::optional<InstanceSettings> getInstanceSettings() = 0;
+
+    /// Replaces them. Written durably regardless of MONOBUCKET_DURABILITY: it
+    /// is one small record written when a person clicks a button, and a limit
+    /// that quietly reverted across a restart would be a limit nobody could
+    /// trust they had set.
+    virtual void putInstanceSettings(const InstanceSettings& settings) = 0;
 
     // --- Audit -------------------------------------------------------------
 

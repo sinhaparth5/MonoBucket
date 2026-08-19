@@ -44,6 +44,9 @@ constexpr std::size_t kLockStripes = 64;
 /// which also means a renamed administrator does not orphan the old record.
 constexpr std::string_view kAdminName = "admin";
 
+/// Likewise fixed: there is one settings record for the instance.
+constexpr std::string_view kSettingsName = "settings";
+
 rocksdb::Slice toSlice(std::string_view view) { return {view.data(), view.size()}; }
 
 std::string_view toView(const rocksdb::Slice& slice) { return {slice.data(), slice.size()}; }
@@ -174,6 +177,27 @@ AdminRecord decodeAdmin(std::string_view stored) {
     admin.createdAt    = static_cast<TimestampMs>(reader.varint());
     admin.updatedAt    = static_cast<TimestampMs>(reader.varint());
     return admin;
+}
+
+std::string encodeSettings(const MetadataStore::InstanceSettings& settings) {
+    std::string   out;
+    codec::Writer writer(out);
+    writer.u8(kRecordVersion);
+    writer.varint(settings.maxUploadBytes);
+    return out;
+}
+
+MetadataStore::InstanceSettings decodeSettings(std::string_view stored) {
+    codec::Reader reader(stored);
+    expectVersion(reader, "instance settings");
+
+    // Read the same tolerant way a bucket's allocation is: a field written by
+    // a newer build is trailing bytes this one ignores, and a field this build
+    // expects that an older one never wrote is simply absent. That is what
+    // lets a settings record grow without a format-version bump.
+    MetadataStore::InstanceSettings settings;
+    if (!reader.exhausted()) settings.maxUploadBytes = reader.varint();
+    return settings;
 }
 
 std::string encodeAccessKey(const AccessKeyRecord& key) {
@@ -509,6 +533,20 @@ public:
     void deleteAdmin() override {
         check(db_->Delete(durableWrite(), toSlice(keys::meta(kAdminName))),
               "dropping the legacy administrator record");
+    }
+
+    std::optional<InstanceSettings> getInstanceSettings() override {
+        std::string stored;
+        const auto  status = db_->Get(readOptions_, toSlice(keys::meta(kSettingsName)), &stored);
+        if (status.IsNotFound()) return std::nullopt;
+        check(status, "reading the instance settings");
+        return decodeSettings(stored);
+    }
+
+    void putInstanceSettings(const InstanceSettings& settings) override {
+        check(db_->Put(durableWrite(), toSlice(keys::meta(kSettingsName)),
+                       toSlice(encodeSettings(settings))),
+              "writing the instance settings");
     }
 
     std::optional<AccessKeyRecord> getAccessKey(std::string_view accessKeyId) override {
@@ -1432,6 +1470,7 @@ std::string_view toString(StorageErrorCode code) {
         case StorageErrorCode::InvalidPart:         return "InvalidPart";
         case StorageErrorCode::QuotaExceeded:       return "QuotaExceeded";
         case StorageErrorCode::QuotaBelowUsage:     return "QuotaBelowUsage";
+        case StorageErrorCode::ObjectTooLarge:      return "ObjectTooLarge";
         case StorageErrorCode::InsufficientCapacity:return "InsufficientCapacity";
         case StorageErrorCode::Corruption:          return "Corruption";
         case StorageErrorCode::Io:                  return "Io";

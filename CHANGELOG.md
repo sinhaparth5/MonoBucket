@@ -98,7 +98,24 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Access keys are identified by name, not by id.** The credentials table led
+  with the twenty-character `MB…` id and kept the operator's own label in a
+  secondary *Description* column, which meant the one string that says what a
+  key is for was the one nobody read first. The name now leads and the id sits
+  under it, still monospace and still selectable for matching against a
+  client's configuration. The rotate and revoke confirmations name the key the
+  same way, so the dialog that destroys a credential says which one.
+- `AccessKeyRecord::description` is now `AccessKeyRecord::name`, and
+  `/_mb/api/credentials` returns `name` in place of `description`. The stored
+  encoding is positional and unchanged, so existing keys read back with their
+  text intact and no record version moves. `POST /_mb/api/credentials` accepts
+  either spelling — a script written against the previous release keeps
+  labelling its keys rather than silently minting anonymous ones.
+- Credential audit entries record the key's name beside its id. The id stops
+  resolving to anything the moment the key is revoked, which is precisely when
+  somebody reads the log to find out what was just destroyed.
 
 ---
 

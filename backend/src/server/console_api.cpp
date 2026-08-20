@@ -56,9 +56,9 @@ constexpr std::size_t kSampleCapacity        = 240;
 /// before it reaches an I/O thread.
 constexpr std::int64_t kMaxPresignSeconds = 604800;
 
-/// A label, not a document. Bounded so a description cannot be used to store
+/// A label, not a document. Bounded so a key's name cannot be used to store
 /// arbitrary bulk in a record the S3 hot path reads.
-constexpr std::size_t kMaxDescriptionLength = 200;
+constexpr std::size_t kMaxKeyNameLength = 200;
 
 /// The console tells us which name the browser reached the deployment by,
 /// because `config.host` is normally 0.0.0.0 and knows no better. That string is
@@ -331,13 +331,27 @@ HttpResponsePtr forbidden(Permission permission) {
 /// produce it by accident through this function.
 nlohmann::json toJson(const AccessKeyRecord& key) {
     return {{"accessKeyId", key.accessKeyId},
-            {"description", key.description},
+            {"name", key.name},
             {"owner", key.owner},
             {"createdAt", toIso8601(key.createdAt)},
             {"createdAtMs", key.createdAt},
             {"rotatedAt", key.rotatedAt > 0 ? nlohmann::json(toIso8601(key.rotatedAt))
                                             : nlohmann::json(nullptr)},
             {"rotatedAtMs", key.rotatedAt}};
+}
+
+/// What a credential event says about the key it names.
+///
+/// The audit target is the access key id, which nobody recognises and which
+/// stops resolving to anything at all the moment the key is revoked. The name
+/// is recorded beside it so the log is still readable afterwards.
+std::string describeKey(const AccessKeyRecord& key, std::string_view actor) {
+    std::string detail = key.name.empty() ? std::string{} : "'" + key.name + "'";
+    if (key.owner != actor) {
+        if (!detail.empty()) detail += ", ";
+        detail += "owned by " + key.owner;
+    }
+    return detail;
 }
 
 nlohmann::json toJson(const CorsRule& rule) {
@@ -888,24 +902,30 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
                 if (method == "POST") {
                     const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
-                    // A description is optional; a body is not required at all.
+                    // A name is optional; a body is not required at all.
                     if (!body.is_discarded() && !body.is_null() && !body.is_object()) {
                         callback(errorJson("expected a JSON object", drogon::k400BadRequest));
                         return;
                     }
-                    std::string description =
-                        body.is_object() ? body.value("description", std::string{}) : std::string{};
-                    if (description.size() > kMaxDescriptionLength) {
-                        callback(errorJson("the description is too long", drogon::k400BadRequest));
+                    // This field was called `description` until keys were named.
+                    // The old spelling is still read so a script written against
+                    // the previous release keeps labelling its keys instead of
+                    // silently minting anonymous ones.
+                    std::string name =
+                        body.is_object()
+                            ? body.value("name", body.value("description", std::string{}))
+                            : std::string{};
+                    if (name.size() > kMaxKeyNameLength) {
+                        callback(errorJson("the name is too long", drogon::k400BadRequest));
                         return;
                     }
 
-                    offload(callback, [&storage, audit, description,
+                    offload(callback, [&storage, audit, name,
                                        owner = principal.username]() -> HttpResponsePtr {
                         AccessKeyRecord key;
                         key.accessKeyId = credentials::generateAccessKeyId();
                         key.secretKey   = credentials::generateSecretKey();
-                        key.description = description;
+                        key.name        = name;
                         key.createdAt   = nowMs();
                         // The issuer owns it, always — there is no field on the
                         // request for this. A key that could be minted in
@@ -915,7 +935,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         storage.putAccessKey(key);
 
                         log::info("issued S3 access key ", key.accessKeyId, " for ", owner);
-                        audit(owner, "credential.create", key.accessKeyId, true, description);
+                        audit(owner, "credential.create", key.accessKeyId, true, name);
 
                         // The only response that carries a secret, and only
                         // because it is the only moment it can be carried: the
@@ -949,7 +969,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     }
                     log::info("revoked S3 access key ", accessKeyId);
                     audit(actor, "credential.revoke", accessKeyId, true,
-                          key->owner == actor ? "" : "owned by " + key->owner);
+                          describeKey(*key, actor));
                     // Nothing to invalidate elsewhere: the router resolves the
                     // secret from the store on every signed request and holds
                     // no copy, so the next one already fails.
@@ -993,7 +1013,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
                     log::info("rotated the secret for S3 access key ", accessKeyId);
                     audit(actor, "credential.rotate", accessKeyId, true,
-                          key->owner == actor ? "" : "owned by " + key->owner);
+                          describeKey(*key, actor));
 
                     nlohmann::json out = toJson(*key);
                     out["secretKey"]   = key->secretKey;
@@ -1090,7 +1110,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                             if (key.owner != username) continue;
                             if (storage.deleteAccessKey(key.accessKeyId)) ++revoked;
                             audit(actor, "credential.revoke", key.accessKeyId, true,
-                                  "owner '" + username + "' deleted");
+                                  (key.name.empty() ? "" : "'" + key.name + "', ") + "owner '" +
+                                      username + "' deleted");
                         }
 
                         storage.deleteUser(username);

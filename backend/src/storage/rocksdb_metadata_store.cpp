@@ -217,7 +217,7 @@ std::string encodeAccessKey(const AccessKeyRecord& key) {
     codec::Writer writer(out);
     writer.u8(kRecordVersion);
     writer.string(key.secretKey);
-    writer.string(key.description);
+    writer.string(key.name);
     writer.varint(static_cast<std::uint64_t>(key.createdAt));
     writer.varint(static_cast<std::uint64_t>(key.rotatedAt));
     writer.string(key.owner);
@@ -231,7 +231,7 @@ AccessKeyRecord decodeAccessKey(std::string_view accessKeyId, std::string_view s
     AccessKeyRecord key;
     key.accessKeyId = std::string(accessKeyId);
     key.secretKey   = reader.string();
-    key.description = reader.string();
+    key.name        = reader.string();
     key.createdAt   = static_cast<TimestampMs>(reader.varint());
     key.rotatedAt   = static_cast<TimestampMs>(reader.varint());
     // Appended after the record already shipped, so a value written by the

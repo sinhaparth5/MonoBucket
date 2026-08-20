@@ -28,11 +28,11 @@
 	let error = $state('');
 	let busy = $state('');
 
-	let description = $state('');
+	let name = $state('');
 	let createError = $state('');
 	let creating = $state(false);
 	let createDialog: HTMLDialogElement;
-	let descriptionField = $state<HTMLInputElement | undefined>();
+	let nameField = $state<HTMLInputElement | undefined>();
 
 	// The only place a secret exists in this browser, and only until the dialog
 	// closes. Never written to storage: a copy that outlives the dialog is a
@@ -41,6 +41,16 @@
 	let issuedKind = $state<'created' | 'rotated'>('created');
 	let secretDialog: HTMLDialogElement;
 	let copied = $state('');
+
+	// What a key is called in this console. The id identifies it to S3 and to
+	// nothing else — twenty characters that tell a reader nothing about which
+	// job holds them — so the name leads and the id sits under it, still
+	// selectable for whoever has to match it against a client's configuration.
+	// Keys minted before names existed have none, and fall back to the id
+	// rather than to a blank row.
+	function keyLabel(credential: Credential) {
+		return credential.name || credential.accessKeyId;
+	}
 
 	let pendingRevoke = $state<Credential | null>(null);
 	let revokeDialog: HTMLDialogElement;
@@ -67,7 +77,7 @@
 	function openCreate() {
 		createError = '';
 		createDialog.showModal();
-		descriptionField?.focus();
+		nameField?.focus();
 	}
 
 	function reveal(credential: IssuedCredential, kind: 'created' | 'rotated') {
@@ -82,8 +92,8 @@
 		createError = '';
 		creating = true;
 		try {
-			const credential = await api.createCredential(description.trim());
-			description = '';
+			const credential = await api.createCredential(name.trim());
+			name = '';
 			createDialog.close();
 			reveal(credential, 'created');
 			await load();
@@ -209,8 +219,7 @@
 			<table class="table table-sm">
 				<thead>
 					<tr class="border-base-300">
-						<th>Access key ID</th>
-						<th>Description</th>
+						<th>Name</th>
 						{#if seesEveryone}<th class="w-40">Owner</th>{/if}
 						<th class="w-52">Created</th>
 						<th class="w-52">Secret rotated</th>
@@ -231,11 +240,15 @@
 									>
 										<Icon name="key" class="size-4" />
 									</span>
-									<span class="font-mono text-sm font-medium">{credential.accessKeyId}</span>
+									<span class="flex min-w-0 flex-col">
+										<span class="truncate text-sm font-medium">{keyLabel(credential)}</span>
+										{#if credential.name}
+											<span class="text-base-content/50 font-mono text-xs">
+												{credential.accessKeyId}
+											</span>
+										{/if}
+									</span>
 								</span>
-							</td>
-							<td class="text-base-content/70 max-w-xs truncate">
-								{credential.description || '—'}
 							</td>
 							{#if seesEveryone}
 								<td class="text-base-content/70 text-sm">{credential.owner || '—'}</td>
@@ -290,18 +303,20 @@
 		</p>
 
 		<fieldset class="fieldset gap-1.5 p-0">
-			<legend class="fieldset-legend text-sm">Description</legend>
+			<legend class="fieldset-legend text-sm">Name</legend>
 			<label class="input w-full">
 				<Icon name="file" class="text-primary size-4" />
 				<input
 					type="text"
 					maxlength="200"
-					bind:this={descriptionField}
-					bind:value={description}
+					bind:this={nameField}
+					bind:value={name}
 					placeholder="Nightly backup job"
 				/>
 			</label>
-			<span class="label text-xs">Optional. Only so you can recognise this key later.</span>
+			<span class="label text-xs">
+				What this key is called in the list. Leave it out and it shows its id instead.
+			</span>
 		</fieldset>
 
 		{#if createError}
@@ -398,9 +413,10 @@
 	<div class="modal-box flex flex-col gap-4">
 		<h3 class="text-lg font-bold tracking-tight">Rotate this secret?</h3>
 		<p class="text-base-content/70 text-sm">
-			<span class="font-mono">{pendingRotate?.accessKeyId}</span> keeps its ID and gets a new secret.
-			Every client still using the old one starts failing straight away — that is what rotation is for,
-			so make sure you can update them.
+			<span class="font-medium">{pendingRotate ? keyLabel(pendingRotate) : ''}</span> keeps its ID (<span
+				class="font-mono text-xs">{pendingRotate?.accessKeyId}</span
+			>) and gets a new secret. Every client still using the old one starts failing straight away —
+			that is what rotation is for, so make sure you can update them.
 		</p>
 		<div class="modal-action">
 			<button
@@ -425,8 +441,9 @@
 	<div class="modal-box flex flex-col gap-4">
 		<h3 class="text-lg font-bold tracking-tight">Revoke this access key?</h3>
 		<p class="text-base-content/70 text-sm">
-			<span class="font-mono">{pendingRevoke?.accessKeyId}</span> stops signing requests on the next one
-			it makes. The key is deleted rather than disabled, so this cannot be undone.
+			<span class="font-medium">{pendingRevoke ? keyLabel(pendingRevoke) : ''}</span>
+			(<span class="font-mono text-xs">{pendingRevoke?.accessKeyId}</span>) stops signing requests
+			on the next one it makes. The key is deleted rather than disabled, so this cannot be undone.
 		</p>
 		<div class="modal-action">
 			<button

@@ -825,7 +825,7 @@ TEST_CASE("an access key round-trips through the store", "[metadata]") {
         monobucket::AccessKeyRecord key;
         key.accessKeyId = "MBAAAAAAAAAAAAAAAAAA";
         key.secretKey   = "a-secret-worth-forty-characters-exactly1";
-        key.description = "backups from the nightly job";
+        key.name = "nightly backups";
         key.createdAt   = 4242;
         store->putAccessKey(key);
     }
@@ -835,7 +835,7 @@ TEST_CASE("an access key round-trips through the store", "[metadata]") {
     REQUIRE(key.has_value());
     CHECK(key->accessKeyId == "MBAAAAAAAAAAAAAAAAAA");
     CHECK(key->secretKey == "a-secret-worth-forty-characters-exactly1");
-    CHECK(key->description == "backups from the nightly job");
+    CHECK(key->name == "nightly backups");
     CHECK(key->createdAt == 4242);
     CHECK(key->rotatedAt == 0);
 }

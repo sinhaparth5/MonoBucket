@@ -236,7 +236,9 @@ export interface AuditEntry {
 
 export interface Credential {
 	accessKeyId: string;
-	description: string;
+	/// What the console identifies a key by. Empty on keys minted before they
+	/// were named, which is why every render falls back to the id.
+	name: string;
 	/// The account the key acts as. A signed request never exceeds what this
 	/// user may do, and disabling them stops the key on its next request.
 	owner: string;
@@ -567,10 +569,10 @@ export const api = {
 	credentials: () =>
 		request<{ credentials: Credential[] }>('/credentials').then((r) => r.credentials),
 
-	createCredential: (description: string) =>
+	createCredential: (name: string) =>
 		request<IssuedCredential>('/credentials', {
 			method: 'POST',
-			body: JSON.stringify({ description })
+			body: JSON.stringify({ name })
 		}),
 
 	rotateCredential: (accessKeyId: string) =>

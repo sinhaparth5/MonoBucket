@@ -166,7 +166,7 @@ describe('S3 credentials', () => {
 				credentials: [
 					{
 						accessKeyId: 'MBAAAAAAAAAAAAAAAAAA',
-						description: 'backups',
+						name: 'backups',
 						createdAt: '2026-08-18T00:00:00.000Z',
 						createdAtMs: 1,
 						rotatedAt: null,
@@ -190,7 +190,7 @@ describe('S3 credentials', () => {
 			body: {
 				accessKeyId: 'MBAAAAAAAAAAAAAAAAAA',
 				secretKey: 'a-secret-worth-forty-characters-exactly1',
-				description: 'backups',
+				name: 'backups',
 				createdAt: '2026-08-18T00:00:00.000Z',
 				createdAtMs: 1,
 				rotatedAt: null,
@@ -202,7 +202,7 @@ describe('S3 credentials', () => {
 
 		expect(calls[0].url).toBe('/_mb/api/credentials');
 		expect(calls[0].init.method).toBe('POST');
-		expect(bodyOf(calls[0])).toEqual({ description: 'backups' });
+		expect(bodyOf(calls[0])).toEqual({ name: 'backups' });
 		expect(issued.secretKey).toBe('a-secret-worth-forty-characters-exactly1');
 	});
 
@@ -212,7 +212,7 @@ describe('S3 credentials', () => {
 			body: {
 				accessKeyId: 'MBAAAAAAAAAAAAAAAAAA',
 				secretKey: 'the-replacement-secret-forty-characters1',
-				description: 'backups',
+				name: 'backups',
 				createdAt: '2026-08-18T00:00:00.000Z',
 				createdAtMs: 1,
 				rotatedAt: '2026-08-19T00:00:00.000Z',

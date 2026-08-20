@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.12] — 2026-08-20
+
 ### Added
 
 - **The audit log now records what destroys data and what changes who can reach

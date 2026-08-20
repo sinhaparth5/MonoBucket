@@ -279,9 +279,11 @@ struct AccessKeyRecord {
     /// data directory accordingly — see "Known limitations" in README.md.
     std::string secretKey;
 
-    /// Free text from whoever minted it, so a key can be recognised months
-    /// later without a separate note somewhere else.
-    std::string description;
+    /// A short name from whoever minted it, and the only thing that makes a key
+    /// recognisable months later — the id is twenty characters of noise. Empty
+    /// on keys written before this was a name rather than a description, which
+    /// is why every reader falls back to the id rather than showing nothing.
+    std::string name;
 
     /// The username this key acts as. A signed request is authorised with the
     /// owner's role, so a key can never do more than the person who issued it —

@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.13] — 2026-08-20
+
 ### Added
 
 - **Consistent backups of a running instance.** `monobucket --checkpoint <dir>`

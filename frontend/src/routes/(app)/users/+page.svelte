@@ -10,25 +10,48 @@
 	import { resolve } from '$app/paths';
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type RoleInfo, type RoleName, type User } from '$lib/api';
+	import {
+		api,
+		ApiError,
+		unrestrictedBuckets,
+		type BucketAccessInfo,
+		type BucketAccessName,
+		type BucketGrants,
+		type RoleInfo,
+		type RoleName,
+		type User
+	} from '$lib/api';
 	import { formatTimestamp, plural } from '$lib/format';
 	import { motionDistance, motionDuration } from '$lib/motion';
+	import BucketAccessFields from '$lib/components/BucketAccessFields.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let { data } = $props();
 
 	let users = $state<User[] | null>(null);
 	let roles = $state<RoleInfo[]>([]);
+	let accessLevels = $state<BucketAccessInfo[]>([]);
+	// Bucket names, for naming an exception without typing it. Fetched
+	// separately and tolerated as empty: a user list that failed because the
+	// bucket list did would be a worse page than one with a shorter picker.
+	let bucketNames = $state<string[]>([]);
 	let error = $state('');
 	let busy = $state('');
 
 	let newUsername = $state('');
 	let newPassword = $state('');
 	let newRole = $state<RoleName>('readonly');
+	let newBuckets = $state<BucketGrants>(unrestrictedBuckets());
 	let createError = $state('');
 	let creating = $state(false);
 	let createDialog: HTMLDialogElement;
 	let usernameField = $state<HTMLInputElement | undefined>();
+
+	let accessTarget = $state<User | null>(null);
+	let accessDraft = $state<BucketGrants>(unrestrictedBuckets());
+	let accessError = $state('');
+	let savingAccess = $state(false);
+	let accessDialog: HTMLDialogElement;
 
 	let resetTarget = $state<User | null>(null);
 	let resetPassword = $state('');
@@ -50,12 +73,34 @@
 		readonly: 'badge-ghost'
 	};
 
+	const ACCESS_LABEL: Record<BucketAccessName, string> = {
+		write: 'read and write',
+		read: 'read only',
+		none: 'no access'
+	};
+
+	/// How an account's bucket access reads in the table. An administrator is
+	/// never narrowed, so saying "all buckets" for one would hide the reason.
+	function summariseAccess(user: User): string {
+		if (user.role === 'administrator') return 'all buckets (administrator)';
+		if (user.buckets.unrestricted) return 'all buckets';
+		const named = Object.keys(user.buckets.exceptions).length;
+		const base = `${ACCESS_LABEL[user.buckets.fallback]} by default`;
+		return named === 0 ? base : `${base}, ${plural(named, 'exception')}`;
+	}
+
 	async function load() {
 		try {
 			const answer = await api.users();
 			users = answer.users;
 			roles = answer.roles;
+			accessLevels = answer.bucketAccess;
 			error = '';
+			try {
+				bucketNames = (await api.buckets()).map((bucket) => bucket.name);
+			} catch {
+				bucketNames = [];
+			}
 		} catch (cause) {
 			if (cause instanceof ApiError && cause.unauthorized) {
 				await goto(resolve('/login'));
@@ -74,6 +119,10 @@
 		newUsername = '';
 		newPassword = '';
 		newRole = 'readonly';
+		// Unrestricted, and visibly so. The server would default to this anyway
+		// if the field were omitted; showing it means an account with the run of
+		// every bucket is something somebody looked at and left alone.
+		newBuckets = unrestrictedBuckets();
 		createDialog.showModal();
 		usernameField?.focus();
 	}
@@ -83,7 +132,14 @@
 		createError = '';
 		creating = true;
 		try {
-			await api.createUser(newUsername.trim(), newPassword, newRole);
+			// An administrator is never narrowed, and the server refuses to store
+			// a narrowing for one rather than keeping a restriction it ignores.
+			await api.createUser(
+				newUsername.trim(),
+				newPassword,
+				newRole,
+				newRole === 'administrator' ? undefined : newBuckets
+			);
 			createDialog.close();
 			await load();
 		} catch (cause) {
@@ -122,6 +178,30 @@
 			await load();
 		} finally {
 			busy = '';
+		}
+	}
+
+	function openAccess(user: User) {
+		accessTarget = user;
+		accessDraft = { ...user.buckets, exceptions: { ...user.buckets.exceptions } };
+		accessError = '';
+		accessDialog.showModal();
+	}
+
+	async function confirmAccess(event: SubmitEvent) {
+		event.preventDefault();
+		if (!accessTarget) return;
+		accessError = '';
+		savingAccess = true;
+		try {
+			await api.updateUser(accessTarget.username, { buckets: accessDraft });
+			accessDialog.close();
+			accessTarget = null;
+			await load();
+		} catch (cause) {
+			accessError = cause instanceof ApiError ? cause.message : 'could not change bucket access';
+		} finally {
+			savingAccess = false;
 		}
 	}
 
@@ -205,6 +285,7 @@
 					<tr class="border-base-300">
 						<th>User</th>
 						<th class="w-56">Role</th>
+						<th class="w-64">Buckets</th>
 						<th class="w-32">Status</th>
 						<th class="w-52">Password changed</th>
 						<th class="w-0"></th>
@@ -244,6 +325,22 @@
 										<option value={role.name}>{role.name}</option>
 									{/each}
 								</select>
+							</td>
+							<td>
+								<button
+									class="btn btn-ghost btn-sm w-full justify-start gap-2 font-normal"
+									disabled={busy === user.username || user.role === 'administrator'}
+									aria-label="Bucket access for {user.username}"
+									onclick={() => openAccess(user)}
+								>
+									<Icon
+										name={user.buckets.unrestricted ? 'bucket' : 'shield'}
+										class="size-3.5 shrink-0 {user.buckets.unrestricted
+											? 'text-base-content/50'
+											: 'text-primary'}"
+									/>
+									<span class="truncate text-xs">{summariseAccess(user)}</span>
+								</button>
 							</td>
 							<td>
 								<span
@@ -370,6 +467,18 @@
 			</select>
 		</fieldset>
 
+		{#if newRole === 'administrator'}
+			<div role="note" class="alert alert-info alert-soft text-sm">
+				<Icon name="shield" class="size-4" />
+				<span>
+					An administrator reaches every bucket. Bucket access is not narrowed for one, because an
+					administrator can change it back.
+				</span>
+			</div>
+		{:else}
+			<BucketAccessFields bind:grants={newBuckets} buckets={bucketNames} levels={accessLevels} />
+		{/if}
+
 		{#if createError}
 			<div role="alert" class="alert alert-error alert-soft text-sm">
 				<Icon name="warning" class="size-4" />
@@ -384,6 +493,38 @@
 			<button class="btn btn-primary gap-2" type="submit" disabled={creating}>
 				{#if creating}<span class="loading loading-spinner loading-xs"></span>{/if}
 				Add user
+			</button>
+		</div>
+	</form>
+	<form method="dialog" class="modal-backdrop"><button aria-label="Close">close</button></form>
+</dialog>
+
+<dialog class="modal" bind:this={accessDialog}>
+	<form class="modal-box flex flex-col gap-4" onsubmit={confirmAccess}>
+		<h3 class="text-lg font-bold tracking-tight">
+			Bucket access for {accessTarget?.username}
+		</h3>
+		<p class="text-base-content/60 text-sm">
+			This narrows their role, it never widens it — a readonly account still only reads. Their S3
+			access keys are held to the same list, and every session they have open ends when you save.
+		</p>
+
+		<BucketAccessFields bind:grants={accessDraft} buckets={bucketNames} levels={accessLevels} />
+
+		{#if accessError}
+			<div role="alert" class="alert alert-error alert-soft text-sm">
+				<Icon name="warning" class="size-4" />
+				<span>{accessError}</span>
+			</div>
+		{/if}
+
+		<div class="modal-action">
+			<button type="button" class="btn btn-ghost" onclick={() => accessDialog.close()}>
+				Cancel
+			</button>
+			<button class="btn btn-primary gap-2" type="submit" disabled={savingAccess}>
+				{#if savingAccess}<span class="loading loading-spinner loading-xs"></span>{/if}
+				Save access
 			</button>
 		</div>
 	</form>

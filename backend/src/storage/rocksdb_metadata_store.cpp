@@ -251,6 +251,7 @@ std::string encodeUser(const UserRecord& user) {
     writer.varint(static_cast<std::uint64_t>(user.createdAt));
     writer.varint(static_cast<std::uint64_t>(user.updatedAt));
     writer.varint(static_cast<std::uint64_t>(user.passwordChangedAt));
+    encodeBucketGrants(writer, user.buckets);
     return out;
 }
 
@@ -278,6 +279,11 @@ UserRecord decodeUser(std::string_view username, std::string_view stored) {
     user.createdAt         = static_cast<TimestampMs>(reader.varint());
     user.updatedAt         = static_cast<TimestampMs>(reader.varint());
     user.passwordChangedAt = static_cast<TimestampMs>(reader.varint());
+
+    // Appended after the format was already in use, so read only if the row is
+    // long enough to hold it. An account written before bucket access existed
+    // stops here and keeps the unrestricted default it has always had.
+    if (!reader.exhausted()) user.buckets = decodeBucketGrants(reader);
     return user;
 }
 

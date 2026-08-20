@@ -98,6 +98,36 @@ export type PermissionName =
 	| 'user:write'
 	| 'audit:read';
 
+/// What a user may do in one bucket. A ceiling on the role, never a grant: a
+/// readonly account with `write` here still cannot write.
+export type BucketAccessName = 'none' | 'read' | 'write';
+
+/// Which buckets an account may touch.
+///
+/// `fallback` decides every bucket `exceptions` does not name, which is what
+/// lets one shape express both "these buckets and nothing else" (a `none`
+/// fallback) and "everything except this one" (a `write` fallback).
+export interface BucketGrants {
+	fallback: BucketAccessName;
+	exceptions: Record<string, BucketAccessName>;
+	/// True when nothing is narrowed and the role alone decides — what every
+	/// account had before bucket access existed. Sent by the server rather than
+	/// derived here, so the two cannot disagree about what "all buckets" means.
+	unrestricted: boolean;
+}
+
+/// The default a form starts from: everything, decided by the role.
+export function unrestrictedBuckets(): BucketGrants {
+	return { fallback: 'write', exceptions: {}, unrestricted: true };
+}
+
+/// What `grants` permits in `bucket`. The mirror of the server's
+/// `BucketGrants::forBucket`, and presentation only — every route re-decides.
+export function accessTo(grants: BucketGrants | undefined, bucket: string): BucketAccessName {
+	if (!grants) return 'write';
+	return grants.exceptions[bucket] ?? grants.fallback;
+}
+
 export interface Session {
 	authenticated: boolean;
 	/// The person signed in, never a credential. The console has no S3 access
@@ -107,6 +137,9 @@ export interface Session {
 	role: RoleName;
 	/// What this session may do. Empty when signed out.
 	permissions: PermissionName[];
+	/// Which buckets this session may touch. Unrestricted when signed out,
+	/// which never matters because nothing is rendered then.
+	buckets: BucketGrants;
 	usingDefaultCredentials: boolean;
 	s3Port: number;
 	s3Domain: string;
@@ -150,6 +183,17 @@ export interface User {
 	/// Null on an account whose password has never been replaced.
 	passwordChangedAt: string | null;
 	passwordChangedAtMs: number;
+	/// Which buckets this account may touch. Always unrestricted for an
+	/// administrator — the server does not narrow one and refuses to store a
+	/// narrowing that would never be consulted.
+	buckets: BucketGrants;
+}
+
+/// The bucket-access catalogue shipped alongside the user list, so the picker
+/// cannot offer a level this build does not enforce.
+export interface BucketAccessInfo {
+	name: BucketAccessName;
+	description: string;
 }
 
 /// The catalogue the server ships alongside the user list, so the role picker
@@ -417,6 +461,7 @@ export const api = {
 			username: string;
 			role: RoleName;
 			permissions: PermissionName[];
+			buckets: BucketGrants;
 			expiresInSeconds: number;
 		}>('/login', {
 			method: 'POST',
@@ -517,17 +562,26 @@ export const api = {
 			method: 'DELETE'
 		}),
 
-	users: () => request<{ users: User[]; roles: RoleInfo[] }>('/users'),
+	users: () =>
+		request<{ users: User[]; roles: RoleInfo[]; bucketAccess: BucketAccessInfo[] }>('/users'),
 
-	createUser: (username: string, password: string, role: RoleName) =>
+	/// `buckets` is optional and absent means unrestricted, which is what every
+	/// account created before bucket access existed already has. The console
+	/// always sends it, so an unrestricted account is a choice somebody saw and
+	/// left alone rather than a default nobody was shown.
+	createUser: (username: string, password: string, role: RoleName, buckets?: BucketGrants) =>
 		request<User>('/users', {
 			method: 'POST',
-			body: JSON.stringify({ username, password, role })
+			body: JSON.stringify({ username, password, role, ...(buckets ? { buckets } : {}) })
 		}),
 
-	/// Role and status only. A password goes through `setPassword`, because who
-	/// may change one and what they have to present first are different there.
-	updateUser: (username: string, changes: { role?: RoleName; disabled?: boolean }) =>
+	/// Role, status and bucket access. A password goes through `setPassword`,
+	/// because who may change one and what they have to present first are
+	/// different there.
+	updateUser: (
+		username: string,
+		changes: { role?: RoleName; disabled?: boolean; buckets?: BucketGrants }
+	) =>
 		request<User & { endedSessions: number }>('/users', {
 			method: 'PATCH',
 			body: JSON.stringify({ username, ...changes })

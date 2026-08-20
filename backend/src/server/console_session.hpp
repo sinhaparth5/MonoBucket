@@ -46,6 +46,18 @@ std::int64_t nowSeconds() noexcept;
 struct Principal {
     std::string username;
     Role        role = Role::ReadOnly;
+
+    /// Which buckets this session may touch. Captured at sign-in for the same
+    /// reason the role is, and made current by the same mechanism: every change
+    /// to a user's grants closes their sessions.
+    BucketGrants buckets;
+
+    /// The whole decision for a route that names a bucket. Kept here rather
+    /// than left to each handler so that a route cannot consult the role and
+    /// forget the grants — the two are never separately correct.
+    bool may(std::string_view bucket, Permission permission) const noexcept {
+        return allows(role, buckets, bucket, permission);
+    }
 };
 
 /// Session tokens held in memory only. A restart logs everyone out, which is
@@ -60,9 +72,14 @@ class SessionStore {
 public:
     explicit SessionStore(std::int64_t ttlSeconds = kSessionTtlSeconds) : ttlSeconds_(ttlSeconds) {}
 
-    /// Returns an unguessable token naming `username` with `role`.
-    std::string open(const std::string& username, Role role);
-    std::string openAt(const std::string& username, Role role, std::int64_t atSeconds);
+    /// Returns an unguessable token naming `principal`.
+    ///
+    /// The whole Principal rather than its parts: a session that captured the
+    /// role and defaulted the bucket grants would default them to
+    /// unrestricted, which is the one mistake this signature makes impossible
+    /// to write.
+    std::string open(const Principal& principal);
+    std::string openAt(const Principal& principal, std::int64_t atSeconds);
 
     /// Who the token names, or nothing when it is unknown or has expired.
     /// Expiry is judged on every use rather than by a sweeper, so a tab left
@@ -89,8 +106,7 @@ public:
 
 private:
     struct Session {
-        std::string  username;
-        Role         role      = Role::ReadOnly;
+        Principal    principal;
         std::int64_t expiresAt = 0;
     };
 

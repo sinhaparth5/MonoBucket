@@ -176,6 +176,77 @@ nlohmann::json toJson(const InstanceCapacity& capacity) {
             {"unlimitedBuckets", capacity.unlimitedBuckets}};
 }
 
+nlohmann::json toJson(const BucketGrants& grants) {
+    nlohmann::json exceptions = nlohmann::json::object();
+    for (const auto& [bucket, access] : grants.exceptions) {
+        exceptions[bucket] = std::string(toString(access));
+    }
+    // `unrestricted` is sent rather than left to the browser to derive. It is
+    // the difference between "everything, as before" and "a fallback that
+    // happens to be write today", and the console renders the two differently.
+    return {{"fallback", std::string(toString(grants.fallback))},
+            {"exceptions", std::move(exceptions)},
+            {"unrestricted", grants.unrestricted()}};
+}
+
+/// Reads the `buckets` field of a request body into `out`.
+///
+/// Answers with the refusal message, or empty on success — rather than throwing
+/// or returning a bool, because every caller has to turn the reason into a 400
+/// and inventing the text at three call sites is how three of them end up
+/// slightly different.
+std::string readBucketGrants(const nlohmann::json& value, BucketGrants& out) {
+    if (!value.is_object()) return "buckets must be an object";
+
+    const auto fallback = parseBucketAccess(value.value("fallback", std::string{}));
+    if (!fallback) return "buckets.fallback must be one of none, read, write";
+
+    BucketGrants grants;
+    grants.fallback = *fallback;
+
+    const auto exceptions = value.find("exceptions");
+    if (exceptions != value.end() && !exceptions->is_null()) {
+        if (!exceptions->is_object()) return "buckets.exceptions must be an object";
+        for (const auto& [bucket, access] : exceptions->items()) {
+            if (bucket.empty()) return "buckets.exceptions cannot name an empty bucket";
+            if (!access.is_string()) {
+                return "buckets.exceptions['" + bucket + "'] must be a string";
+            }
+            const auto parsed = parseBucketAccess(access.get<std::string>());
+            if (!parsed) {
+                return "buckets.exceptions['" + bucket +
+                       "'] must be one of none, read, write";
+            }
+            // An exception that repeats the fallback is dropped rather than
+            // stored. It grants nothing the fallback does not, and keeping it
+            // would leave the record naming buckets that have since been
+            // deleted for no reason anybody could later reconstruct.
+            if (*parsed == grants.fallback) continue;
+            grants.exceptions.emplace(bucket, *parsed);
+        }
+    }
+
+    out = std::move(grants);
+    return {};
+}
+
+/// How grants read in the audit log and the server log.
+std::string summarise(const BucketGrants& grants) {
+    if (grants.unrestricted()) return "all buckets";
+
+    std::string out = std::string(toString(grants.fallback)) + " by default";
+    if (grants.exceptions.empty()) return out;
+
+    out += " (";
+    bool first = true;
+    for (const auto& [bucket, access] : grants.exceptions) {
+        if (!first) out += ", ";
+        first = false;
+        out += bucket + ": " + std::string(toString(access));
+    }
+    return out + ")";
+}
+
 nlohmann::json toJson(const UserRecord& user) {
     // No password field of any kind — not the verifier, not its parameters.
     // The console never has a reason to see one, and a field that is only ever
@@ -190,7 +261,8 @@ nlohmann::json toJson(const UserRecord& user) {
             {"passwordChangedAt", user.passwordChangedAt > 0
                                       ? nlohmann::json(toIso8601(user.passwordChangedAt))
                                       : nlohmann::json(nullptr)},
-            {"passwordChangedAtMs", user.passwordChangedAt}};
+            {"passwordChangedAtMs", user.passwordChangedAt},
+            {"buckets", toJson(user.buckets)}};
 }
 
 nlohmann::json toJson(const AuditRecord& entry) {
@@ -493,6 +565,61 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         handler(*principal);
     };
 
+    // The bucket a request names, wherever it carries it: `?bucket=`, `?name=`,
+    // or the `bucket` or `name` field of a JSON body. Four spellings because
+    // the routes grew four of them, and one function that knows all four is
+    // safer than four extractors that each know one — the failure this is
+    // guarding against is a route whose authorisation check reads a different
+    // field from the handler it protects.
+    //
+    // A JSON body is parsed here and again by the handler. Every document that
+    // reaches this is a few dozen bytes, and the alternative is handing the
+    // handler a parse it did not make and cannot see.
+    const auto bucketNamed = [](const HttpRequestPtr& req) -> std::string {
+        for (const char* field : {"bucket", "name"}) {
+            if (std::string value = req->getParameter(field); !value.empty()) return value;
+        }
+        const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+        if (!body.is_object()) return {};
+        for (const char* field : {"bucket", "name"}) {
+            const auto found = body.find(field);
+            if (found != body.end() && found->is_string()) return found->get<std::string>();
+        }
+        return {};
+    };
+
+    // Routes that name a bucket use this instead of guard(). It adds a fifth
+    // gate — the caller's access to that particular bucket — and hands the
+    // handler the name, which is the only way a handler can get one. A route
+    // cannot read a bucket name and forget to check it, because reading it and
+    // checking it are the same act.
+    const auto guardBucket =
+        [guard, audit, bucketNamed](
+            const HttpRequestPtr& req, const ResponseCallback& callback, Permission permission,
+            const std::function<void(const Principal&, const std::string&)>& handler) {
+            guard(req, callback, permission,
+                  [req, callback, permission, handler, audit,
+                   bucketNamed](const Principal& principal) {
+                      const std::string bucket = bucketNamed(req);
+                      if (bucket.empty()) {
+                          callback(
+                              errorJson("a bucket name is required", drogon::k400BadRequest));
+                          return;
+                      }
+                      if (!principal.may(bucket, permission)) {
+                          audit(principal.username, "authz.denied", req->getPath(), false,
+                                std::string(toString(permission)) + " required on '" + bucket +
+                                    "', this account has " +
+                                    std::string(
+                                        describeHolding(principal.buckets.forBucket(bucket))) +
+                                    " to it");
+                          callback(forbidden(permission));
+                          return;
+                      }
+                      handler(principal, bucket);
+                  });
+        };
+
     // Storage work is posted rather than run inline for the same reason the S3
     // router posts it: a listing that hits a cold RocksDB block must not stall
     // the loop that is serving the rest of the console.
@@ -595,10 +722,12 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         auto resp = jsonResponse({{"username", user->username},
                                                   {"role", std::string(toString(user->role))},
                                                   {"permissions", permissionsJson(user->role)},
+                                                  {"buckets", toJson(user->buckets)},
                                                   {"expiresInSeconds", kSessionTtlSeconds}});
-                        resp->addCookie(
-                            sessionCookie(state->sessions.open(user->username, user->role),
-                                          kSessionTtlSeconds, secure));
+                        resp->addCookie(sessionCookie(
+                            state->sessions.open(
+                                Principal{user->username, user->role, user->buckets}),
+                            kSessionTtlSeconds, secure));
                         callback(resp);
                     } catch (const std::exception& error) {
                         log::error("console login: ", error.what());
@@ -662,6 +791,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                  {"role", std::string(toString(principal ? principal->role : Role::ReadOnly))},
                  {"permissions",
                   principal ? permissionsJson(principal->role) : nlohmann::json::array()},
+                 // Which buckets this session may touch, for the same reason
+                 // the permission list travels: so the console can leave out
+                 // what it must not offer. Presentation, never enforcement.
+                 {"buckets", toJson(principal ? principal->buckets : BucketGrants{})},
                  {"usingDefaultCredentials", config.usingDefaultCredentials()},
                  {"s3Port", config.s3Port},
                  {"s3Domain", config.s3Domain},
@@ -869,8 +1002,18 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                              {"description", std::string(describe(role))},
                                              {"permissions", permissionsJson(role)}});
                         }
-                        return jsonResponse(
-                            {{"users", std::move(users)}, {"roles", std::move(roles)}});
+                        // The bucket-access levels ride along for the same
+                        // reason the roles do: the picker cannot offer a level
+                        // this build does not enforce.
+                        nlohmann::json access = nlohmann::json::array();
+                        for (const BucketAccess level :
+                             {BucketAccess::Write, BucketAccess::Read, BucketAccess::None}) {
+                            access.push_back({{"name", std::string(toString(level))},
+                                              {"description", std::string(describe(level))}});
+                        }
+                        return jsonResponse({{"users", std::move(users)},
+                                             {"roles", std::move(roles)},
+                                             {"bucketAccess", std::move(access)}});
                     });
                     return;
                 }
@@ -962,7 +1105,32 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         return;
                     }
 
-                    offload(callback, [&storage, audit, username, secret, role = *role,
+                    // Optional, and absent means unrestricted — which is what
+                    // every account created before this existed already has.
+                    // The console always sends it, so "unrestricted" is a
+                    // choice somebody saw and left alone rather than a default
+                    // nobody was shown.
+                    BucketGrants grants;
+                    if (const auto field = body.find("buckets");
+                        field != body.end() && !field->is_null()) {
+                        if (const std::string problem = readBucketGrants(*field, grants);
+                            !problem.empty()) {
+                            callback(errorJson(problem, drogon::k400BadRequest));
+                            return;
+                        }
+                    }
+                    if (*role == Role::Administrator && !grants.unrestricted()) {
+                        // Refused rather than stored and ignored. An
+                        // administrator's grants are never consulted, so a
+                        // record that carried them would describe a restriction
+                        // that is not in force — and would spring into force
+                        // the moment the account was demoted.
+                        callback(errorJson("an administrator's bucket access cannot be narrowed",
+                                           drogon::k400BadRequest));
+                        return;
+                    }
+
+                    offload(callback, [&storage, audit, username, secret, role = *role, grants,
                                        actor = principal.username]() -> HttpResponsePtr {
                         if (storage.getUser(username)) {
                             return errorJson("that username is taken", drogon::k409Conflict);
@@ -972,25 +1140,31 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         user.username          = username;
                         user.passwordHash      = password::hash(secret);
                         user.role              = role;
+                        user.buckets           = grants;
                         user.createdAt         = nowMs();
                         user.updatedAt         = user.createdAt;
                         user.passwordChangedAt = user.createdAt;
                         storage.putUser(user);
 
-                        log::info("created console user '", username, "' as ", toString(role));
-                        audit(actor, "user.create", username, true, std::string(toString(role)));
+                        log::info("created console user '", username, "' as ", toString(role),
+                                  " with ", summarise(grants));
+                        audit(actor, "user.create", username, true,
+                              std::string(toString(role)) + ", " + summarise(grants));
                         return jsonResponse(toJson(user), drogon::k201Created);
                     });
                     return;
                 }
 
-                // PATCH: role and status, and nothing else. A password is
-                // changed through its own route, because the two have different
-                // rules about who may do it and what has to be presented first.
+                // PATCH: role, status and bucket access, and nothing else. A
+                // password is changed through its own route, because the two
+                // have different rules about who may do it and what has to be
+                // presented first.
                 const bool wantsRole     = body.contains("role") && !body.at("role").is_null();
                 const bool wantsDisabled = body.contains("disabled") &&
                                            !body.at("disabled").is_null();
-                if (!wantsRole && !wantsDisabled) {
+                const bool wantsBuckets  = body.contains("buckets") &&
+                                          !body.at("buckets").is_null();
+                if (!wantsRole && !wantsDisabled && !wantsBuckets) {
                     callback(errorJson("nothing to change", drogon::k400BadRequest));
                     return;
                 }
@@ -1020,7 +1194,18 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     disabled = body.at("disabled").get<bool>();
                 }
 
-                offload(callback, [state, &storage, audit, username, role, disabled,
+                std::optional<BucketGrants> grants;
+                if (wantsBuckets) {
+                    BucketGrants parsed;
+                    if (const std::string problem = readBucketGrants(body.at("buckets"), parsed);
+                        !problem.empty()) {
+                        callback(errorJson(problem, drogon::k400BadRequest));
+                        return;
+                    }
+                    grants = std::move(parsed);
+                }
+
+                offload(callback, [state, &storage, audit, username, role, disabled, grants,
                                    actor = principal.username]() -> HttpResponsePtr {
                     auto user = storage.getUser(username);
                     if (!user) return errorJson("no such user", drogon::k404NotFound);
@@ -1039,6 +1224,12 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                          drogon::k409Conflict);
                     }
 
+                    if (grants && !grants->unrestricted() &&
+                        (role ? *role : user->role) == Role::Administrator) {
+                        return errorJson("an administrator's bucket access cannot be narrowed",
+                                         drogon::k400BadRequest);
+                    }
+
                     std::string changes;
                     if (role && *role != user->role) {
                         changes = "role " + std::string(toString(user->role)) + " -> " +
@@ -1050,14 +1241,30 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         changes += *disabled ? "disabled" : "enabled";
                         user->disabled = *disabled;
                     }
+                    if (grants && *grants != user->buckets) {
+                        if (!changes.empty()) changes += ", ";
+                        changes += "buckets " + summarise(user->buckets) + " -> " +
+                                   summarise(*grants);
+                        user->buckets = *grants;
+                    }
+                    // A promotion drops whatever narrowing the account carried,
+                    // rather than storing a restriction nothing consults. Left
+                    // in place it would be invisible for as long as the account
+                    // stayed an administrator and then spring back the moment
+                    // it was demoted, which is not a thing anybody asked for.
+                    if (user->role == Role::Administrator && !user->buckets.unrestricted()) {
+                        if (!changes.empty()) changes += ", ";
+                        changes += "bucket access cleared (administrator)";
+                        user->buckets = {};
+                    }
                     if (changes.empty()) return jsonResponse(toJson(*user));
 
                     user->updatedAt = nowMs();
                     storage.putUser(*user);
 
-                    // A session carries a copy of the role, so the copy has to
-                    // go. Disabling takes effect on the next S3 request by
-                    // itself — the router reads the owner's record every time —
+                    // A session carries a copy of the role and of the bucket
+                    // grants, so the copy has to go. Disabling takes effect on
+                    // the next S3 request by itself — the router reads the owner's record every time —
                     // but an open console tab would otherwise keep the
                     // authority it was handed at sign-in until the tab was
                     // closed.
@@ -1163,9 +1370,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         // The caller just invalidated their own cookie. Handing
                         // back a fresh one keeps a password change from
                         // presenting as being thrown out of the console.
-                        resp->addCookie(
-                            sessionCookie(state->sessions.open(user->username, user->role),
-                                          kSessionTtlSeconds, secureFlag));
+                        resp->addCookie(sessionCookie(
+                            state->sessions.open(
+                                Principal{user->username, user->role, user->buckets}),
+                            kSessionTtlSeconds, secureFlag));
                     }
                     callback(resp);
                 } catch (const std::exception& error) {
@@ -1313,20 +1521,24 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/buckets",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+        [&storage, guard, guardBucket, offload](const HttpRequestPtr& req,
+                                                ResponseCallback&& callback) {
             // Reading the bucket list and changing it are different
             // permissions, decided by the method for the same reason the
-            // credentials route decides it that way.
-            const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
-                                                                      : Permission::BucketWrite;
-            guard(req, callback, needed,
-                  [&storage, req, callback, offload](const Principal&) {
-                const std::string method = req->getMethodString();
-
-                if (method == "GET") {
-                    offload(callback, [&storage]() -> HttpResponsePtr {
+            // credentials route decides it that way. They are also different
+            // shapes: the list names no bucket and is narrowed by filtering it,
+            // while a create or a delete names one and is narrowed by refusing.
+            if (req->method() == drogon::Get) {
+                guard(req, callback, Permission::BucketRead,
+                      [&storage, callback, offload](const Principal& principal) {
+                    offload(callback, [&storage, principal]() -> HttpResponsePtr {
                         nlohmann::json buckets = nlohmann::json::array();
                         for (const auto& bucket : storage.listBuckets()) {
+                            // A bucket this account cannot see is left out
+                            // rather than refused. The alternative — 403 for the
+                            // whole page — would mean one bucket somebody is not
+                            // entitled to costs them every bucket they are.
+                            if (!principal.may(bucket.name, Permission::BucketRead)) continue;
                             buckets.push_back(
                                 toJson(bucket, storage.bucketCapacity(bucket.name)));
                         }
@@ -1337,74 +1549,63 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         return jsonResponse({{"buckets", std::move(buckets)},
                                              {"capacity", toJson(storage.capacity())}});
                     });
-                    return;
-                }
+                });
+                return;
+            }
 
-                if (method == "POST") {
-                    const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
-                    if (body.is_discarded() || !body.is_object()) {
-                        callback(errorJson("expected a JSON object", drogon::k400BadRequest));
-                        return;
-                    }
-                    const auto name = body.value("name", std::string{});
-                    if (name.empty()) {
-                        callback(errorJson("a bucket name is required", drogon::k400BadRequest));
-                        return;
-                    }
-                    if (!body.contains("quotaBytes") || !body["quotaBytes"].is_number_unsigned()) {
-                        callback(errorJson(
-                            "a storage allocation is required; send quotaBytes as a whole number "
-                            "of bytes",
-                            drogon::k400BadRequest));
-                        return;
-                    }
-                    const auto quotaBytes = body["quotaBytes"].get<std::uint64_t>();
-                    // Zero is unlimited over S3, where nothing can name a
-                    // figure. Here something can, so zero is a mistake rather
-                    // than a request — and a console that quietly created an
-                    // unlimited bucket would defeat the point of asking.
-                    if (quotaBytes == 0) {
-                        callback(errorJson(
-                            "a storage allocation must be greater than zero",
-                            drogon::k400BadRequest));
-                        return;
-                    }
-                    offload(callback, [&storage, name, quotaBytes]() -> HttpResponsePtr {
-                        storage.createBucket(name, quotaBytes);
-                        const auto record = storage.getBucket(name);
-                        return jsonResponse(record ? toJson(*record, storage.bucketCapacity(name))
-                                                   : nlohmann::json{{"name", name}},
-                                            drogon::k201Created);
+            guardBucket(req, callback, Permission::BucketWrite,
+                        [&storage, req, callback, offload](const Principal&,
+                                                           const std::string& name) {
+                if (std::string(req->getMethodString()) == "DELETE") {
+                    offload(callback, [&storage, name]() -> HttpResponsePtr {
+                        storage.deleteBucket(name);
+                        return jsonResponse({{"deleted", name}});
                     });
                     return;
                 }
 
-                const std::string name = req->getParameter("name");
-                if (name.empty()) {
-                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
-                    return;
-                }
-                offload(callback, [&storage, name]() -> HttpResponsePtr {
-                    storage.deleteBucket(name);
-                    return jsonResponse({{"deleted", name}});
-                });
-            });
-        },
-        {drogon::Get, drogon::Post, drogon::Delete});
-
-    app.registerHandler(
-        "/_mb/api/buckets/access",
-        [&storage, &cache, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, Permission::BucketWrite,
-                  [&storage, &cache, req, callback, offload](const Principal&) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
                     return;
                 }
-                const auto name = body.value("name", std::string{});
-                if (name.empty()) {
-                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
+                if (!body.contains("quotaBytes") || !body["quotaBytes"].is_number_unsigned()) {
+                    callback(errorJson(
+                        "a storage allocation is required; send quotaBytes as a whole number "
+                        "of bytes",
+                        drogon::k400BadRequest));
+                    return;
+                }
+                const auto quotaBytes = body["quotaBytes"].get<std::uint64_t>();
+                // Zero is unlimited over S3, where nothing can name a figure.
+                // Here something can, so zero is a mistake rather than a
+                // request — and a console that quietly created an unlimited
+                // bucket would defeat the point of asking.
+                if (quotaBytes == 0) {
+                    callback(errorJson("a storage allocation must be greater than zero",
+                                       drogon::k400BadRequest));
+                    return;
+                }
+                offload(callback, [&storage, name, quotaBytes]() -> HttpResponsePtr {
+                    storage.createBucket(name, quotaBytes);
+                    const auto record = storage.getBucket(name);
+                    return jsonResponse(record ? toJson(*record, storage.bucketCapacity(name))
+                                               : nlohmann::json{{"name", name}},
+                                        drogon::k201Created);
+                });
+            });
+        },
+        {drogon::Get, drogon::Post, drogon::Delete});
+    app.registerHandler(
+        "/_mb/api/buckets/access",
+        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
+                                                 ResponseCallback&& callback) {
+            guardBucket(req, callback, Permission::BucketWrite,
+                        [&storage, &cache, req, callback, offload](const Principal&,
+                                                                   const std::string& name) {
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
                     return;
                 }
                 const bool publicRead = body.value("publicRead", false);
@@ -1457,18 +1658,19 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // and the instance total is the thing being divided up.
     app.registerHandler(
         "/_mb/api/buckets/quota",
-        [&storage, guard, offload, audit](const HttpRequestPtr& req,
-                                          ResponseCallback&& callback) {
+        [&storage, guard, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                      ResponseCallback&& callback) {
             // Reading how capacity is divided is part of reading the server;
-            // moving it between buckets is not.
-            const Permission needed = req->method() == drogon::Get ? Permission::SettingsRead
-                                                                   : Permission::CapacityWrite;
-            guard(req, callback, needed,
-                  [&storage, req, callback, offload, audit](const Principal& principal) {
-                if (req->method() == drogon::Get) {
-                    offload(callback, [&storage]() -> HttpResponsePtr {
+            // moving it between buckets is not. The read also names no bucket,
+            // so it is narrowed by leaving rows out rather than by refusing —
+            // the same split the bucket list makes, for the same reason.
+            if (req->method() == drogon::Get) {
+                guard(req, callback, Permission::SettingsRead,
+                      [&storage, callback, offload](const Principal& principal) {
+                    offload(callback, [&storage, principal]() -> HttpResponsePtr {
                         nlohmann::json buckets = nlohmann::json::array();
                         for (const auto& [name, capacity] : storage.bucketCapacities()) {
+                            if (!principal.may(name, Permission::BucketRead)) continue;
                             buckets.push_back(
                                 {{"name", name},
                                  {"quotaBytes", capacity.quotaBytes},
@@ -1483,17 +1685,16 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                              {"defaultBucketQuotaBytes", storage.defaultBucketQuotaBytes()},
                              {"buckets", std::move(buckets)}});
                     });
-                    return;
-                }
+                });
+                return;
+            }
 
+            guardBucket(req, callback, Permission::CapacityWrite,
+                        [&storage, req, callback, offload, audit](const Principal& principal,
+                                                                  const std::string& name) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
-                    return;
-                }
-                const auto name = body.value("name", std::string{});
-                if (name.empty()) {
-                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
                     return;
                 }
                 if (!body.contains("quotaBytes") || !body["quotaBytes"].is_number_unsigned()) {
@@ -1530,20 +1731,16 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // implementation of it.
     app.registerHandler(
         "/_mb/api/buckets/cors",
-        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
-                                           ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
+                                                 ResponseCallback&& callback) {
             const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
                                                                       : Permission::BucketWrite;
-            guard(req, callback, needed,
-                  [&storage, &cache, req, callback, offload](const Principal&) {
+            guardBucket(req, callback, needed,
+                        [&storage, &cache, req, callback, offload](const Principal&,
+                                                                   const std::string& name) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
-                    const std::string name = req->getParameter("bucket");
-                    if (name.empty()) {
-                        callback(errorJson("a bucket name is required", drogon::k400BadRequest));
-                        return;
-                    }
                     offload(callback, [&storage, name]() -> HttpResponsePtr {
                         const auto record = storage.getBucket(name);
                         if (!record) return errorJson("no such bucket", drogon::k404NotFound);
@@ -1558,11 +1755,6 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
-                    return;
-                }
-                const auto name = body.value("name", std::string{});
-                if (name.empty()) {
-                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
                     return;
                 }
 
@@ -1603,20 +1795,16 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // second front door onto one feature, never a second implementation.
     app.registerHandler(
         "/_mb/api/buckets/policy",
-        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
-                                           ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
+                                                 ResponseCallback&& callback) {
             const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
                                                                       : Permission::BucketWrite;
-            guard(req, callback, needed,
-                  [&storage, &cache, req, callback, offload](const Principal&) {
+            guardBucket(req, callback, needed,
+                        [&storage, &cache, req, callback, offload](const Principal&,
+                                                                   const std::string& name) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
-                    const std::string name = req->getParameter("bucket");
-                    if (name.empty()) {
-                        callback(errorJson("a bucket name is required", drogon::k400BadRequest));
-                        return;
-                    }
                     offload(callback, [&storage, name]() -> HttpResponsePtr {
                         const auto record = storage.getBucket(name);
                         if (!record) return errorJson("no such bucket", drogon::k404NotFound);
@@ -1630,11 +1818,6 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
-                    return;
-                }
-                const auto name = body.value("name", std::string{});
-                if (name.empty()) {
-                    callback(errorJson("a bucket name is required", drogon::k400BadRequest));
                     return;
                 }
 
@@ -1788,19 +1971,14 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // exactly the keys a file browser needs to show.
     app.registerHandler(
         "/_mb/api/objects",
-        [&storage, &cache, guard, offload](const HttpRequestPtr& req,
-                                           ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
+                                                 ResponseCallback&& callback) {
             // A listing reads; the DELETE this route also serves does not.
             const Permission needed = req->method() == drogon::Get ? Permission::ObjectRead
                                                                       : Permission::ObjectWrite;
-            guard(req, callback, needed,
-                  [&storage, &cache, req, callback, offload](const Principal&) {
-                const std::string bucket = req->getParameter("bucket");
-                if (bucket.empty()) {
-                    callback(errorJson("a bucket is required", drogon::k400BadRequest));
-                    return;
-                }
-
+            guardBucket(req, callback, needed,
+                        [&storage, &cache, req, callback, offload](const Principal&,
+                                                                   const std::string& bucket) {
                 if (std::string(req->getMethodString()) == "DELETE") {
                     const std::string key = req->getParameter("key");
                     if (key.empty()) {
@@ -1877,14 +2055,14 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // session, not an S3 secret.
     app.registerHandler(
         "/_mb/api/upload",
-        [&config, &storage, &cache, guard, offload](const HttpRequestPtr& req,
-                                                    ResponseCallback&& callback) {
-            guard(req, callback, Permission::ObjectWrite,
-                  [&config, &storage, &cache, req, callback, offload](const Principal&) {
-                const std::string bucket = req->getParameter("bucket");
-                const std::string key    = req->getParameter("key");
-                if (bucket.empty() || key.empty()) {
-                    callback(errorJson("a bucket and key are required", drogon::k400BadRequest));
+        [&config, &storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
+                                                          ResponseCallback&& callback) {
+            guardBucket(req, callback, Permission::ObjectWrite,
+                        [&config, &storage, &cache, req, callback, offload](
+                            const Principal&, const std::string& bucket) {
+                const std::string key = req->getParameter("key");
+                if (key.empty()) {
+                    callback(errorJson("a key is required", drogon::k400BadRequest));
                     return;
                 }
                 // The same rule the S3 key validator applies. Refusing here
@@ -1969,13 +2147,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/object",
-        [&storage, guard, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
-            guard(req, callback, Permission::ObjectRead,
-                  [&storage, req, callback, offload](const Principal&) {
-                const std::string bucket = req->getParameter("bucket");
-                const std::string key    = req->getParameter("key");
-                if (bucket.empty() || key.empty()) {
-                    callback(errorJson("a bucket and key are required", drogon::k400BadRequest));
+        [&storage, guardBucket, offload](const HttpRequestPtr& req, ResponseCallback&& callback) {
+            guardBucket(req, callback, Permission::ObjectRead,
+                        [&storage, req, callback, offload](const Principal&,
+                                                           const std::string& bucket) {
+                const std::string key = req->getParameter("key");
+                if (key.empty()) {
+                    callback(errorJson("a key is required", drogon::k400BadRequest));
                     return;
                 }
                 offload(callback, [&storage, bucket, key]() -> HttpResponsePtr {
@@ -2002,24 +2180,24 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // undo the reason the two are separate.
     app.registerHandler(
         "/_mb/api/presign",
-        [&config, &storage, guard, offload](const HttpRequestPtr& req,
-                                            ResponseCallback&& callback) {
-            guard(req, callback, Permission::ObjectRead,
-                  [&config, &storage, req, callback, offload](const Principal&) {
+        [&config, &storage, guardBucket, offload](const HttpRequestPtr& req,
+                                                  ResponseCallback&& callback) {
+            guardBucket(req, callback, Permission::ObjectRead,
+                        [&config, &storage, req, callback, offload](const Principal&,
+                                                                    const std::string& bucket) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
                     return;
                 }
 
-                const auto bucket  = body.value("bucket", std::string{});
                 const auto key     = body.value("key", std::string{});
                 const auto host    = body.value("host", std::string{});
                 const bool secure  = body.value("secure", false);
                 const auto expires = body.value("expiresSeconds", std::int64_t{3600});
 
-                if (bucket.empty() || key.empty()) {
-                    callback(errorJson("a bucket and key are required", drogon::k400BadRequest));
+                if (key.empty()) {
+                    callback(errorJson("a key is required", drogon::k400BadRequest));
                     return;
                 }
                 if (!plausibleHost(host)) {

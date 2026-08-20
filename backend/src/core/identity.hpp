@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -83,6 +85,90 @@ enum class Permission {
     AuditRead,        ///< Read the security event log
 };
 
+/// What a user may do in one particular bucket.
+///
+/// A ceiling, never a grant. The role still has to allow the operation: a
+/// ReadOnly user with Write access to a bucket still cannot write to it,
+/// because the two are ANDed and the narrower answer wins. That is what makes
+/// this safe to add to a store full of existing accounts — it can only ever
+/// take authority away, never hand it out.
+///
+/// Ordered least to most, unlike Role, so that a comparison reads the way it
+/// sounds. Nothing compares these yet; the order is stated so that the first
+/// thing to do so does not have to guess.
+enum class BucketAccess {
+    /// The bucket is not listed and every request naming it is refused, which
+    /// together is what "cannot see it" means. Not a 404: the bucket exists,
+    /// and pretending otherwise would make "no such bucket" and "not yours"
+    /// indistinguishable to the operator reading the audit log.
+    None,
+
+    /// Read the bucket's settings and its objects, and nothing else.
+    Read,
+
+    /// Whatever the role allows. The default, and what every account had
+    /// before bucket access existed.
+    Write,
+};
+
+std::string_view toString(BucketAccess access) noexcept;
+
+/// Nullopt for a name this build does not know, for the reason parseRole gives.
+std::optional<BucketAccess> parseBucketAccess(std::string_view name) noexcept;
+
+/// One sentence, for the picker in the console.
+std::string_view describe(BucketAccess access) noexcept;
+
+/// How a level reads in a refusal — "no access", "read-only access". Beside
+/// the enum because the S3 router and the console both record one, and two
+/// phrasings of the same refusal is one more thing for an operator reading the
+/// audit log to have to reconcile.
+std::string_view describeHolding(BucketAccess access) noexcept;
+
+/// Whether `access` leaves `permission` reachable.
+///
+/// Only the permissions that name a bucket or an object are constrained.
+/// Managing users, issuing credentials and reading the audit log are not about
+/// any one bucket, so bucket access has nothing to say about them and says so
+/// by returning true — the role is the only thing deciding those, as before.
+///
+/// Exhaustive with no default arm, for the same reason `allows()` is: a
+/// permission added to the enum has to be classified here rather than
+/// inheriting whichever answer the default happened to be.
+bool permits(BucketAccess access, Permission permission) noexcept;
+
+/// A user's bucket access, as stored on their account.
+///
+/// Two parts because both questions get asked and one mechanism should answer
+/// them: "this person works on these buckets and nothing else" is a fallback of
+/// None with exceptions, and "this person works on everything except the one
+/// holding the backups" is a fallback of Write with one exception. A record
+/// written before this existed decodes as a Write fallback with no exceptions,
+/// which is precisely what every account already had.
+struct BucketGrants {
+    /// What a bucket not named in `exceptions` resolves to.
+    BucketAccess fallback = BucketAccess::Write;
+
+    /// Buckets named explicitly. A std::map rather than a hash so that a round
+    /// trip through the store is byte-stable, for the reason UserMetadata is;
+    /// `std::less<>` so a lookup can be made from a string_view without
+    /// materialising the key.
+    std::map<std::string, BucketAccess, std::less<>> exceptions;
+
+    /// The access this grants in `bucket`.
+    BucketAccess forBucket(std::string_view bucket) const;
+
+    /// Compared whole when deciding whether an update actually changed
+    /// anything, so that a PATCH restating what is already stored does not
+    /// close every session the account has open.
+    friend bool operator==(const BucketGrants&, const BucketGrants&) = default;
+
+    /// True when this is what every account had before bucket access existed:
+    /// everything, decided by the role alone. The console renders that as "all
+    /// buckets" rather than as a fallback and an empty list.
+    bool unrestricted() const noexcept;
+};
+
 /// Every permission, in declaration order. Used to render a role's grants and
 /// to drive the exhaustive tests — a permission added to the enum and forgotten
 /// here fails those tests rather than silently going ungranted.
@@ -102,6 +188,17 @@ std::string_view describe(Role role) noexcept;
 
 /// The whole authorisation decision, as a pure function.
 bool allows(Role role, Permission permission) noexcept;
+
+/// The whole authorisation decision for a request that names a bucket.
+///
+/// Administrators are deliberately not narrowed. An administrator can rewrite
+/// their own grants, so enforcing them would be a lock whose key hangs on the
+/// door; and the one failure worse than an unenforced rule here is one that
+/// strands the only account able to repair it. The console refuses to store
+/// grants for an administrator for the same reason, rather than storing a
+/// restriction it would then ignore.
+bool allows(Role role, const BucketGrants& grants, std::string_view bucket,
+            Permission permission) noexcept;
 
 /// The permissions a role holds, in `allPermissions()` order. Sent to the
 /// console so it can hide what it must not offer — which is a courtesy to the

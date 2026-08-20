@@ -168,4 +168,45 @@ ContentHeaders decodeContentHeaders(codec::Reader& reader) {
     return headers;
 }
 
+void encodeBucketGrants(codec::Writer& writer, const BucketGrants& grants) {
+    writer.string(toString(grants.fallback));
+    writer.varint(grants.exceptions.size());
+    for (const auto& [bucket, access] : grants.exceptions) {
+        writer.string(bucket);
+        writer.string(toString(access));
+    }
+}
+
+BucketGrants decodeBucketGrants(codec::Reader& reader) {
+    BucketGrants grants;
+
+    const std::string fallback = reader.string();
+    const auto        parsed   = parseBucketAccess(fallback);
+    // Refused rather than guessed at, for the reason an unrecognised role is:
+    // this is a record from a newer build, and every guess available is either
+    // "grant more than was granted" or "silently lock somebody out". A decoder
+    // that cannot say which is which should say nothing.
+    if (!parsed) throw codec::DecodeError("unrecognised bucket access '" + fallback + "'");
+    grants.fallback = *parsed;
+
+    const std::uint64_t count = reader.varint();
+    // A bucket cannot be named twice, so the list cannot be longer than the
+    // number of buckets an instance holds. The bound is not that number — it is
+    // not knowable here — but a length this far past it is not a record we
+    // wrote, and reading it would allocate on a corrupt varint.
+    if (count > 1'000'000) throw codec::DecodeError("bucket grant list is implausibly long");
+
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::string       bucket = reader.string();
+        const std::string name   = reader.string();
+        const auto        access = parseBucketAccess(name);
+        if (!access) {
+            throw codec::DecodeError("unrecognised bucket access '" + name + "' for bucket '" +
+                                     bucket + "'");
+        }
+        grants.exceptions.emplace(std::move(bucket), *access);
+    }
+    return grants;
+}
+
 }  // namespace monobucket

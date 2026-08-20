@@ -98,7 +98,50 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Bucket access for users other than the administrator.** A console account
+  now carries which buckets it may touch and how: `write` (whatever the role
+  allows), `read` (the bucket and its objects, changing nothing), or `none`
+  (the bucket is not listed and every request naming it is refused). It is set
+  when the user is created and changed from the users page afterwards. Until
+  now the only thing standing between an account and every bucket was its role,
+  and the three roles are instance-wide — there was no way to give somebody the
+  run of one bucket without giving them the run of all of them.
+- The grants are a **fallback plus exceptions**, so one shape answers both of
+  the questions people actually ask: "these buckets and nothing else" is a
+  `none` fallback with the buckets named, and "everything except the one with
+  the backups" is a `write` fallback with one exception. A bucket created later
+  falls to the fallback.
+- Enforced on **both listeners**. Signed S3 requests are checked against the
+  grants of the account that owns the access key, so a key still cannot exceed
+  its owner; `ListBuckets` and the console's bucket and allocation lists are
+  filtered rather than refused, because one bucket somebody is not entitled to
+  should not cost them every bucket they are.
+- `/_mb/api/users` accepts and returns a `buckets` field, `/_mb/api/session`
+  and `/_mb/api/login` report the signed-in account's grants so the console can
+  leave out what it must not offer, and the users list ships the access-level
+  catalogue alongside the role catalogue.
+
+### Changed
+
+- **Bucket access narrows a role and can never widen it.** The two are ANDed,
+  and the narrower answer wins: a `readonly` account granted `write` access to
+  a bucket still only reads it. That is what makes this safe to switch on in a
+  store full of existing accounts — it can only take authority away.
+- **An administrator is never narrowed.** An administrator can rewrite their own
+  grants, so enforcing them would be a lock whose key hangs on the door, and the
+  one failure worse than an unenforced rule is one that strands the only account
+  able to repair it. The console refuses to store a narrowing for an
+  administrator rather than keeping one it would ignore, and a promotion clears
+  whatever the account carried.
+- An account written before this existed reads back unrestricted — a `write`
+  fallback with no exceptions, which is exactly what it already had. The user
+  record gained the field by appending it, so no format version moved and no
+  migration runs.
+- Reading a single bucket's storage allocation is now `bucket:read` rather than
+  `settings:read`. Every role holds both, so nothing changes about who may do
+  it; it means the allocation panel is scoped to the bucket it is about.
 
 ---
 

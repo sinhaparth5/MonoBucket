@@ -160,9 +160,12 @@ session working, and signing out leaves every S3 client working. `SessionStore` 
 live in `server/console_session.cpp` with the clock injected, so expiry and lockout are testable
 without a listener.
 
-A session carries a *copy* of the role rather than re-reading it per request, so every change to a
-user's role or status calls `SessionStore::closeUser()`. That is the whole reason a role change
-signs somebody out: the alternative is a RocksDB lookup on the event loop for every console request.
+A session carries a *copy* of the role and of the bucket grants rather than re-reading them per
+request, so every change to a user's role, status or grants calls `SessionStore::closeUser()`. That
+is the whole reason such a change signs somebody out: the alternative is a RocksDB lookup on the
+event loop for every console request. `SessionStore::open()` takes a whole `Principal` for the same
+reason — a signature taking the parts would let a caller capture the role and default the grants,
+and the default is unrestricted.
 
 Authorisation is `allows(Role, Permission)` in `core/identity.cpp` — a pure function, a closed set of
 three roles, no policy language. Console routes pass the permission they need to `guard()`; a route
@@ -171,6 +174,27 @@ that forgets does not compile. Signed S3 requests map operation → permission t
 Both mapping tables are exhaustive switches with no default arm, so a new `Operation` or `Permission`
 is a compile error rather than a silent hole. `backend/tests/identity_test.cpp` asserts the whole
 matrix as literal data — never derived from `allows()`, which would agree with any change.
+
+A second, narrower axis sits under the role: `BucketAccess` (`none`/`read`/`write`) per bucket,
+stored on the `UserRecord` as a `BucketGrants` — one fallback plus a map of exceptions, so a
+denylist and an allowlist are one mechanism. `allows(Role, const BucketGrants&, bucket, Permission)`
+ANDs the two, and the direction is load-bearing: grants only ever *narrow*, so a `readonly` account
+with `write` access to a bucket still cannot write. `permits(BucketAccess, Permission)` classifies
+which permissions are bucket-scoped at all — the ones that are not (users, credentials, settings,
+audit) return true rather than being denied, because this function has no opinion about a question
+it was not asked. **An administrator is never narrowed** and the console refuses to store a
+narrowing for one: an administrator can rewrite their own grants, so enforcing them would be a lock
+whose key hangs on the door, and the failure mode is stranding the only account that could repair
+it. Promotion clears whatever the record carried.
+
+Bucket-scoped console routes use `guardBucket()` rather than `guard()`. It hands the handler the
+bucket name, which is the *only* way a handler can get one — reading the name and checking it are
+the same act, so a route cannot do the first and forget the second. The name is extracted by one
+function that knows all four places the routes carry it (`?bucket=`, `?name=`, and the `bucket` or
+`name` field of a JSON body); four per-route extractors would eventually check a different field
+from the one the handler reads. Routes that name *no* bucket — the bucket list, the allocation
+list, S3 `ListBuckets` — are narrowed by **filtering** rather than refusing, because one bucket
+somebody is not entitled to must not cost them every bucket they are.
 
 The audit log (`kAudit` records, `MetadataStore::appendAudit`) is a fixed ring of `kAuditCapacity`
 entries keyed by sequence alone, so lexicographic order is insertion order and a clock that steps
@@ -339,7 +363,8 @@ inline set, no icon package and no emoji. Charts are LayerChart over the same da
   keys are for programs and the S3 listener. Neither authenticates against the other's surface. A
   change that lets one do the other's job is a regression regardless of how convenient it is.
 - **An access key never exceeds its owner.** Every key carries an `owner` and is authorised with
-  that user's role. The one exception is the root pair from the environment, which is not a user and
+  that user's role *and* that user's bucket grants, both read from the one record the signed request
+  already fetches. The one exception is the root pair from the environment, which is not a user and
   is administrator-equivalent by design — it is the break-glass credential and is documented as one.
   Startup adopts ownerless keys (written before this existed) into the administrator account.
 - **The last enabled administrator is protected.** Delete, disable and demote all consult

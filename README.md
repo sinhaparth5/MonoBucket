@@ -42,7 +42,8 @@ default would be a published credential on every install.
 
 Every account holds one of three roles. The role decides what it may do in the
 console *and* what any S3 access key it issues may do — a key acts as the person
-who issued it and can never exceed them.
+who issued it and can never exceed them. Which *buckets* it may do it in is a
+second, narrower setting; see below.
 
 | | `administrator` | `operator` | `readonly` |
 | --- | --- | --- | --- |
@@ -62,6 +63,44 @@ needs and answers `403` without it, and every signed S3 request is checked
 against the role of the identity behind its access key. The console hides what
 you cannot use, which is a courtesy — calling the API directly gets the same
 refusal.
+
+### Which buckets an account may touch
+
+A role is instance-wide, so on its own it is all-or-nothing: an `operator` who
+may write to one bucket may write to every bucket. Each account therefore also
+carries a **bucket access** setting, chosen when the user is created and
+changeable from the users page afterwards.
+
+| | Reads the bucket and its objects | Writes them, and the bucket's settings |
+| --- | --- | --- |
+| `write` | ✓ | ✓ |
+| `read` | ✓ | |
+| `none` | | |
+
+It is one default plus a list of exceptions, which is what lets one setting
+express both of the things people ask for. "Sam works on `reports` and nothing
+else" is a `none` default with `reports` set to `write`. "Everybody except the
+backups bucket" is a `write` default with that one bucket set to `none`. A
+bucket created later falls to the default.
+
+Three things about it are worth knowing before you rely on it:
+
+- **It narrows a role and never widens it.** The two are ANDed and the narrower
+  answer wins, so a `readonly` account granted `write` access to a bucket still
+  only reads it.
+- **It applies to S3 access keys too**, because a key acts as the person who
+  issued it. Narrowing an account narrows every key it owns, on the next
+  request.
+- **An administrator is never narrowed.** An administrator can change their own
+  grants, so enforcing them would be a lock whose key hangs on the door — and
+  the one failure worse than an unenforced rule is one that strands the only
+  account able to repair it. The console refuses to store a narrowing for an
+  administrator rather than keeping one it ignores.
+
+A bucket an account cannot see is left out of the bucket list — in the console
+and in `ListBuckets` — rather than making the whole listing a `403`. Anonymous
+access to a public bucket is unaffected: a bucket policy is a statement about
+clients carrying no credentials, and this is a statement about ones that do.
 
 **Disabling an account** ends every console session it holds immediately and
 stops its S3 access keys on their next request; nothing is cached between
@@ -244,12 +283,16 @@ before you rely on it:
   a per-object `ChecksumAlgorithm`. An algorithm this build cannot compute is
   refused rather than stored unchecked: a checksum accepted and discarded is
   indistinguishable, to the client, from one that was verified.
-- **Authorisation is per identity, not per bucket or per key.** A key inherits
-  its owner's role and nothing narrower: there is no per-key scoping, no bucket
-  restriction and no way to give one program read access to one bucket. An
-  operator who may delete an object may delete any object. Narrowing that would
-  mean a second policy system beside the bucket policies that already exist,
-  with the two having to agree about which one denies.
+- **Authorisation is per identity, not per key.** An account can now be narrowed
+  to particular buckets — read, write, or not at all, set when the user is
+  created and changed from the users page — and a signed request is held to the
+  grants of the account that owns its access key. What does not exist is
+  anything narrower than the account: every key its owner holds reaches the same
+  buckets with the same authority, so giving one program read access and another
+  write access to the same bucket means two accounts. Nor is anything narrower
+  than a bucket: there is no key-prefix scoping, so an account that may delete
+  an object in a bucket may delete any object in it. An administrator is not
+  narrowed at all, deliberately — see *Users and roles* above.
 - **The root S3 key pair cannot be revoked from the console.** It comes from the
   environment, is not attached to any user account, and is administrator-
   equivalent. Treat it as a break-glass credential and issue per-client keys for
@@ -259,10 +302,11 @@ before you rely on it:
   with the data directory. Anything that has to be kept belongs wherever the
   server's stdout is collected. Entries are written without an fsync, so a power
   cut can lose the last few.
-- **A role change reaches an open console tab only by ending its session.** The
-  session carries a copy of the role, so changing a user's role or status signs
-  them out rather than silently updating the page. S3 access keys need no such
-  step — the owner's record is read on every signed request.
+- **A role or bucket-access change reaches an open console tab only by ending
+  its session.** The session carries a copy of both, so changing a user's role,
+  status or bucket grants signs them out rather than silently updating the page.
+  S3 access keys need no such step — the owner's record is read on every signed
+  request, so a narrowing takes effect on the next one.
 - **Storage allocations are logical, not physical, and are enforced in one
   process.** A bucket's allocation counts the object bytes it holds; it does not
   count the copy a multipart completion makes while concatenating parts, the

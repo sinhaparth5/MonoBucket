@@ -199,6 +199,14 @@ struct UserRecord {
     /// also moves for a role change — "when did this password last change" is a
     /// question a role change is not an answer to.
     TimestampMs passwordChangedAt = 0;
+
+    /// Which buckets this account may touch, and how. Narrows the role and can
+    /// never widen it; an account written before this existed reads back
+    /// unrestricted, which is what it already was.
+    ///
+    /// Always empty for an administrator — see `allows(Role, const
+    /// BucketGrants&, ...)`, which does not consult it for one.
+    BucketGrants buckets;
 };
 
 /// The single administrator account that predates per-user identities.
@@ -213,6 +221,17 @@ struct AdminRecord {
     TimestampMs createdAt = 0;
     TimestampMs updatedAt = 0;
 };
+
+/// The bucket grants' wire form, appended to the user record rather than
+/// versioned into it, for the reason the content headers are: bumping the
+/// record version would refuse every account an older build wrote. A record
+/// that ends before these fields decodes as unrestricted.
+///
+/// The fallback and each exception are written by name rather than by ordinal,
+/// for the reason the role is: reordering the enum must not be able to silently
+/// widen what somebody may reach.
+void         encodeBucketGrants(codec::Writer& writer, const BucketGrants& grants);
+BucketGrants decodeBucketGrants(codec::Reader& reader);
 
 /// One security-relevant thing that happened.
 ///

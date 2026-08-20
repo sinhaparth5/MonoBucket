@@ -42,6 +42,78 @@ std::string_view toString(Permission permission) noexcept {
     return "";
 }
 
+std::string_view toString(BucketAccess access) noexcept {
+    switch (access) {
+        case BucketAccess::None:  return "none";
+        case BucketAccess::Read:  return "read";
+        case BucketAccess::Write: return "write";
+    }
+    return "none";
+}
+
+std::optional<BucketAccess> parseBucketAccess(std::string_view name) noexcept {
+    if (name == "none") return BucketAccess::None;
+    if (name == "read") return BucketAccess::Read;
+    if (name == "write") return BucketAccess::Write;
+    return std::nullopt;
+}
+
+std::string_view describe(BucketAccess access) noexcept {
+    switch (access) {
+        case BucketAccess::None:  return "Not listed, and every request naming it is refused.";
+        case BucketAccess::Read:  return "Reads the bucket and its objects. Changes nothing.";
+        case BucketAccess::Write: return "Whatever the role allows.";
+    }
+    return "";
+}
+
+std::string_view describeHolding(BucketAccess access) noexcept {
+    switch (access) {
+        case BucketAccess::None:  return "no access";
+        case BucketAccess::Read:  return "read-only access";
+        case BucketAccess::Write: return "read and write access";
+    }
+    return "no access";
+}
+
+bool permits(BucketAccess access, Permission permission) noexcept {
+    switch (permission) {
+        // The bucket-scoped half. These are the only permissions whose subject
+        // is one named bucket, and therefore the only ones bucket access has
+        // anything to say about.
+        case Permission::BucketRead:
+        case Permission::ObjectRead:
+            return access != BucketAccess::None;
+
+        case Permission::BucketWrite:
+        case Permission::ObjectWrite:
+        case Permission::CapacityWrite:
+            return access == BucketAccess::Write;
+
+        // Not about any one bucket. Answering true is not a grant — the role
+        // still has to allow them — it is this function declining to have an
+        // opinion about a question it was not asked.
+        case Permission::SettingsRead:
+        case Permission::SettingsWrite:
+        case Permission::CredentialRead:
+        case Permission::CredentialWrite:
+        case Permission::UserRead:
+        case Permission::UserWrite:
+        case Permission::AuditRead:
+            return true;
+    }
+    return false;
+}
+
+BucketAccess BucketGrants::forBucket(std::string_view bucket) const {
+    const auto it = exceptions.find(bucket);
+    return it == exceptions.end() ? fallback : it->second;
+}
+
+bool BucketGrants::unrestricted() const noexcept {
+    return fallback == BucketAccess::Write && exceptions.empty();
+}
+
 std::optional<Role> parseRole(std::string_view name) noexcept {
     if (name == "administrator") return Role::Administrator;
     if (name == "operator") return Role::Operator;
@@ -111,6 +183,18 @@ bool allows(Role role, Permission permission) noexcept {
             return false;
     }
     return false;
+}
+
+bool allows(Role role, const BucketGrants& grants, std::string_view bucket,
+            Permission permission) noexcept {
+    if (!allows(role, permission)) return false;
+
+    // An administrator is never narrowed — see the declaration. Checked after
+    // the role rather than before it so that this reads as the exception it is
+    // rather than as a second way to be authorised.
+    if (role == Role::Administrator) return true;
+
+    return permits(grants.forBucket(bucket), permission);
 }
 
 std::vector<Permission> permissionsFor(Role role) {

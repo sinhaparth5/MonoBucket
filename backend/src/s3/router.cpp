@@ -76,6 +76,11 @@ SigningRequest toSigningRequest(const HttpRequestPtr& request) {
 struct SignedIdentity {
     Role        role = Role::ReadOnly;
     std::string username;  ///< Empty for the root pair, which is not a user.
+
+    /// The owner's bucket grants, read from the same record the role came from.
+    /// A key can no more exceed its owner's buckets than it can exceed their
+    /// role — it is the same record and the same request that reads it.
+    BucketGrants grants;
 };
 
 /// Anonymous access is allowed only where a bucket policy or ACL says so, and
@@ -92,7 +97,31 @@ void authorize(const S3Context& context, const S3Request& request, Operation ope
         if (!identity) throw S3Exception(S3ErrorCode::AccessDenied);
 
         const Permission needed = permissionFor(operation);
-        if (allows(identity->role, needed)) return;
+
+        // Two refusals with one shape. The role is asked first because it is
+        // the coarser answer, and the bucket grant only when the role would
+        // have allowed it — so the reason recorded names the check that
+        // actually refused rather than the first one that could have.
+        std::string reason;
+        if (!allows(identity->role, needed)) {
+            reason = std::string(toString(needed)) + " required for " +
+                     std::string(toString(operation)) + ", " +
+                     std::string(toString(identity->role)) + " has it not";
+        } else if (!request.bucket.empty() &&
+                   !allows(identity->role, identity->grants, request.bucket, needed)) {
+            reason = std::string(toString(needed)) + " required for " +
+                     std::string(toString(operation)) + " on '" + request.bucket + "', '" +
+                     identity->username + "' has " +
+                     std::string(describeHolding(identity->grants.forBucket(request.bucket))) +
+                     " to it";
+        } else {
+            // ListBuckets is the only operation that reaches here naming no
+            // bucket, and it is narrowed rather than refused: handleListBuckets
+            // filters the answer to what this identity may see. Refusing it
+            // would leave a restricted account unable to discover the buckets
+            // it does have.
+            return;
+        }
 
         // Recorded, unlike a signature failure. Reaching here means a valid
         // credential was presented, so the entries are bounded by who holds a
@@ -106,9 +135,7 @@ void authorize(const S3Context& context, const S3Request& request, Operation ope
             entry.action  = "authz.denied";
             entry.target  = request.resource;
             entry.allowed = false;
-            entry.detail  = std::string(toString(needed)) + " required for " +
-                           std::string(toString(operation)) + ", " +
-                           std::string(toString(identity->role)) + " has it not";
+            entry.detail  = reason;
             context.storage.appendAudit(entry);
         } catch (const std::exception& error) {
             log::warn("could not record an S3 authorisation refusal: ", error.what());
@@ -158,9 +185,16 @@ void authorize(const S3Context& context, const S3Request& request, Operation ope
 }
 
 HttpResponsePtr dispatch(const S3Context& context, const S3Request& request, Operation operation,
-                         const HttpRequestPtr& http, const S3Body& body) {
+                         const HttpRequestPtr& http, const S3Body& body,
+                         const std::optional<SignedIdentity>& identity) {
     switch (operation) {
-        case Operation::ListBuckets:    return handleListBuckets(context, request);
+        // The only handler that is handed the caller. Every other operation
+        // names a bucket and was authorised against it before dispatch; this
+        // one names none, so the narrowing happens inside it.
+        case Operation::ListBuckets:
+            return handleListBuckets(context, request,
+                                     identity ? identity->role : Role::ReadOnly,
+                                     identity ? identity->grants : BucketGrants{});
         case Operation::CreateBucket:   return handleCreateBucket(context, request);
         case Operation::DeleteBucket:   return handleDeleteBucket(context, request);
         case Operation::HeadBucket:     return handleHeadBucket(context, request);
@@ -282,7 +316,7 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
         // is the break-glass credential, and it is documented as one.
         std::optional<SignedIdentity> identity;
         if (usedRootPair) {
-            identity = SignedIdentity{Role::Administrator, {}};
+            identity = SignedIdentity{Role::Administrator, {}, {}};
         } else if (resolved && !resolved->owner.empty()) {
             // Read on every signed request rather than cached alongside the
             // key, for the same reason the secret is not cached: a role change
@@ -290,7 +324,7 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
             // is a revocation that has not happened.
             if (const auto owner = context.storage.getUser(resolved->owner);
                 owner && !owner->disabled) {
-                identity = SignedIdentity{owner->role, owner->username};
+                identity = SignedIdentity{owner->role, owner->username, owner->buckets};
             }
         }
 
@@ -308,7 +342,7 @@ HttpResponsePtr serve(const S3Context& context, const HttpRequestPtr& http) {
         const S3Body body(http->getBody(), auth, http->getHeader("content-encoding"),
                           headerAsUnsigned(http, "x-amz-decoded-content-length"));
 
-        response = dispatch(context, request, operation, http, body);
+        response = dispatch(context, request, operation, http, body, identity);
     } catch (const S3Exception& error) {
         const S3ErrorInfo& info = describe(error.code());
         if (info.status == 403) {

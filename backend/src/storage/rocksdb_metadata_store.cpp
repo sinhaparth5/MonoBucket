@@ -14,6 +14,7 @@
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/table.h>
+#include <rocksdb/utilities/checkpoint.h>
 #include <rocksdb/write_batch.h>
 #include <rocksdb/write_buffer_manager.h>
 
@@ -1201,6 +1202,22 @@ public:
         flushOptions.wait = true;
         db_->Flush(flushOptions);
         db_->FlushWAL(true);
+    }
+
+    void checkpointTo(const std::string& destination) override {
+        if (!db_) fail(StorageErrorCode::Internal, "the metadata store is not open");
+
+        rocksdb::Checkpoint* raw = nullptr;
+        check(rocksdb::Checkpoint::Create(db_.get(), &raw),
+              "could not begin a metadata checkpoint");
+        const std::unique_ptr<rocksdb::Checkpoint> checkpoint(raw);
+
+        // log_size_for_flush = 0: flush the memtable rather than copying the
+        // write-ahead log into the checkpoint. The copy then opens without a
+        // recovery pass, which is what makes "point it at this directory and
+        // start" the whole of the restore procedure.
+        check(checkpoint->CreateCheckpoint(destination, 0),
+              "could not write the metadata checkpoint to '" + destination + "'");
     }
 
     std::string_view engineName() const noexcept override { return "rocksdb"; }

@@ -10,7 +10,15 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { fly } from 'svelte/transition';
-	import { api, ApiError, can, type ServerConfig, type Setting, type UploadLimit } from '$lib/api';
+	import {
+		api,
+		ApiError,
+		can,
+		type Backup,
+		type ServerConfig,
+		type Setting,
+		type UploadLimit
+	} from '$lib/api';
 	import {
 		ALLOCATION_UNITS,
 		allocationBytes,
@@ -72,6 +80,37 @@
 	// is the one control here that has a save button. Everything else is
 	// environment-only and could not honour one.
 	const mayWriteSettings = $derived(can(data.session, 'settings:write'));
+	const mayBackUp = $derived(can(data.session, 'backup:write'));
+
+	// Nothing here schedules anything. The server takes a copy when somebody
+	// asks and never on a timer — retention and off-site copies are a backup
+	// tool's job, and half of one built into the server is the half nobody
+	// tests.
+	let backupName = $state('');
+	let backingUp = $state(false);
+	let backupError = $state('');
+	let lastBackup = $state<Backup | null>(null);
+
+	async function takeBackup(event: SubmitEvent) {
+		event.preventDefault();
+		backupError = '';
+		backingUp = true;
+		try {
+			lastBackup = await api.createBackup(backupName.trim());
+			backupName = '';
+		} catch (cause) {
+			backupError = cause instanceof ApiError ? cause.message : 'could not write the backup';
+		} finally {
+			backingUp = false;
+		}
+	}
+
+	function suggestBackupName() {
+		// Sortable and unambiguous, which is what somebody scanning a directory
+		// of them a year later needs. Colons are left out: they are legal on
+		// this filesystem and a nuisance on others.
+		backupName = new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
+	}
 
 	let limit = $state<UploadLimit | null>(null);
 	let limitAmount = $state(1);
@@ -355,6 +394,82 @@
 			</div>
 		</form>
 	</section>
+
+	{#if mayBackUp}
+		<section class="panel surface-raised flex flex-col gap-4 p-6">
+			<div class="flex flex-col gap-1">
+				<span class="eyebrow">Backup</span>
+				<h2 class="text-xl font-bold tracking-tight">Take a checkpoint</h2>
+				<p class="text-base-content/60 max-w-xl text-sm">
+					Writes a consistent, startable copy of this instance into
+					<code class="text-xs">MONOBUCKET_BACKUP_DIR</code>, without stopping anything. Payloads
+					are hard-linked, so on the same filesystem it duplicates no bytes and finishes almost
+					immediately. Writes arriving while it runs are simply not in the copy.
+				</p>
+				<p class="text-base-content/50 max-w-xl text-xs">
+					Nothing is scheduled. There is no retention and no rotation — a copy is written when you
+					ask, and what happens to it afterwards is a backup tool's job. Verify one before you rely
+					on it: <code>MONOBUCKET_DATA_DIR=&lt;dir&gt; monobucket --fsck --deep</code>. Restore by
+					stopping the server and pointing <code>MONOBUCKET_DATA_DIR</code> at it.
+				</p>
+			</div>
+
+			<form class="flex flex-wrap items-end gap-3" onsubmit={takeBackup}>
+				<fieldset class="fieldset gap-1 p-0">
+					<legend class="fieldset-legend text-sm">Name</legend>
+					<div class="join">
+						<input
+							class="input join-item w-72"
+							type="text"
+							maxlength="128"
+							spellcheck="false"
+							autocomplete="off"
+							bind:value={backupName}
+							placeholder="2026-08-20T15-30-00"
+							aria-label="Backup name"
+							required
+						/>
+						<button
+							type="button"
+							class="btn join-item"
+							onclick={suggestBackupName}
+							title="Use the current time"
+						>
+							<Icon name="refresh" class="size-4" />
+						</button>
+					</div>
+					<span class="label text-xs"
+						>A name, not a path — it is created inside the backup directory.</span
+					>
+				</fieldset>
+
+				<button class="btn btn-primary gap-2" type="submit" disabled={backingUp}>
+					{#if backingUp}<span class="loading loading-spinner loading-xs"></span>{/if}
+					Take backup
+				</button>
+			</form>
+
+			{#if lastBackup}
+				<div role="status" class="alert alert-success alert-soft text-sm">
+					<Icon name="check" class="size-4" />
+					<span>
+						Wrote <span class="font-mono text-xs">{lastBackup.destination}</span> in
+						{lastBackup.elapsedMs} ms — {plural(lastBackup.payloadsLinked, 'payload')} linked{#if !lastBackup.instant},
+							{lastBackup.payloadsCopied}
+							copied ({formatBytes(lastBackup.bytesCopied)}) because the destination is on another
+							filesystem{/if}.
+					</span>
+				</div>
+			{/if}
+
+			{#if backupError}
+				<div role="alert" class="alert alert-error alert-soft text-sm">
+					<Icon name="warning" class="size-4" />
+					<span>{backupError}</span>
+				</div>
+			{/if}
+		</section>
+	{/if}
 
 	{#if limit}
 		<section class="panel surface-raised flex flex-col gap-4 p-6">

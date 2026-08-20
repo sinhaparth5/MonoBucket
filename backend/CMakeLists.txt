@@ -38,6 +38,7 @@ set(MONOBUCKET_CORE_SOURCES
     src/s3/uri.cpp
     src/s3/xml.cpp
     src/storage/blob_store.cpp
+    src/storage/checkpoint.cpp
     src/storage/checksum.cpp
     src/storage/codec.cpp
     src/storage/digest.cpp

@@ -43,6 +43,18 @@ struct Config {
     std::string dataDir  = "/data";      ///< Object payloads + metadata store
     std::string region   = "us-east-1";  ///< Reported in S3 responses
 
+    /// Where the console is allowed to write backups. Empty disables the
+    /// console's backup action entirely, which is the default.
+    ///
+    /// A directory rather than a free path, because the destination arrives
+    /// over HTTP: an administrator naming an arbitrary path would be asking
+    /// the server to create directories anywhere it can write, and a console
+    /// session is not the same thing as a shell on the host. Backups are
+    /// created *inside* this directory under a name the caller chooses, and
+    /// that name may not contain a separator. `monobucket --checkpoint` is
+    /// unaffected — it is already run by whoever has the shell.
+    std::string backupDir;
+
     /// The endpoint domain, when there is one — `s3.example.com`. Setting it
     /// enables virtual-host style addressing, where `bucket.s3.example.com`
     /// names the bucket. Empty means path style only: without a configured

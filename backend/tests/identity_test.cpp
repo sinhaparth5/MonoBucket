@@ -42,6 +42,7 @@ constexpr Expected kMatrix[] = {
     {Role::Administrator, Permission::UserRead, true},
     {Role::Administrator, Permission::UserWrite, true},
     {Role::Administrator, Permission::AuditRead, true},
+    {Role::Administrator, Permission::BackupWrite, true},
 
     // An operator runs the storage and cannot touch the people using it.
     {Role::Operator, Permission::BucketRead, true},
@@ -60,6 +61,8 @@ constexpr Expected kMatrix[] = {
     {Role::Operator, Permission::UserRead, false},
     {Role::Operator, Permission::UserWrite, false},
     {Role::Operator, Permission::AuditRead, false},
+    // A backup carries every S3 secret in the instance out of the building.
+    {Role::Operator, Permission::BackupWrite, false},
 
     // Read-only creates nothing at all, and that includes credentials.
     {Role::ReadOnly, Permission::BucketRead, true},
@@ -74,6 +77,7 @@ constexpr Expected kMatrix[] = {
     {Role::ReadOnly, Permission::UserRead, false},
     {Role::ReadOnly, Permission::UserWrite, false},
     {Role::ReadOnly, Permission::AuditRead, false},
+    {Role::ReadOnly, Permission::BackupWrite, false},
 };
 
 constexpr Role kRoles[] = {Role::Administrator, Role::Operator, Role::ReadOnly};

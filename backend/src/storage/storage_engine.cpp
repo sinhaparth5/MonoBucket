@@ -992,11 +992,37 @@ std::string_view toString(StorageEngine::FsckReport::Kind kind) {
 
 // --- Maintenance -----------------------------------------------------------
 
+CheckpointReport StorageEngine::checkpoint(const std::filesystem::path& destination) {
+    // Refused before the flag is raised, so a bad destination costs nothing and
+    // leaves reclamation untouched.
+    requireUsableDestination(destination);
+
+    // RAII, because writeCheckpoint throws on any filesystem failure and a
+    // checkpoint that failed halfway must not leave reclamation switched off
+    // for the life of the process.
+    struct Barrier {
+        std::atomic<bool>& flag;
+        explicit Barrier(std::atomic<bool>& f) : flag(f) { flag.store(true); }
+        ~Barrier() { flag.store(false); }
+    } barrier(checkpointing_);
+
+    const CheckpointReport report = writeCheckpoint(*metadata_, blobs_, destination);
+
+    log::info("checkpoint written to ", destination.string(), ": ", report.payloadsLinked,
+              " payloads linked, ", report.payloadsCopied, " copied (", report.bytesCopied,
+              " bytes) in ", report.elapsedMs, " ms");
+    return report;
+}
+
 std::size_t StorageEngine::reclaim(std::size_t limit) {
     return reclaimOlderThan(limit, nowMs() - options_.reclaimGraceMs);
 }
 
 std::size_t StorageEngine::reclaimOlderThan(std::size_t limit, TimestampMs cutoff) {
+    // Deferred rather than skipped: the orphan records stay, so the next pass
+    // collects whatever this one declined to.
+    if (checkpointing_.load()) return 0;
+
     const auto blobIds = metadata_->listOrphans(limit, cutoff);
     if (blobIds.empty()) return 0;
 
@@ -1008,12 +1034,19 @@ std::size_t StorageEngine::reclaimOlderThan(std::size_t limit, TimestampMs cutof
 }
 
 void StorageEngine::reclaimNow(const std::string& blobId) {
+    // The payload keeps its reclamation record and is collected by the next
+    // periodic pass. See `checkpointing_` for why the file has to survive the
+    // copy even though nothing references it any more.
+    if (checkpointing_.load()) return;
+
     blobs_.remove(blobId);
     metadata_->forgetOrphans({blobId});
 }
 
 void StorageEngine::reclaimNow(const std::vector<std::string>& blobIds) {
     if (blobIds.empty()) return;
+    if (checkpointing_.load()) return;
+
     for (const std::string& blobId : blobIds) blobs_.remove(blobId);
     metadata_->forgetOrphans(blobIds);
 }

@@ -1,6 +1,7 @@
 #include "server/console_api.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <cctype>
 #include <chrono>
 #include <memory>
@@ -31,6 +32,7 @@
 #include "server/metrics_history.hpp"
 #include "server/server.hpp"
 #include "server/system_routes.hpp"
+#include "storage/checkpoint.hpp"
 #include "storage/records.hpp"
 #include "storage/storage_engine.hpp"
 
@@ -417,6 +419,7 @@ const std::unordered_map<std::string, std::string>& settingEnvironmentNames() {
         {"consolePort", "MONOBUCKET_CONSOLE_PORT"},
         {"consoleEnabled", "MONOBUCKET_CONSOLE_ENABLED"},
         {"dataDir", "MONOBUCKET_DATA_DIR"},
+        {"backupDir", "MONOBUCKET_BACKUP_DIR"},
         {"region", "MONOBUCKET_REGION"},
         {"s3Domain", "MONOBUCKET_S3_DOMAIN"},
         {"s3PublicUrl", "MONOBUCKET_S3_PUBLIC_URL"},
@@ -1919,6 +1922,83 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             });
         },
         {drogon::Get, drogon::Post, drogon::Delete});
+
+    // --- Backup ------------------------------------------------------------
+
+    // An operator action, never a schedule. MonoBucket does not run backups on
+    // a timer and does not decide when one is due: retention, rotation and
+    // off-site copies are what a backup tool is for, and half of one built into
+    // the server would be the half nobody tests. This endpoint does one thing —
+    // write a consistent copy, now, because somebody asked.
+    app.registerHandler(
+        "/_mb/api/backup",
+        [&config, &storage, guard, offload, audit](const HttpRequestPtr& req,
+                                                   ResponseCallback&& callback) {
+            guard(req, callback, Permission::BackupWrite,
+                  [&config, &storage, req, callback, offload,
+                   audit](const Principal& principal) {
+                if (config.backupDir.empty()) {
+                    callback(errorJson(
+                        "backups are not configured; set MONOBUCKET_BACKUP_DIR to a directory "
+                        "this server may write into",
+                        drogon::k409Conflict));
+                    return;
+                }
+
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (body.is_discarded() || !body.is_object()) {
+                    callback(errorJson("expected a JSON object", drogon::k400BadRequest));
+                    return;
+                }
+
+                const auto name = body.value("name", std::string{});
+                // A name, not a path. The destination arrives over HTTP, and an
+                // administrator session is not a shell on the host: anything
+                // that could climb out of MONOBUCKET_BACKUP_DIR would turn this
+                // into "create a directory anywhere the server can write".
+                if (name.empty() || name.size() > 128 ||
+                    name.find('/') != std::string::npos ||
+                    name.find('\\') != std::string::npos || name.front() == '.' ||
+                    name.find("..") != std::string::npos) {
+                    callback(errorJson(
+                        "a backup name is required: up to 128 characters, no path separators, "
+                        "not starting with a dot",
+                        drogon::k400BadRequest));
+                    return;
+                }
+
+                const std::filesystem::path destination =
+                    std::filesystem::path(config.backupDir) / name;
+
+                offload(callback, [&storage, audit, destination, name,
+                                   actor = principal.username]() -> HttpResponsePtr {
+                    const CheckpointReport report = storage.checkpoint(destination);
+
+                    audit(actor, "backup.create", name, true,
+                          std::to_string(report.payloadsLinked) + " payloads linked, " +
+                              std::to_string(report.payloadsCopied) + " copied, " +
+                              std::to_string(report.elapsedMs) + " ms");
+
+                    return jsonResponse(
+                        {{"name", name},
+                         {"destination", report.destination.string()},
+                         {"payloadsLinked", report.payloadsLinked},
+                         {"payloadsCopied", report.payloadsCopied},
+                         {"bytesCopied", report.bytesCopied},
+                         {"takenAt", toIso8601(report.takenAtMs)},
+                         {"takenAtMs", report.takenAtMs},
+                         {"elapsedMs", report.elapsedMs},
+                         // False means the destination was on another
+                         // filesystem and the payload bytes were duplicated.
+                         // Worth telling the browser, because it is the
+                         // difference between a backup that cost nothing and
+                         // one that just wrote the whole store again.
+                         {"instant", report.instant()}},
+                        drogon::k201Created);
+                });
+            });
+        },
+        {drogon::Post});
 
     // --- Settings ----------------------------------------------------------
 

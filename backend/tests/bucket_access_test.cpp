@@ -54,6 +54,7 @@ constexpr Expected kMatrix[] = {
     {BucketAccess::None, Permission::UserRead, true},
     {BucketAccess::None, Permission::UserWrite, true},
     {BucketAccess::None, Permission::AuditRead, true},
+    {BucketAccess::None, Permission::BackupWrite, true},
 
     // Read: the two reads and nothing that changes anything.
     {BucketAccess::Read, Permission::BucketRead, true},
@@ -68,6 +69,7 @@ constexpr Expected kMatrix[] = {
     {BucketAccess::Read, Permission::UserRead, true},
     {BucketAccess::Read, Permission::UserWrite, true},
     {BucketAccess::Read, Permission::AuditRead, true},
+    {BucketAccess::Read, Permission::BackupWrite, true},
 
     // Write: everything, which is what an account that was never narrowed has.
     {BucketAccess::Write, Permission::BucketRead, true},
@@ -82,6 +84,7 @@ constexpr Expected kMatrix[] = {
     {BucketAccess::Write, Permission::UserRead, true},
     {BucketAccess::Write, Permission::UserWrite, true},
     {BucketAccess::Write, Permission::AuditRead, true},
+    {BucketAccess::Write, Permission::BackupWrite, true},
 };
 
 BucketGrants onlyReports() {

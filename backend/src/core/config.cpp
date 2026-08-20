@@ -123,6 +123,7 @@ Config Config::fromEnvironment() {
         env::bytes("MONOBUCKET_METADATA_MEMORY_BYTES", cfg.metadataMemoryBytes);
     cfg.metadataMaxOpenFiles = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_METADATA_MAX_OPEN_FILES", cfg.metadataMaxOpenFiles));
+    cfg.backupDir = env::string("MONOBUCKET_BACKUP_DIR", cfg.backupDir);
     cfg.reclaimGraceSeconds = static_cast<std::uint32_t>(
         env::number("MONOBUCKET_RECLAIM_GRACE_SECONDS", cfg.reclaimGraceSeconds));
     cfg.reclaimIntervalSeconds = static_cast<std::uint32_t>(
@@ -469,6 +470,7 @@ nlohmann::json Config::toJson() const {
         {"consolePort", consolePort},
         {"consoleEnabled", consoleEnabled},
         {"dataDir", dataDir},
+        {"backupDir", backupDir},
         {"region", region},
         {"s3Domain", s3Domain},
         {"s3PublicUrl", s3PublicUrl},

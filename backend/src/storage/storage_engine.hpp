@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "storage/blob_store.hpp"
+#include "storage/checkpoint.hpp"
 #include "storage/metadata_store.hpp"
 #include "storage/quota.hpp"
 #include "storage/records.hpp"
@@ -441,6 +442,21 @@ public:
     /// raced a live writer is how a consistency checker becomes the outage.
     FsckReport fsck(const FsckOptions& options);
 
+    // --- Backup ------------------------------------------------------------
+
+    /// Writes a consistent, startable copy of this store into `destination`,
+    /// which must not already exist or must be an empty directory.
+    ///
+    /// Safe against a live server. Writes arriving during the copy are not
+    /// blocked and are simply not in it — a checkpoint is a coherent instant,
+    /// not a pause. What *is* held off for the duration is reclamation: see
+    /// `checkpointing_`, which is the difference between this and copying the
+    /// data directory with `cp`.
+    ///
+    /// Runs on the caller's thread and touches the filesystem, so it belongs on
+    /// an I/O thread like every other storage call here.
+    CheckpointReport checkpoint(const std::filesystem::path& destination);
+
     // --- Maintenance -------------------------------------------------------
 
     /// Unlinks up to `limit` payloads that are no longer referenced and are
@@ -496,6 +512,24 @@ private:
     /// whole cost, and a request that crosses the change is held to one of the
     /// two figures rather than to something in between.
     std::atomic<std::uint64_t> maxUploadBytes_{0};
+
+    /// Set while a checkpoint is copying, and the reason a checkpoint of a
+    /// running store is consistent rather than merely fast.
+    ///
+    /// The copy snapshots the metadata first and links the payload tree second.
+    /// A delete landing between the two would otherwise unlink a payload the
+    /// snapshot still names, and the backup would restore to a store that
+    /// --fsck correctly calls corrupt. While this is set, `reclaimNow` and
+    /// `reclaimOlderThan` leave the file alone.
+    ///
+    /// Nothing is lost by deferring: every payload is recorded in the
+    /// reclamation log before it is written, so whatever this window skips is
+    /// collected by the next periodic pass. The ordering is what makes it
+    /// correct — a deletion that reads this as false did so after committing
+    /// its metadata change, and this is set before the snapshot is taken, so
+    /// that change is not in the snapshot and the payload is not referenced by
+    /// it.
+    std::atomic<bool> checkpointing_{false};
 };
 
 /// Renders a finding kind for logs and the `--fsck` report.

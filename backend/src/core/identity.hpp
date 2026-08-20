@@ -83,6 +83,15 @@ enum class Permission {
     UserRead,         ///< List users and their roles
     UserWrite,        ///< Create, update, disable and delete users
     AuditRead,        ///< Read the security event log
+
+    /// Write a backup of the whole store.
+    ///
+    /// Its own permission rather than folded into SettingsWrite, because a
+    /// checkpoint copies *everything* — including the S3 secrets, which are
+    /// stored recoverable because SigV4 has no verifier that avoids it. Being
+    /// able to change an upload limit and being able to walk away with every
+    /// credential in the instance are not the same authority.
+    BackupWrite,
 };
 
 /// What a user may do in one particular bucket.

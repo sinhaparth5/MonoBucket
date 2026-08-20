@@ -59,6 +59,29 @@ export MONOBUCKET_DATA_DIR=$PWD/data MONOBUCKET_ROOT_SECRET_KEY=local-dev-secret
 ```
 Port 9000 = S3 API, 9001 = console.
 
+`monobucket --checkpoint <dir>` writes a consistent, startable copy of the store: RocksDB's
+checkpoint API for `meta/`, hard links for `objects/`. The CLI form needs a *stopped* server —
+one process may open the metadata store at a time — so backing up a **running** instance is the
+console's job (`POST /_mb/api/backup`, `Permission::BackupWrite`, bounded by `MONOBUCKET_BACKUP_DIR`),
+because the running process is the only thing that can copy its own store. Restore is: stop, point
+`MONOBUCKET_DATA_DIR` at the checkpoint, start.
+
+The ordering is load-bearing and so is the barrier. The metadata is snapshotted *first* and the
+payloads linked second, so a payload written after the snapshot is merely absent from a copy that
+never names it. That alone is not enough: `deleteObject` unlinks its payload immediately
+(`reclaimNow`), so a delete landing between the two passes would strip a payload the snapshot still
+names. `StorageEngine::checkpointing_` makes `reclaimNow`/`reclaimOlderThan` no-ops for the
+duration; nothing leaks, because every payload is in the reclamation log before it is written and
+the next pass collects what the window skipped. `backend/tests/checkpoint_test.cpp` asserts this
+against a concurrent deleter — remove the barrier and that test fails.
+
+The residue runs the other way and is accepted: an upload whose payload landed before the link
+pass but whose metadata postdates the snapshot leaves an unreferenced file in the copy, so `--fsck`
+on a backup taken under load exits 2 with `unreferenced-payload` findings while one taken quiet
+exits 0. Skipping files by mtime would remove them and is provably safe on paper — a payload is
+always written before the row naming it — but it stakes backup integrity on clock monotonicity,
+and an extra file is recoverable where a missing one is not.
+
 `monobucket --fsck [--deep]` checks a stopped store: it walks the metadata against the payload tree
 and reports every disagreement — referenced-but-absent payloads, length mismatches, files nothing
 references and reclamation does not know about, and names the store could not have written.

@@ -11,6 +11,7 @@ const std::vector<Permission>& allPermissions() {
         Permission::ObjectWrite,     Permission::SettingsRead,    Permission::SettingsWrite,
         Permission::CapacityWrite,   Permission::CredentialRead,  Permission::CredentialWrite,
         Permission::UserRead,        Permission::UserWrite,       Permission::AuditRead,
+        Permission::BackupWrite,
     };
     return kAll;
 }
@@ -38,6 +39,7 @@ std::string_view toString(Permission permission) noexcept {
         case Permission::UserRead:        return "user:read";
         case Permission::UserWrite:       return "user:write";
         case Permission::AuditRead:       return "audit:read";
+        case Permission::BackupWrite:     return "backup:write";
     }
     return "";
 }
@@ -100,6 +102,7 @@ bool permits(BucketAccess access, Permission permission) noexcept {
         case Permission::UserRead:
         case Permission::UserWrite:
         case Permission::AuditRead:
+        case Permission::BackupWrite:
             return true;
     }
     return false;
@@ -159,6 +162,7 @@ bool allows(Role role, Permission permission) noexcept {
                 case Permission::UserRead:
                 case Permission::UserWrite:
                 case Permission::AuditRead:
+                case Permission::BackupWrite:
                     return false;
             }
             return false;
@@ -178,6 +182,7 @@ bool allows(Role role, Permission permission) noexcept {
                 case Permission::UserRead:
                 case Permission::UserWrite:
                 case Permission::AuditRead:
+                case Permission::BackupWrite:
                     return false;
             }
             return false;

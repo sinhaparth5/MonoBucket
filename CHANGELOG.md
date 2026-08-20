@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.11] — 2026-08-20
+
 ### Added
 
 - **Bucket access for users other than the administrator.** A console account

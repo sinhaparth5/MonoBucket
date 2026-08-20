@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Session } from './api';
+import { unrestrictedBuckets, type Session } from './api';
 import { objectUrl, s3Endpoint } from './s3url';
 
 // Which host this file picks is not cosmetic: it is what gets signed into a
@@ -12,6 +12,7 @@ function session(overrides: Partial<Session> = {}): Session {
 		username: 'admin',
 		role: 'administrator',
 		permissions: [],
+		buckets: unrestrictedBuckets(),
 		usingDefaultCredentials: false,
 		s3Port: 9000,
 		s3Domain: '',

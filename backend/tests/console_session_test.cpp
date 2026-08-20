@@ -22,7 +22,7 @@ constexpr std::int64_t kNow = 1'760'000'000;
 TEST_CASE("a session resolves to the user that opened it", "[session]") {
     SessionStore sessions;
 
-    const std::string token = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string token = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
     const auto        principal = sessions.resolveAt(token, kNow);
     REQUIRE(principal.has_value());
     CHECK(principal->username == "admin");
@@ -34,8 +34,8 @@ TEST_CASE("a session resolves to the user that opened it", "[session]") {
 TEST_CASE("a session carries the role it was opened with", "[session]") {
     SessionStore sessions;
 
-    const std::string reader = sessions.openAt("sam", Role::ReadOnly, kNow);
-    const std::string admin  = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string reader = sessions.openAt(monobucket::Principal{"sam", Role::ReadOnly, {}}, kNow);
+    const std::string admin  = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
 
     // Two people signed in at once do not share an authority level, which is
     // the thing a single-account console never had to answer.
@@ -47,7 +47,7 @@ TEST_CASE("a session carries the role it was opened with", "[session]") {
 
 TEST_CASE("an unknown token resolves to nothing", "[session]") {
     SessionStore sessions;
-    sessions.openAt("admin", Role::Administrator, kNow);
+    sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
 
     CHECK_FALSE(sessions.resolveAt("", kNow).has_value());
     CHECK_FALSE(sessions.resolveAt("00000000", kNow).has_value());
@@ -57,7 +57,7 @@ TEST_CASE("tokens are unguessable and distinct", "[session]") {
     SessionStore          sessions;
     std::set<std::string> tokens;
     for (int i = 0; i < 100; ++i) {
-        tokens.insert(sessions.openAt("admin", Role::Administrator, kNow));
+        tokens.insert(sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow));
     }
 
     CHECK(tokens.size() == 100);
@@ -68,7 +68,7 @@ TEST_CASE("tokens are unguessable and distinct", "[session]") {
 TEST_CASE("a session expires once its lifetime is up", "[session]") {
     SessionStore sessions(60);
 
-    const std::string token = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string token = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
     REQUIRE(sessions.resolveAt(token, kNow + 59).has_value());
     CHECK(sessions.resolveAt(token, kNow + 59)->username == "admin");
 
@@ -80,19 +80,19 @@ TEST_CASE("a session expires once its lifetime is up", "[session]") {
 TEST_CASE("expired sessions are collected when a new one opens", "[session]") {
     SessionStore sessions(60);
 
-    for (int i = 0; i < 5; ++i) sessions.openAt("admin", Role::Administrator, kNow);
+    for (int i = 0; i < 5; ++i) sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
     CHECK(sessions.size() == 5);
 
     // Opening is the only thing that sweeps, which is why the leak this
     // guards against is bounded by the login rate rather than by uptime.
-    sessions.openAt("admin", Role::Administrator, kNow + 61);
+    sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow + 61);
     CHECK(sessions.size() == 1);
 }
 
 TEST_CASE("signing out invalidates the token immediately", "[session]") {
     SessionStore sessions;
 
-    const std::string token = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string token = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
     REQUIRE(sessions.resolveAt(token, kNow).has_value());
 
     sessions.close(token);
@@ -107,8 +107,8 @@ TEST_CASE("signing out invalidates the token immediately", "[session]") {
 TEST_CASE("signing out one session leaves the others alone", "[session]") {
     SessionStore sessions;
 
-    const std::string first  = sessions.openAt("admin", Role::Administrator, kNow);
-    const std::string second = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string first  = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
+    const std::string second = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
 
     sessions.close(first);
     CHECK_FALSE(sessions.resolveAt(first, kNow).has_value());
@@ -119,9 +119,9 @@ TEST_CASE("signing out one session leaves the others alone", "[session]") {
 TEST_CASE("disabling a user ends every session that user holds", "[session]") {
     SessionStore sessions;
 
-    const std::string first  = sessions.openAt("sam", Role::Operator, kNow);
-    const std::string second = sessions.openAt("sam", Role::Operator, kNow);
-    const std::string other  = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string first  = sessions.openAt(monobucket::Principal{"sam", Role::Operator, {}}, kNow);
+    const std::string second = sessions.openAt(monobucket::Principal{"sam", Role::Operator, {}}, kNow);
+    const std::string other  = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
 
     CHECK(sessions.closeUser("sam") == 2);
 
@@ -135,7 +135,7 @@ TEST_CASE("disabling a user ends every session that user holds", "[session]") {
 
 TEST_CASE("closing the sessions of an unknown user changes nothing", "[session]") {
     SessionStore sessions;
-    const std::string token = sessions.openAt("admin", Role::Administrator, kNow);
+    const std::string token = sessions.openAt(monobucket::Principal{"admin", Role::Administrator, {}}, kNow);
 
     CHECK(sessions.closeUser("nobody") == 0);
     CHECK(sessions.closeUser("") == 0);

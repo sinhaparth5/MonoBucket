@@ -72,12 +72,14 @@ std::string decodeContinuation(std::string_view token) {
 
 }  // namespace
 
-drogon::HttpResponsePtr handleListBuckets(const S3Context& context, const S3Request& request) {
+drogon::HttpResponsePtr handleListBuckets(const S3Context& context, const S3Request& request,
+                                          Role role, const BucketGrants& grants) {
     XmlWriter writer("ListAllMyBucketsResult");
     writeOwner(writer, context.config);
 
     writer.open("Buckets");
     for (const auto& bucket : context.storage.listBuckets()) {
+        if (!allows(role, grants, bucket.name, Permission::BucketRead)) continue;
         writer.open("Bucket");
         writer.element("Name", bucket.name);
         writer.element("CreationDate", toIso8601(bucket.createdAt));

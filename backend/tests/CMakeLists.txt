@@ -13,6 +13,7 @@ add_executable(monobucket_tests
     blob_store_test.cpp
     cache_factory_test.cpp
     codec_test.cpp
+    bucket_access_test.cpp
     content_headers_test.cpp
     digest_test.cpp
     fallback_cache_test.cpp

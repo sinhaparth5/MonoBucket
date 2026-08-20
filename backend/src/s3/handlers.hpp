@@ -114,7 +114,12 @@ std::string objectCacheKey(std::string_view bucket, std::string_view key);
 // Each returns a complete response and runs on an I/O thread, never on the
 // event loop: every one of them touches RocksDB or the filesystem.
 
-drogon::HttpResponsePtr handleListBuckets(const S3Context&, const S3Request&);
+/// `role` and `grants` belong to the identity that signed the request. The
+/// listing is filtered rather than refused, because a bucket a caller may not
+/// see is not an error — it is simply not theirs, and enumerating what somebody
+/// is not entitled to in order to tell them so defeats the purpose.
+drogon::HttpResponsePtr handleListBuckets(const S3Context&, const S3Request&, Role,
+                                          const BucketGrants&);
 drogon::HttpResponsePtr handleCreateBucket(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handleDeleteBucket(const S3Context&, const S3Request&);
 drogon::HttpResponsePtr handleHeadBucket(const S3Context&, const S3Request&);

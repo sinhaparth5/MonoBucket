@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, can } from './api';
+import { accessTo, api, ApiError, can, unrestrictedBuckets, type BucketGrants } from './api';
 
 // The console's logic is which endpoint gets called, with what body, and what
 // it does with the answer. All of that is reachable with a stubbed `fetch`,
@@ -333,6 +333,49 @@ describe('users', () => {
 		expect(bodyOf(calls[0])).toEqual({ username: 'sam', disabled: true });
 	});
 
+	it('omits bucket access when none was chosen', async () => {
+		respondWith({ status: 201, body: { username: 'sam', role: 'operator' } });
+
+		await api.createUser('sam', 'a long enough password', 'operator');
+
+		// No `buckets` key. Absent means unrestricted on the server, which is
+		// what every account created before bucket access existed already has —
+		// sending an empty object instead would be a different claim.
+		expect(bodyOf(calls[0])).toEqual({
+			username: 'sam',
+			password: 'a long enough password',
+			role: 'operator'
+		});
+	});
+
+	it('creates a user narrowed to named buckets', async () => {
+		respondWith({ status: 201, body: { username: 'sam', role: 'operator' } });
+
+		const buckets: BucketGrants = {
+			fallback: 'none',
+			exceptions: { reports: 'write', archive: 'read' },
+			unrestricted: false
+		};
+		await api.createUser('sam', 'a long enough password', 'operator', buckets);
+
+		expect(bodyOf(calls[0])).toEqual({
+			username: 'sam',
+			password: 'a long enough password',
+			role: 'operator',
+			buckets
+		});
+	});
+
+	it('patches bucket access without restating the role', async () => {
+		respondWith({ status: 200, body: { username: 'sam', endedSessions: 1 } });
+
+		const buckets = unrestrictedBuckets();
+		await api.updateUser('sam', { buckets });
+
+		expect(calls[0].init.method).toBe('PATCH');
+		expect(bodyOf(calls[0])).toEqual({ username: 'sam', buckets });
+	});
+
 	it('surfaces the last-administrator refusal as a conflict', async () => {
 		respondWith({ status: 409, body: { error: 'this is the last enabled administrator' } });
 
@@ -354,6 +397,28 @@ describe('users', () => {
 		expect(calls[0].init.method).toBe('DELETE');
 		// The keys go with the account, and the caller is told how many.
 		expect(result.revokedCredentials).toBe(2);
+	});
+});
+
+describe('bucket access', () => {
+	it('falls to the default unless the bucket is named', () => {
+		const grants: BucketGrants = {
+			fallback: 'none',
+			exceptions: { reports: 'write' },
+			unrestricted: false
+		};
+
+		expect(accessTo(grants, 'reports')).toBe('write');
+		// Not named, so the default answers — including for a bucket created
+		// after the grants were written.
+		expect(accessTo(grants, 'payroll')).toBe('none');
+	});
+
+	it('treats a missing grant set as unrestricted', () => {
+		// What a session from a server that predates the field looks like. The
+		// console must not black out every bucket because a field was absent.
+		expect(accessTo(undefined, 'reports')).toBe('write');
+		expect(unrestrictedBuckets().unrestricted).toBe(true);
 	});
 });
 

@@ -108,9 +108,14 @@ requests. The keys survive, so re-enabling restores them. **Deleting** an
 account revokes them instead. The last enabled administrator cannot be deleted,
 disabled or demoted, so the console cannot be locked out of itself.
 
-**Activity** records sign-ins and refusals, user and credential changes, and
-every denied authorisation check. It is a bounded ring of the most recent 5000
-entries kept beside the metadata — a window on what just happened, not an
+**Activity** records sign-ins, sign-outs and refusals (each with the source
+address), user and credential changes, bucket creation, deletion and every
+change to who can reach one, console object uploads and deletes, and every
+denied authorisation check. Access and policy entries name the *resulting*
+visibility, so "who made this public, and when" is answered outright. S3
+signature failures are deliberately excluded — they need no credential, so
+logging them would let anyone who can open a socket fill the ring. It is a
+bounded ring of the most recent 20000 entries kept beside the metadata — a window on what just happened, not an
 archive. Ship the server's stdout somewhere durable if you need one.
 
 ## Run it
@@ -297,7 +302,7 @@ before you rely on it:
   environment, is not attached to any user account, and is administrator-
   equivalent. Treat it as a break-glass credential and issue per-client keys for
   everything else; changing it means restarting with different values.
-- **The audit log is a bounded ring, not an archive.** The most recent 5000
+- **The audit log is a bounded ring, not an archive.** The most recent 20000
   entries, oldest dropped on write, stored beside the object metadata and lost
   with the data directory. Anything that has to be kept belongs wherever the
   server's stdout is collected. Entries are written without an fsync, so a power

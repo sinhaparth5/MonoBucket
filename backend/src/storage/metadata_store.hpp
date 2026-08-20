@@ -12,11 +12,19 @@
 
 namespace monobucket {
 
-/// How many audit entries the store keeps. Roughly a megabyte at the sizes
-/// these records actually reach, which is the budget a log that lives beside
-/// the object metadata deserves — anything more belongs in whatever collects
-/// this server's stdout.
-inline constexpr std::size_t kAuditCapacity = 5000;
+/// How many audit entries the store keeps. A few megabytes at the sizes these
+/// records actually reach, which is the budget a log that lives beside the
+/// object metadata deserves — anything more belongs in whatever collects this
+/// server's stdout.
+///
+/// Raised from 5000 when console object uploads and deletes started being
+/// recorded. Those arrive per click rather than per account change, so the same
+/// number of entries would have covered a much shorter stretch of time — and
+/// the window in *time* is what makes the log answer "what happened last
+/// Tuesday". Deliberately not raised further: S3 object writes are not recorded
+/// at all, so what lands here is still bounded by what a person can do through
+/// a browser.
+inline constexpr std::size_t kAuditCapacity = 20000;
 
 /// Conditions the S3 layer has to distinguish, so they are modelled as codes
 /// rather than as message text. Phase 4 maps each onto an S3 error code.

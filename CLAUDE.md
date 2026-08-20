@@ -203,6 +203,15 @@ is full: a log that could refuse a sign-in, or that an unauthenticated client co
 participant rather than a record. S3 *signature* failures are deliberately not logged — only role
 refusals, which require a valid credential and are therefore bounded by who holds one.
 
+What is recorded is everything that destroys data or changes who can reach it: bucket create and
+delete, access, CORS and policy changes, console object uploads and deletes, plus the session,
+user and credential events. The access and policy entries record the *resulting* visibility read
+back from the record, not the request — the log has to answer "who made this public" without the
+reader re-evaluating a stored policy document. Session events name the peer address and never
+`X-Forwarded-For`, which is written by whoever spoke to us last. `kAuditCapacity` is sized for that
+volume: object events arrive per click, so the window in *time* is what the number is really
+choosing, and S3 object writes are excluded to keep it bounded by what a person can do in a browser.
+
 Consequences that are easy to break: login is posted to `IoExecutor` because the verifier is
 deliberately expensive and the event loop must not pay it; a failed login returns one message for
 every cause *and* runs the verifier against `password::dummyHash()` when the username misses, so

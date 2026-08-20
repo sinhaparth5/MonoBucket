@@ -24,6 +24,9 @@
 		user: 'users',
 		credential: 'key',
 		session: 'shield',
+		bucket: 'bucket',
+		object: 'file',
+		settings: 'settings',
 		authz: 'warning'
 	};
 

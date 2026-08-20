@@ -137,6 +137,31 @@ bool onConsoleListener(const HttpRequestPtr& req, const Config& config) {
     return config.consoleEnabled && req->getLocalAddr().toPort() == config.consolePort;
 }
 
+/// Where a session event came from.
+///
+/// The peer address, never `X-Forwarded-For`: that header is written by
+/// whatever spoke to us last, and a log that recorded an attacker's chosen
+/// value as the source of a sign-in would be worse than one recording no
+/// source at all. Behind a proxy this is the proxy — which is the honest
+/// answer, and the proxy's own log is where the client address lives.
+std::string clientAddress(const HttpRequestPtr& req) {
+    const std::string address = req->getPeerAddr().toIp();
+    return address.empty() ? "unknown" : address;
+}
+
+/// How a bucket's anonymous exposure reads in the log.
+///
+/// "Who made this public, and when" is the first question an incident asks, so
+/// the entry answers it outright rather than leaving a policy document for the
+/// reader to re-evaluate — which would mean reconstructing, months later, what
+/// this build's policy analyser made of it at the time.
+std::string describeVisibility(const BucketRecord& bucket) {
+    if (bucket.publicRead && bucket.publicList) return "anonymous read and list";
+    if (bucket.publicRead) return "anonymous read";
+    if (bucket.publicList) return "anonymous list";
+    return "private";
+}
+
 nlohmann::json toJson(const BucketRecord& bucket, const BucketCapacity& capacity) {
     return {{"name", bucket.name},
             {"createdAt", toIso8601(bucket.createdAt)},
@@ -671,13 +696,17 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             const auto username = body.value("username", std::string{});
             const auto pass     = body.value("password", std::string{});
             const bool secure   = secureCookieFor(config, req);
+            // Captured here rather than inside the offloaded lambda: the
+            // request object is the event loop's, and the verifier runs on an
+            // I/O thread.
+            const std::string source = clientAddress(req);
 
             // Posted rather than run here for two reasons that happen to
             // coincide: it reads the store, and the verifier is deliberately
             // expensive — several hundred milliseconds of PBKDF2 on the event
             // loop would stall every other console request behind one login.
             const bool accepted =
-                io.post([&storage, state, audit, callback, username, pass, secure]() {
+                io.post([&storage, state, audit, callback, username, pass, secure, source]() {
                     try {
                         // A name that could never have been stored is not
                         // looked up — but it is still verified against the
@@ -703,9 +732,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                         if (!user || !passOk || user->disabled) {
                             state->throttle.recordFailure();
                             audit(username, "session.denied", username, false,
-                                  !user      ? "no such user"
-                                  : !passOk  ? "wrong password"
-                                             : "account disabled");
+                                  std::string(!user     ? "no such user"
+                                              : !passOk ? "wrong password"
+                                                        : "account disabled") +
+                                      " (from " + source + ")");
                             // One message for every way this can fail. "No such
                             // user" and "wrong password" are two answers to a
                             // question nobody signing in legitimately has to
@@ -717,7 +747,7 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
                         state->throttle.recordSuccess();
                         audit(user->username, "session.open", user->username, true,
-                              std::string(toString(user->role)));
+                              std::string(toString(user->role)) + " (from " + source + ")");
 
                         auto resp = jsonResponse({{"username", user->username},
                                                   {"role", std::string(toString(user->role))},
@@ -755,7 +785,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             const auto principal = state->sessions.resolve(req->getCookie(kSessionCookie));
             state->sessions.close(req->getCookie(kSessionCookie));
             if (principal) {
-                audit(principal->username, "session.close", principal->username, true, "");
+                audit(principal->username, "session.close", principal->username, true,
+                      "from " + clientAddress(req));
             }
 
             auto resp = jsonResponse({{"signedOut", true}});
@@ -1521,8 +1552,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
 
     app.registerHandler(
         "/_mb/api/buckets",
-        [&storage, guard, guardBucket, offload](const HttpRequestPtr& req,
-                                                ResponseCallback&& callback) {
+        [&storage, guard, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                       ResponseCallback&& callback) {
             // Reading the bucket list and changing it are different
             // permissions, decided by the method for the same reason the
             // credentials route decides it that way. They are also different
@@ -1554,11 +1585,17 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
             }
 
             guardBucket(req, callback, Permission::BucketWrite,
-                        [&storage, req, callback, offload](const Principal&,
-                                                           const std::string& name) {
+                        [&storage, req, callback, offload, audit](const Principal& principal,
+                                                                  const std::string& name) {
                 if (std::string(req->getMethodString()) == "DELETE") {
-                    offload(callback, [&storage, name]() -> HttpResponsePtr {
+                    offload(callback, [&storage, audit, name,
+                                       actor = principal.username]() -> HttpResponsePtr {
+                        // Recorded after the call rather than before it, so the
+                        // log says what happened and not what was attempted —
+                        // deleteBucket refuses a bucket that still holds
+                        // anything, and that refusal throws past this line.
                         storage.deleteBucket(name);
+                        audit(actor, "bucket.delete", name, true, "");
                         return jsonResponse({{"deleted", name}});
                     });
                     return;
@@ -1586,8 +1623,11 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                                        drogon::k400BadRequest));
                     return;
                 }
-                offload(callback, [&storage, name, quotaBytes]() -> HttpResponsePtr {
+                offload(callback, [&storage, audit, name, quotaBytes,
+                                   actor = principal.username]() -> HttpResponsePtr {
                     storage.createBucket(name, quotaBytes);
+                    audit(actor, "bucket.create", name, true,
+                          std::to_string(quotaBytes) + " bytes allocated");
                     const auto record = storage.getBucket(name);
                     return jsonResponse(record ? toJson(*record, storage.bucketCapacity(name))
                                                : nlohmann::json{{"name", name}},
@@ -1598,11 +1638,11 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
         {drogon::Get, drogon::Post, drogon::Delete});
     app.registerHandler(
         "/_mb/api/buckets/access",
-        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
-                                                 ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                       ResponseCallback&& callback) {
             guardBucket(req, callback, Permission::BucketWrite,
-                        [&storage, &cache, req, callback, offload](const Principal&,
-                                                                   const std::string& name) {
+                        [&storage, &cache, req, callback, offload,
+                         audit](const Principal& principal, const std::string& name) {
                 const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
                 if (body.is_discarded() || !body.is_object()) {
                     callback(errorJson("expected a JSON object", drogon::k400BadRequest));
@@ -1633,8 +1673,8 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     }
                 }
 
-                offload(callback, [&storage, &cache, name, publicRead,
-                                   durability]() -> HttpResponsePtr {
+                offload(callback, [&storage, &cache, audit, name, publicRead, durability,
+                                   actor = principal.username]() -> HttpResponsePtr {
                     storage.setBucketPublicRead(name, publicRead);
                     if (durability) storage.setBucketDurability(name, *durability);
 
@@ -1647,6 +1687,10 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     if (!record) {
                         return errorJson("no such bucket", drogon::k404NotFound);
                     }
+                    // The resulting exposure, read back from the record rather
+                    // than inferred from what was asked for: what the bucket is
+                    // now is the thing the log is asked about later.
+                    audit(actor, "bucket.access", name, true, describeVisibility(*record));
                     return jsonResponse(toJson(*record, storage.bucketCapacity(name)));
                 });
             });
@@ -1731,13 +1775,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // implementation of it.
     app.registerHandler(
         "/_mb/api/buckets/cors",
-        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
-                                                 ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                       ResponseCallback&& callback) {
             const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
                                                                       : Permission::BucketWrite;
             guardBucket(req, callback, needed,
-                        [&storage, &cache, req, callback, offload](const Principal&,
-                                                                   const std::string& name) {
+                        [&storage, &cache, req, callback, offload,
+                         audit](const Principal& principal, const std::string& name) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
@@ -1773,9 +1817,18 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     }
                 }
 
-                offload(callback,
-                        [&storage, &cache, name, rules = std::move(rules)]() -> HttpResponsePtr {
+                offload(callback, [&storage, &cache, audit, name, rules = std::move(rules),
+                                   actor = principal.username]() -> HttpResponsePtr {
                     storage.setBucketCors(name, rules);
+                    // CORS decides which origins a browser may read this bucket
+                    // from, so a rule count is the shape of the answer: zero is
+                    // "turned off", and any other number is a change worth
+                    // seeing beside the access events.
+                    audit(actor, "bucket.cors", name, true,
+                          rules.empty()
+                              ? std::string("disabled")
+                              : std::to_string(rules.size()) +
+                                    (rules.size() == 1 ? " rule" : " rules"));
 
                     // The S3 read path caches the bucket record, and a stale
                     // entry would keep answering preflights from the rules the
@@ -1795,13 +1848,13 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // second front door onto one feature, never a second implementation.
     app.registerHandler(
         "/_mb/api/buckets/policy",
-        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
-                                                 ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                       ResponseCallback&& callback) {
             const Permission needed = req->method() == drogon::Get ? Permission::BucketRead
                                                                       : Permission::BucketWrite;
             guardBucket(req, callback, needed,
-                        [&storage, &cache, req, callback, offload](const Principal&,
-                                                                   const std::string& name) {
+                        [&storage, &cache, req, callback, offload,
+                         audit](const Principal& principal, const std::string& name) {
                 const std::string method = std::string(req->getMethodString());
 
                 if (method == "GET") {
@@ -1844,13 +1897,20 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     document.empty() ? s3::AnonymousGrants{}
                                      : s3::analyseBucketPolicy(document, name).grants;
 
-                offload(callback, [&storage, &cache, name, document, grants]()
-                                      -> HttpResponsePtr {
+                offload(callback, [&storage, &cache, audit, name, document, grants,
+                                   actor = principal.username]() -> HttpResponsePtr {
                     storage.setBucketPolicy(name, document, grants.readObjects, grants.listBucket);
                     cache.del(s3::bucketCacheKey(name));
 
                     const auto record = storage.getBucket(name);
                     if (!record) return errorJson("no such bucket", drogon::k404NotFound);
+                    // What the bucket is now, not what the document says. A
+                    // policy is text; the flags are what the S3 path actually
+                    // enforces, and they are what an incident is about.
+                    audit(actor, "bucket.policy", name, true,
+                          (document.empty() ? std::string("removed, now ")
+                                            : std::string("set, now ")) +
+                              describeVisibility(*record));
                     return jsonResponse({{"bucket", name},
                                          {"policy", record->policy},
                                          {"publicRead", record->publicRead},
@@ -1971,27 +2031,34 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // exactly the keys a file browser needs to show.
     app.registerHandler(
         "/_mb/api/objects",
-        [&storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
-                                                 ResponseCallback&& callback) {
+        [&storage, &cache, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                       ResponseCallback&& callback) {
             // A listing reads; the DELETE this route also serves does not.
             const Permission needed = req->method() == drogon::Get ? Permission::ObjectRead
                                                                       : Permission::ObjectWrite;
             guardBucket(req, callback, needed,
-                        [&storage, &cache, req, callback, offload](const Principal&,
-                                                                   const std::string& bucket) {
+                        [&storage, &cache, req, callback, offload,
+                         audit](const Principal& principal, const std::string& bucket) {
                 if (std::string(req->getMethodString()) == "DELETE") {
                     const std::string key = req->getParameter("key");
                     if (key.empty()) {
                         callback(errorJson("a key is required", drogon::k400BadRequest));
                         return;
                     }
-                    offload(callback, [&storage, &cache, bucket, key]() -> HttpResponsePtr {
+                    offload(callback, [&storage, &cache, audit, bucket, key,
+                                       actor = principal.username]() -> HttpResponsePtr {
                         if (!storage.deleteObject(bucket, key)) {
                             return errorJson("no such key", drogon::k404NotFound);
                         }
                         // Without this the S3 read path answers HEAD from the
                         // cached metadata of an object that is no longer there.
                         cache.del(s3::objectCacheKey(bucket, key));
+                        // The bucket is the target and the key is the detail:
+                        // the log is filtered by target, and filtering by
+                        // bucket is what somebody asking "what happened in
+                        // here" wants. Only the console's delete is recorded —
+                        // the S3 path writes nothing, deliberately.
+                        audit(actor, "object.delete", bucket, true, key);
                         return jsonResponse({{"deleted", key}});
                     });
                     return;
@@ -2055,11 +2122,11 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
     // session, not an S3 secret.
     app.registerHandler(
         "/_mb/api/upload",
-        [&config, &storage, &cache, guardBucket, offload](const HttpRequestPtr& req,
-                                                          ResponseCallback&& callback) {
+        [&config, &storage, &cache, guardBucket, offload, audit](const HttpRequestPtr& req,
+                                                                 ResponseCallback&& callback) {
             guardBucket(req, callback, Permission::ObjectWrite,
-                        [&config, &storage, &cache, req, callback, offload](
-                            const Principal&, const std::string& bucket) {
+                        [&config, &storage, &cache, req, callback, offload, audit](
+                            const Principal& principal, const std::string& bucket) {
                 const std::string key = req->getParameter("key");
                 if (key.empty()) {
                     callback(errorJson("a key is required", drogon::k400BadRequest));
@@ -2105,8 +2172,9 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     return;
                 }
 
-                offload(callback, [&config, &storage, &cache, req, bucket, key, contentType,
-                                   content]() -> HttpResponsePtr {
+                offload(callback, [&config, &storage, &cache, audit, req, bucket, key,
+                                   contentType, content,
+                                   actor = principal.username]() -> HttpResponsePtr {
                     if (!storage.getBucket(bucket)) {
                         return errorJson("no such bucket", drogon::k404NotFound);
                     }
@@ -2138,6 +2206,9 @@ void registerConsoleApi(const Config& config, StorageEngine& storage, IoExecutor
                     // After the write, never before: a failed upload must not
                     // drop a cached entry that is still the current one.
                     cache.del(s3::objectCacheKey(bucket, key));
+
+                    audit(actor, "object.upload", bucket, true,
+                          key + " (" + std::to_string(record.size) + " bytes)");
 
                     return jsonResponse(toJson(record), drogon::k201Created);
                 });

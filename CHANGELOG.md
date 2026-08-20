@@ -98,7 +98,39 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **The audit log now records what destroys data and what changes who can reach
+  it.** New events: `bucket.create`, `bucket.delete`, `bucket.access`,
+  `bucket.cors`, `bucket.policy`, `object.upload` and `object.delete`. Until now
+  deleting a bucket — and everything in it — left no trace, and neither did
+  making one anonymously readable. "Who made this bucket public, and when" is
+  the first question an incident asks, and it was precisely the question this
+  log could not answer.
+- The `bucket.access` and `bucket.policy` entries record the **resulting**
+  visibility — `private`, `anonymous read`, `anonymous list`, or both — read
+  back from the bucket record rather than inferred from what was requested. The
+  reader gets the answer outright instead of having to re-evaluate a stored
+  policy document months later.
+- Session events carry the **source address**. `session.open` and
+  `session.close` already existed; they and `session.denied` now name where the
+  request came from, which is the field that makes a sign-in record useful. It
+  is the peer address and never `X-Forwarded-For` — a log that recorded an
+  attacker's chosen value as the source of a sign-in would be worse than one
+  recording no source at all. Behind a proxy this is the proxy.
+
+### Changed
+
+- `kAuditCapacity` raised from 5000 to 20000 entries. Console object uploads and
+  deletes arrive per click rather than per account change, so the old figure
+  would have covered a much shorter stretch of *time* — and time is what makes
+  the log answer "what happened last Tuesday". Deliberately not raised further:
+  S3 object writes are still not recorded, so what lands here stays bounded by
+  what a person can do through a browser.
+- S3 *signature* failures are still not logged, and the write discipline is
+  unchanged — no fsync, and an entry is dropped rather than blocking when the
+  I/O queue is full. A log that could refuse a sign-in would be a participant
+  rather than a record.
 
 ---
 

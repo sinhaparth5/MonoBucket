@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.08.14] — 2026-08-20
+
 ### Changed
 
 - **Access keys are identified by name, not by id.** The credentials table led

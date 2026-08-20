@@ -230,6 +230,68 @@ The root S3 pair is untouched and still administrator-equivalent. Downgrading to
 record this release deleted; set `MONOBUCKET_ADMIN_PASSWORD` on that start to
 re-establish one.
 
+## Backup and restore
+
+A backup is a **checkpoint**: a consistent, startable copy of the whole data
+directory, taken while the server keeps serving. Payloads are hard-linked, so on
+the same filesystem it duplicates no bytes and finishes in about the time it
+takes to flush the write-ahead log.
+
+**From the console** (Settings → Backup), which is the only way to back up a
+*running* instance — one process may hold the metadata store at a time, so the
+server is the only thing that can copy its own. It is off until you say where
+backups may go:
+
+```
+MONOBUCKET_BACKUP_DIR=/backups
+```
+
+That is a directory, and the name you type in the console is created inside it.
+Names may not contain a path separator: the destination arrives over HTTP, and a
+console session is not a shell on the host. The action needs the `backup:write`
+permission, which only an administrator holds — a checkpoint copies every S3
+secret in the instance.
+
+**From the shell**, against a **stopped** server:
+
+```
+monobucket --checkpoint /backups/2026-08-20
+```
+
+**Verify one before you rely on it.** A backup nobody has checked is a belief,
+not a backup:
+
+```
+MONOBUCKET_DATA_DIR=/backups/2026-08-20 monobucket --fsck --deep
+```
+
+**Restore** is: stop the server, point `MONOBUCKET_DATA_DIR` at the checkpoint
+(or copy it back over the data directory), start. There is no import step,
+because a checkpoint is a data directory.
+
+Three things worth knowing:
+
+- **Nothing is scheduled.** MonoBucket writes a copy when somebody asks and
+  never on a timer. Retention, rotation and off-site copies are what a backup
+  tool is for, and half of one built into the server would be the half nobody
+  tests. Drive it from cron, a systemd timer, or whatever already runs your
+  backups.
+- **Writes during a checkpoint are not blocked**, and are simply not in the
+  copy. A checkpoint is a coherent instant, not a pause. Reclamation *is* held
+  off for the duration, so a delete landing mid-copy cannot strip a payload the
+  snapshot still names; the deferred payloads are collected by the next pass.
+- **A checkpoint taken under load may carry a few stray payloads.** An upload
+  whose bytes reached the tree before the payload pass but whose metadata was
+  committed after the snapshot leaves a file the copy references from nowhere.
+  `--fsck` reports those as `unreferenced-payload`, so a busy instance's backup
+  exits 2 rather than "clean" while a quiet one exits 0. That is the safe
+  direction and the only one on offer: the alternative to an extra file is a
+  missing one. What is never present is a payload the copy *needs* and lacks.
+- **A hard link is not an off-site copy.** A checkpoint on the same filesystem
+  shares inodes with the live store and dies with the disk. It protects against
+  a bad delete, a bad migration, and a bad afternoon — not against hardware.
+  Copy it somewhere else afterwards.
+
 ## Known limitations
 
 Every project has them; these are MonoBucket's, and they are worth reading
@@ -246,6 +308,10 @@ before you rely on it:
   each part is bounded by the client's part size, which is why the AWS CLI and
   rclone moving large objects stay flat. Fixing it means adopting Drogon's
   request-streaming API.
+- **A backup is a point-in-time copy, taken on request.** There is no continuous
+  replication, no incremental or differential mode, and no built-in schedule or
+  retention. Each checkpoint is a full, independent copy of the store — cheap in
+  bytes when it hard-links, but a separate set of directory entries every time.
 - **`CopyObject` is not implemented** and answers 501 rather than silently
   storing the header's value as an object.
 - **No `io_uring` backend.** Blocking I/O runs on a bounded thread pool. Under

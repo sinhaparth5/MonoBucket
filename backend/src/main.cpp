@@ -28,19 +28,32 @@ void printUsage() {
         << "MonoBucket " << monobucket::version::kVersion << "\n"
         << "Single-binary S3-compatible object storage.\n\n"
         << "Usage: monobucket [--version | --help | --print-config]\n"
-        << "       monobucket --fsck [--deep]\n\n"
+        << "       monobucket --fsck [--deep]\n"
+        << "       monobucket --checkpoint <dir>\n\n"
         << "  --fsck    check the metadata against the payload tree and report\n"
         << "            every disagreement. Reports; never repairs. Exits 0 when\n"
         << "            clean, 2 when it found something.\n"
         << "  --deep    additionally re-hash every payload and compare it with\n"
         << "            the digest recorded when it was written. Reads the whole\n"
-        << "            store.\n\n"
+        << "            store.\n"
+        << "  --checkpoint <dir>\n"
+        << "            write a consistent, startable copy of the store into\n"
+        << "            <dir>, which must not exist or must be empty. Payloads\n"
+        << "            are hard-linked, so on one filesystem this duplicates no\n"
+        << "            bytes. Requires a STOPPED server -- one process may open\n"
+        << "            the metadata store at a time. To back up a running one,\n"
+        << "            use the console: it is the process holding the store.\n"
+        << "            Verify a copy with MONOBUCKET_DATA_DIR=<dir> monobucket\n"
+        << "            --fsck --deep, and restore by stopping the server and\n"
+        << "            pointing MONOBUCKET_DATA_DIR at it.\n\n"
         << "MonoBucket is configured entirely through the environment:\n\n"
         << "  MONOBUCKET_HOST                    bind address           (0.0.0.0)\n"
         << "  MONOBUCKET_PORT                    S3 API port            (9000)\n"
         << "  MONOBUCKET_CONSOLE_PORT            dashboard port         (9001)\n"
         << "  MONOBUCKET_CONSOLE_ENABLED         serve the dashboard    (true)\n"
         << "  MONOBUCKET_DATA_DIR                storage root           (/data)\n"
+        << "  MONOBUCKET_BACKUP_DIR              where the console may write backups\n"
+        << "                                     (unset disables that action)\n"
         << "  MONOBUCKET_REGION                  reported S3 region     (us-east-1)\n"
         << "  MONOBUCKET_S3_PUBLIC_URL           public S3 origin, e.g. https://s3.example.com\n"
         << "  MONOBUCKET_S3_DOMAIN               virtual-host domain    (path style only)\n"
@@ -126,6 +139,41 @@ int runFsck(const monobucket::Config& config, bool deep) {
     }
 }
 
+/// Writes a checkpoint of a stopped store.
+///
+/// Stopped, and there is no way around it: RocksDB allows one process to open a
+/// directory at a time, so a second binary cannot checkpoint a store the server
+/// is holding. Backing up a *running* instance is the console's job, because
+/// the running process is the only thing that can do it — which is why this
+/// command and that endpoint exist side by side rather than one wrapping the
+/// other.
+int runCheckpoint(const monobucket::Config& config, const std::string& destination) {
+    try {
+        monobucket::StorageEngine storage(monobucket::StorageEngine::optionsFrom(config));
+        const auto                report = storage.checkpoint(destination);
+
+        std::cout << "checkpoint written to " << report.destination.string() << '\n'
+                  << "  " << report.payloadsLinked << " payloads hard-linked\n";
+        if (report.payloadsCopied > 0) {
+            std::cout << "  " << report.payloadsCopied << " payloads copied ("
+                      << report.bytesCopied / (1024 * 1024)
+                      << " MiB) -- the destination is on another filesystem, so this "
+                         "duplicated the bytes\n";
+        }
+        std::cout << "  took " << report.elapsedMs << " ms\n\n"
+                  << "Verify it before relying on it:\n"
+                  << "  MONOBUCKET_DATA_DIR=" << report.destination.string()
+                  << " monobucket --fsck --deep\n";
+        return 0;
+    } catch (const monobucket::StorageError& ex) {
+        std::cerr << "checkpoint failed: " << ex.what() << '\n';
+        return kExitFailure;
+    } catch (const std::exception& ex) {
+        std::cerr << "checkpoint failed: " << ex.what() << '\n';
+        return kExitFailure;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -167,6 +215,14 @@ int main(int argc, char** argv) {
     const bool fsckRequested = std::find(args.begin(), args.end(), "--fsck") != args.end();
     if (fsckRequested) {
         return runFsck(config, std::find(args.begin(), args.end(), "--deep") != args.end());
+    }
+
+    if (const auto flag = std::find(args.begin(), args.end(), "--checkpoint"); flag != args.end()) {
+        if (flag + 1 == args.end()) {
+            std::cerr << "--checkpoint needs a destination directory\n";
+            return kExitConfigError;
+        }
+        return runCheckpoint(config, *(flag + 1));
     }
 
     monobucket::log::info("MonoBucket ", monobucket::version::kVersion, " starting");

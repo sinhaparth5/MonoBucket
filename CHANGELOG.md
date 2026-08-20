@@ -98,7 +98,55 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Consistent backups of a running instance.** `monobucket --checkpoint <dir>`
+  and a console action under Settings → Backup both write a startable copy of
+  the whole data directory without stopping anything. The metadata goes through
+  RocksDB's checkpoint API and the payload tree is hard-linked, so on the same
+  filesystem a backup duplicates no bytes and finishes in about the time it
+  takes to flush the write-ahead log. Until now the only correct procedure was
+  "stop the server, copy the directory, start it again" — copying it live races
+  the metadata against the payloads and produces a store `--fsck` correctly
+  calls corrupt.
+- Restore is: stop, point `MONOBUCKET_DATA_DIR` at the checkpoint, start. There
+  is no import step, because a checkpoint *is* a data directory. Verify one with
+  `MONOBUCKET_DATA_DIR=<dir> monobucket --fsck --deep` before relying on it.
+- `MONOBUCKET_BACKUP_DIR` says where the console's backup action may write.
+  Unset — the default — disables that action; the CLI is unaffected. It is a
+  directory rather than a free path because the destination arrives over HTTP,
+  and the name the administrator types may not contain a path separator: a
+  console session is not a shell on the host.
+- `Permission::BackupWrite` (`backup:write`), held by administrators only. Its
+  own permission rather than folded into `settings:write`, because a checkpoint
+  copies *everything* — including the S3 secrets, which are stored recoverable
+  because SigV4 has no verifier that avoids it. `backup.create` is recorded in
+  the audit log.
+
+### Changed
+
+- Reclamation is held off for the duration of a checkpoint. The copy snapshots
+  the metadata first and links the payloads second, so a delete landing between
+  the two would otherwise unlink a payload the snapshot still names — a backup
+  that restores to a corrupt store. Nothing is lost by deferring: every payload
+  is in the reclamation log before it is written, so whatever the window skips
+  is collected by the next pass. Writes are *not* blocked and are simply absent
+  from the copy.
+
+### Notes
+
+- Backups are never automatic. MonoBucket writes one when somebody asks and
+  never on a timer — retention, rotation and off-site copies belong to a backup
+  tool, and half of one built into the server would be the half nobody tests.
+- A checkpoint of a quiet store is clean under `--fsck --deep`. One taken while
+  uploads are in flight can carry a handful of unreferenced payloads — bytes
+  that reached the tree before the payload pass, with metadata committed after
+  the snapshot — which `--fsck` reports as `unreferenced-payload`. The safe
+  direction, and the only one available: the alternative to an extra file is a
+  missing one.
+- A checkpoint on the same filesystem shares inodes with the live store and dies
+  with the disk. It protects against a bad delete, not against hardware. Copy it
+  somewhere else.
 
 ---
 

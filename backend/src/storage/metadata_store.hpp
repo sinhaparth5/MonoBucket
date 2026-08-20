@@ -381,6 +381,16 @@ public:
     /// Flushes in-memory state so a subsequent open sees it. Called on shutdown.
     virtual void flush() = 0;
 
+    /// Writes a consistent point-in-time copy of the metadata into
+    /// `destination`, which must not already exist.
+    ///
+    /// The engine does this with hard links wherever the destination shares a
+    /// filesystem with the store, so a checkpoint duplicates no bytes and
+    /// returns in about the time it takes to flush the write-ahead log. Writes
+    /// arriving after it are simply not in the copy — the point is a coherent
+    /// instant, not a pause.
+    virtual void checkpointTo(const std::string& destination) = 0;
+
     virtual std::string_view engineName() const noexcept = 0;
 };
 

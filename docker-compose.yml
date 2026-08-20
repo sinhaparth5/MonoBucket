@@ -17,6 +17,12 @@ services:
       - monobucket_admin_password
     environment:
       MONOBUCKET_DATA_DIR: /data
+      # Where the console's backup action may write. Commented out because the
+      # action is off until a directory exists to hold its output. Mount a
+      # volume at /backups and uncomment to switch it on; keeping it on the
+      # same filesystem as /data is what makes a backup free rather than a full
+      # copy, since payloads are hard-linked.
+      # MONOBUCKET_BACKUP_DIR: /backups
       # Who signs in to the dashboard. There is no default password: create
       # secrets/admin_password.txt (>= 12 characters) before the first start,
       # or the container refuses to come up and says so.

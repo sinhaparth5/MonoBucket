@@ -96,7 +96,8 @@ export type PermissionName =
 	| 'credential:write'
 	| 'user:read'
 	| 'user:write'
-	| 'audit:read';
+	| 'audit:read'
+	| 'backup:write';
 
 /// What a user may do in one bucket. A ceiling on the role, never a grant: a
 /// readonly account with `write` here still cannot write.
@@ -153,6 +154,21 @@ export interface Session {
 	/// holding a figure that has moved.
 	maxUploadBytes: number;
 	version: string;
+}
+
+/// What one backup cost, as the server reports it.
+export interface Backup {
+	name: string;
+	destination: string;
+	payloadsLinked: number;
+	/// Non-zero only when the destination is on another filesystem, where the
+	/// payload bytes had to be duplicated rather than hard-linked.
+	payloadsCopied: number;
+	bytesCopied: number;
+	takenAt: string;
+	takenAtMs: number;
+	elapsedMs: number;
+	instant: boolean;
 }
 
 /// The upload limit in force, and the most it may be raised to.
@@ -533,6 +549,12 @@ export const api = {
 		}),
 
 	config: () => request<ServerConfig>('/config'),
+
+	/// Writes a backup, now, because somebody asked. There is no schedule and
+	/// no retention: the server takes a consistent copy on request and what
+	/// happens to it afterwards belongs to a backup tool.
+	createBackup: (name: string) =>
+		request<Backup>('/backup', { method: 'POST', body: JSON.stringify({ name }) }),
 
 	uploadLimit: () => request<UploadLimit>('/upload-limit'),
 

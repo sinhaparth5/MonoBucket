@@ -98,7 +98,11 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- The console's production dependencies are reported to Patchwatch from CI
+  (`.github/workflows/patchwatch.yml`, `frontend/scripts/patchwatch.mjs`) on
+  every lockfile change on `master` and daily.
 
 ---
 

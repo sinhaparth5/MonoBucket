@@ -7,3 +7,6 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Vendored verbatim from Patchwatch; kept byte-identical so updates are a straight copy
+/scripts/patchwatch.mjs

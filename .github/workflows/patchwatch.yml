@@ -1,0 +1,28 @@
+name: Patchwatch
+
+# The console is a static SPA compiled into the binary, so no Node process runs
+# in production to send heartbeats. CI reports the lockfile instead: on every
+# master push, and daily so Patchwatch doesn't flag the service stale (24 h)
+# between releases.
+on:
+  push:
+    branches: [master]
+    paths: [frontend/pnpm-lock.yaml, .github/workflows/patchwatch.yml]
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Reads the lockfile only; nothing needs installing.
+      - run: node scripts/patchwatch.mjs
+        working-directory: frontend
+        env:
+          PATCHWATCH_URL: ${{ secrets.PATCHWATCH_URL }}
+          PATCHWATCH_TOKEN: ${{ secrets.PATCHWATCH_TOKEN }}

@@ -104,6 +104,11 @@ them, rather than at the foot of the file:
   (`.github/workflows/patchwatch.yml`, `frontend/scripts/patchwatch.mjs`) on
   every lockfile change on `master` and daily.
 
+### Changed
+
+- The dashboard build stage and CI now use Node 24 LTS (`node:24-alpine`), up
+  from Node 22. The floating tag picks up each 24.x security release on rebuild.
+
 ---
 
 ## [2026.08.14] — 2026-08-20

@@ -44,5 +44,10 @@
 		"layerchart": "^2.2.0",
 		"source-map-js": "1.2.2",
 		"tailwindcss": "^4.3.3"
+	},
+	"pnpm": {
+		"overrides": {
+			"cookie": "^0.7.0"
+		}
 	}
 }

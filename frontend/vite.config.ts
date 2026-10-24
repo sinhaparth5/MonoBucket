@@ -7,6 +7,10 @@ export default defineConfig({
 	plugins: [
 		tailwindcss(),
 		sveltekit({
+			// Kit 3.1 dropped the built-in `$lib`; this keeps it rather than
+			// rewriting every import to `#lib`, whose extensionless subpaths
+			// TypeScript's `imports` resolution cannot follow.
+			alias: { $lib: 'src/lib' },
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
 				runes: ({ filename }) =>

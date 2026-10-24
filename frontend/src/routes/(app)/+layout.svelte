@@ -29,35 +29,35 @@
 			needs: 'settings:read'
 		},
 		{
-			href: '/buckets',
+			href: '/(app)/buckets',
 			label: 'Buckets',
 			icon: 'bucket',
 			hint: 'Browse, upload and share objects',
 			needs: 'bucket:read'
 		},
 		{
-			href: '/credentials',
+			href: '/(app)/credentials',
 			label: 'Access keys',
 			icon: 'key',
 			hint: 'Issue, rotate and revoke S3 credentials',
 			needs: 'credential:read'
 		},
 		{
-			href: '/users',
+			href: '/(app)/users',
 			label: 'Users',
 			icon: 'users',
 			hint: 'Accounts, roles and password resets',
 			needs: 'user:read'
 		},
 		{
-			href: '/activity',
+			href: '/(app)/activity',
 			label: 'Activity',
 			icon: 'activity',
 			hint: 'Sign-ins, changes and refused requests',
 			needs: 'audit:read'
 		},
 		{
-			href: '/settings',
+			href: '/(app)/settings',
 			label: 'Settings',
 			icon: 'settings',
 			hint: 'The resolved configuration',
@@ -73,15 +73,12 @@
 
 	const visibleNav = $derived(NAV.filter((item) => can(data.session, item.needs)));
 
-	const currentNav = $derived(
-		NAV.find((item) =>
-			item.href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(item.href)
-		) ?? NAV[0]
-	);
+	const currentNav = $derived(NAV.find((item) => isActive(item.href)) ?? NAV[0]);
 
-	// `/` would otherwise light up on every route.
+	// Matched on the route id, which the hrefs are: Kit 3.1 types `resolve()`
+	// against route ids, groups included. `/` would otherwise light up everywhere.
 	function isActive(href: string): boolean {
-		return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
+		return href === '/' ? page.route.id === '/(app)' : !!page.route.id?.startsWith(href);
 	}
 
 	const THEME_CHOICES: { value: ThemeChoice; label: string; icon: IconName }[] = [

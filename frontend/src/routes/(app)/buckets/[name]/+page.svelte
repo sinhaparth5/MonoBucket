@@ -241,7 +241,7 @@
 	// Walking a folder stays on this route and only rewrites the query, so the
 	// back button retraces the path a person actually took.
 	function navigate(nextPrefix: string) {
-		const target = new URL(page.url);
+		const target = new URL(page.url.href);
 		if (nextPrefix) target.searchParams.set('prefix', nextPrefix);
 		else target.searchParams.delete('prefix');
 		// resolve() maps a route id to a path and has no query-string form, so it
@@ -595,7 +595,7 @@
 		<div class="flex flex-col gap-4 p-5 sm:p-6">
 			<div class="breadcrumbs py-0 text-sm">
 				<ul>
-					<li><a class="link-hover" href={resolve('/buckets')}>Buckets</a></li>
+					<li><a class="link-hover" href={resolve('/(app)/buckets')}>Buckets</a></li>
 					<li>
 						<button class="link link-hover" onclick={() => navigate('')}>{bucket}</button>
 					</li>

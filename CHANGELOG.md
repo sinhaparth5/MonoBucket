@@ -108,6 +108,10 @@ them, rather than at the foot of the file:
 
 - The dashboard build stage and CI now use Node 24.22.1 LTS
   (`node:24.22.1-alpine`), up from Node 22.
+- The console builds again under SvelteKit 3.1: TypeScript is held at 6
+  (TypeScript 7's native API has no `ts.sys`, which `svelte-kit sync` calls),
+  `$lib` is kept as an explicit alias, and `resolve()` calls name route ids
+  including the `(app)` group.
 
 ---
 

@@ -311,7 +311,10 @@
 							in:fade={{ duration: motionDuration(150) }}
 						>
 							<td>
-								<a class="group flex items-center gap-3" href={resolve(`/buckets/${bucket.name}`)}>
+								<a
+									class="group flex items-center gap-3"
+									href={resolve('/(app)/buckets/[name]', { name: bucket.name })}
+								>
 									<span
 										class="grid size-8 shrink-0 place-items-center rounded-lg {swatch(bucket.name)}"
 									>

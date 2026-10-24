@@ -106,8 +106,8 @@ them, rather than at the foot of the file:
 
 ### Changed
 
-- The dashboard build stage and CI now use Node 24 LTS (`node:24-alpine`), up
-  from Node 22. The floating tag picks up each 24.x security release on rebuild.
+- The dashboard build stage and CI now use Node 24.22.1 LTS
+  (`node:24.22.1-alpine`), up from Node 22.
 
 ---
 

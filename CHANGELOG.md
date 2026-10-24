@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.10.1] — 2026-10-24
+
 ### Fixed
 
 - The console builds from a clean checkout under SvelteKit 3.1. 2026.10.0 only

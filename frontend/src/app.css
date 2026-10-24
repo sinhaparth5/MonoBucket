@@ -366,7 +366,7 @@
 	}
 }
 
-/* Svelte transitions opt out through `$lib/motion`; this is the matching
+/* Svelte transitions opt out through `#lib/motion`; this is the matching
    safety net for DaisyUI and CSS animations. Loading still resolves normally,
    but decorative travel and repeated motion disappear. */
 @media (prefers-reduced-motion: reduce) {

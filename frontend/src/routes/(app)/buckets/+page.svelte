@@ -3,7 +3,7 @@
 	import { resolve } from '$app/paths';
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type Bucket, type Capacity } from '$lib/api';
+	import { api, ApiError, type Bucket, type Capacity } from '#lib/api.ts';
 	import {
 		fillFraction,
 		formatBytes,
@@ -12,10 +12,10 @@
 		plural,
 		splitAllocation,
 		type AllocationUnit
-	} from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import AllocationField from '$lib/components/AllocationField.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+	} from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import AllocationField from '#lib/components/AllocationField.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let buckets = $state<Bucket[] | null>(null);
 	let capacity = $state<Capacity | null>(null);

@@ -425,7 +425,7 @@ export interface PresignQuery {
 	bucket: string;
 	key: string;
 	/// The authority the recipient's browser will send. Signed, so the console
-	/// supplies the name it itself reached the server by — see $lib/s3url.
+	/// supplies the name it itself reached the server by — see #lib/s3url.ts.
 	host: string;
 	secure: boolean;
 	expiresSeconds: number;

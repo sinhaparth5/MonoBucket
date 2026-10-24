@@ -4,8 +4,8 @@
 	// the empty state are decided once.
 	import { Area, Axis, Chart, Highlight, Svg, Tooltip } from 'layerchart';
 	import { fade } from 'svelte/transition';
-	import { formatClock } from '$lib/format';
-	import { motionDuration } from '$lib/motion';
+	import { formatClock } from '#lib/format.ts';
+	import { motionDuration } from '#lib/motion.ts';
 	import Icon, { type IconName } from './Icon.svelte';
 
 	interface Point {

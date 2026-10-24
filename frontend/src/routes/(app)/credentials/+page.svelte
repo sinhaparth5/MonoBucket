@@ -12,10 +12,10 @@
 	import { resolve } from '$app/paths';
 	import { flip } from 'svelte/animate';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, can, type Credential, type IssuedCredential } from '$lib/api';
-	import { formatTimestamp, plural } from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import Icon from '$lib/components/Icon.svelte';
+	import { api, ApiError, can, type Credential, type IssuedCredential } from '#lib/api.ts';
+	import { formatTimestamp, plural } from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let { data } = $props();
 

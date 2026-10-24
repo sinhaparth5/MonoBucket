@@ -20,11 +20,11 @@
 		type RoleInfo,
 		type RoleName,
 		type User
-	} from '$lib/api';
-	import { formatTimestamp, plural } from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import BucketAccessFields from '$lib/components/BucketAccessFields.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+	} from '#lib/api.ts';
+	import { formatTimestamp, plural } from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import BucketAccessFields from '#lib/components/BucketAccessFields.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let { data } = $props();
 

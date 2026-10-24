@@ -18,7 +18,7 @@
 		type ServerConfig,
 		type Setting,
 		type UploadLimit
-	} from '$lib/api';
+	} from '#lib/api.ts';
 	import {
 		ALLOCATION_UNITS,
 		allocationBytes,
@@ -27,9 +27,9 @@
 		plural,
 		splitAllocation,
 		type AllocationUnit
-	} from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import Icon, { type IconName } from '$lib/components/Icon.svelte';
+	} from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 
 	let { data } = $props();
 

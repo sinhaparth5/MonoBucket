@@ -5,7 +5,7 @@
 	//
 	// Presentation only. The server re-decides every request, and a level this
 	// picker never offers is still refused if a hand-written request sends it.
-	import type { BucketAccessInfo, BucketAccessName, BucketGrants } from '$lib/api';
+	import type { BucketAccessInfo, BucketAccessName, BucketGrants } from '#lib/api.ts';
 
 	let {
 		grants = $bindable(),

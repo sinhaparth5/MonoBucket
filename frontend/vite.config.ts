@@ -7,10 +7,6 @@ export default defineConfig({
 	plugins: [
 		tailwindcss(),
 		sveltekit({
-			// Kit 3.1 dropped the built-in `$lib`; this keeps it rather than
-			// rewriting every import to `#lib`, whose extensionless subpaths
-			// TypeScript's `imports` resolution cannot follow.
-			alias: { $lib: 'src/lib' },
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
 				runes: ({ filename }) =>
@@ -36,7 +32,7 @@ export default defineConfig({
 			'/_mb': { target: 'http://127.0.0.1:9001', changeOrigin: false }
 		}
 	},
-	// A node-environment suite over `$lib/api.ts` and nothing else. The console
+	// A node-environment suite over `#lib/api.ts` and nothing else. The console
 	// is thin — its logic is which endpoint gets called, with what, and what it
 	// does with the answer — and that is all reachable with a stubbed `fetch`.
 	// A browser runner would add Playwright to CI to assert the same things

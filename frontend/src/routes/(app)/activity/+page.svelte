@@ -6,10 +6,10 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type AuditEntry } from '$lib/api';
-	import { formatTimestamp, plural } from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import Icon, { type IconName } from '$lib/components/Icon.svelte';
+	import { api, ApiError, type AuditEntry } from '#lib/api.ts';
+	import { formatTimestamp, plural } from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 
 	let entries = $state<AuditEntry[] | null>(null);
 	let capacity = $state(0);

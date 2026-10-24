@@ -98,7 +98,13 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The console builds from a clean checkout under SvelteKit 3.1. 2026.10.0 only
+  built where a stale `.svelte-kit/tsconfig.json` survived: `tsconfig.json` now
+  extends `$app/tsconfig`, `$lib` is replaced by a `#lib` subpath import
+  (`package.json` `imports`) instead of the deprecated `alias`, and the
+  overview links resolve the `/(app)` route id.
 
 ---
 

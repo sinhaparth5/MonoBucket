@@ -12,7 +12,7 @@
 		type ObjectDetail,
 		type Presigned,
 		type StoredObject
-	} from '$lib/api';
+	} from '#lib/api.ts';
 	import {
 		fillFraction,
 		formatBytes,
@@ -22,12 +22,12 @@
 		plural,
 		splitAllocation,
 		type AllocationUnit
-	} from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import { copyText, objectUrl, s3Endpoint } from '$lib/s3url';
-	import AllocationField from '$lib/components/AllocationField.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Uploader from '$lib/components/Uploader.svelte';
+	} from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import { copyText, objectUrl, s3Endpoint } from '#lib/s3url.ts';
+	import AllocationField from '#lib/components/AllocationField.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Uploader from '#lib/components/Uploader.svelte';
 
 	let { data } = $props();
 

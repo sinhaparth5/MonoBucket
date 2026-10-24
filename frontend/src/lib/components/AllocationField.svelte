@@ -5,7 +5,12 @@
 	// resize dialog have to agree on what "4" means and on which figures are
 	// refusable. A second copy would eventually round differently from the first
 	// and the server would be the one to say so.
-	import { ALLOCATION_UNITS, allocationBytes, formatBytes, type AllocationUnit } from '$lib/format';
+	import {
+		ALLOCATION_UNITS,
+		allocationBytes,
+		formatBytes,
+		type AllocationUnit
+	} from '#lib/format.ts';
 
 	interface Props {
 		/// The chosen allocation in bytes. Bound, so the parent sends exactly

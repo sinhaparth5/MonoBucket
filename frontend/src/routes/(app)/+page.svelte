@@ -2,8 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError, type Overview, type Sample, type Series } from '$lib/api';
-	import { motionDistance, motionDuration } from '$lib/motion';
+	import { api, ApiError, type Overview, type Sample, type Series } from '#lib/api.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
 	import {
 		formatBytes,
 		formatClock,
@@ -12,11 +12,11 @@
 		formatPercent,
 		formatRate,
 		plural
-	} from '$lib/format';
-	import SeriesChart from '$lib/components/SeriesChart.svelte';
-	import ThroughputChart from '$lib/components/ThroughputChart.svelte';
-	import StatTile from '$lib/components/StatTile.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+	} from '#lib/format.ts';
+	import SeriesChart from '#lib/components/SeriesChart.svelte';
+	import ThroughputChart from '#lib/components/ThroughputChart.svelte';
+	import StatTile from '#lib/components/StatTile.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let overview = $state<Overview | null>(null);
 	let series = $state<Series | null>(null);

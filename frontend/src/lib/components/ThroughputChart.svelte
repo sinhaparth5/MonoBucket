@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { Area, Axis, Chart, Highlight, Spline, Svg, Tooltip } from 'layerchart';
 	import { fade } from 'svelte/transition';
-	import { formatBytes, formatClock } from '$lib/format';
-	import { motionDuration } from '$lib/motion';
+	import { formatBytes, formatClock } from '#lib/format.ts';
+	import { motionDuration } from '#lib/motion.ts';
 	import Icon from './Icon.svelte';
 
 	interface Point {

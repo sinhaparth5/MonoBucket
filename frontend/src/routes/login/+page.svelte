@@ -11,10 +11,10 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { fade, fly } from 'svelte/transition';
-	import { api, ApiError } from '$lib/api';
-	import { motionDelay, motionDistance, motionDuration } from '$lib/motion';
-	import Icon from '$lib/components/Icon.svelte';
-	import logo from '$lib/assets/monobucket-logo.svg';
+	import { api, ApiError } from '#lib/api.ts';
+	import { motionDelay, motionDistance, motionDuration } from '#lib/motion.ts';
+	import Icon from '#lib/components/Icon.svelte';
+	import logo from '#lib/assets/monobucket-logo.svg';
 
 	let username = $state('');
 	let secret = $state('');
@@ -30,7 +30,7 @@
 		error = '';
 		try {
 			await api.login(username, secret);
-			await goto(resolve('/'));
+			await goto(resolve('/(app)'));
 		} catch (cause) {
 			error = cause instanceof ApiError ? cause.message : 'sign in failed';
 		} finally {

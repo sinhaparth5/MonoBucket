@@ -3,11 +3,11 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { fly, scale } from 'svelte/transition';
-	import { api, can, type PermissionName } from '$lib/api';
-	import { motionDistance, motionDuration } from '$lib/motion';
-	import { theme, type ThemeChoice } from '$lib/theme.svelte';
-	import Icon, { type IconName } from '$lib/components/Icon.svelte';
-	import logo from '$lib/assets/monobucket-logo.svg';
+	import { api, can, type PermissionName } from '#lib/api.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
+	import { theme, type ThemeChoice } from '#lib/theme.svelte.ts';
+	import Icon, { type IconName } from '#lib/components/Icon.svelte';
+	import logo from '#lib/assets/monobucket-logo.svg';
 
 	let { data, children } = $props();
 
@@ -22,7 +22,7 @@
 	// find — the filter is the courtesy, never the enforcement.
 	const NAV = [
 		{
-			href: '/',
+			href: '/(app)',
 			label: 'Overview',
 			icon: 'overview',
 			hint: 'Live traffic, memory and capacity',
@@ -76,9 +76,10 @@
 	const currentNav = $derived(NAV.find((item) => isActive(item.href)) ?? NAV[0]);
 
 	// Matched on the route id, which the hrefs are: Kit 3.1 types `resolve()`
-	// against route ids, groups included. `/` would otherwise light up everywhere.
+	// against route ids, groups included. `/(app)` is a prefix of every route, so
+	// the overview matches only itself.
 	function isActive(href: string): boolean {
-		return href === '/' ? page.route.id === '/(app)' : !!page.route.id?.startsWith(href);
+		return href === '/(app)' ? page.route.id === href : !!page.route.id?.startsWith(href);
 	}
 
 	const THEME_CHOICES: { value: ThemeChoice; label: string; icon: IconName }[] = [

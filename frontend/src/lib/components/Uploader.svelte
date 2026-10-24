@@ -9,9 +9,9 @@
 	// for free is byte-accurate progress on the request body, which is the part
 	// anyone watching actually wants.
 	import { fly } from 'svelte/transition';
-	import { ApiError, uploadObject, type UploadHandle } from '$lib/api';
-	import { formatBytes, plural } from '$lib/format';
-	import { motionDistance, motionDuration } from '$lib/motion';
+	import { ApiError, uploadObject, type UploadHandle } from '#lib/api.ts';
+	import { formatBytes, plural } from '#lib/format.ts';
+	import { motionDistance, motionDuration } from '#lib/motion.ts';
 	import Icon from './Icon.svelte';
 
 	interface Props {

@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import { resolve } from '$app/paths';
-import { api } from '$lib/api';
+import { api } from '#lib/api.ts';
 
 // The guard for every signed-in view. It runs in the browser because the app is
 // a static SPA served out of the binary — there is no Node process to check a

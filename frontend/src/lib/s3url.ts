@@ -1,4 +1,4 @@
-import type { Session } from '$lib/api';
+import type { Session } from '#lib/api.ts';
 
 /// The address an S3 client would use for an object.
 ///

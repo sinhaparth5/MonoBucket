@@ -98,6 +98,12 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [2026.11.0] — 2026-11-19
+
 ### Security
 
 - Upgraded `@sveltejs/kit` 3.1.0 → 3.3.1 (GHSA-mw6w-2fmv-pvw3, GHSA-3r8g-jcqq-3p5j,

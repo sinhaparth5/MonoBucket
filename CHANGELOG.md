@@ -98,7 +98,13 @@ them, rather than at the foot of the file:
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- Upgraded `@sveltejs/kit` 3.1.0 → 3.3.1 (GHSA-mw6w-2fmv-pvw3, GHSA-3r8g-jcqq-3p5j,
+  GHSA-6cf5-gc4q-fm3x, GHSA-m9j8-jcmv-hp69, GHSA-rqp5-r3wg-vg35). The console is built with
+  `adapter-static` and uses no remote functions, so only the build-time server-only import guard
+  (GHSA-m9j8) touched this build path.
+- Node.js build image and CI runtime 24.22.1 → 24.22.3 (security release).
 
 ---
 
